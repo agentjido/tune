@@ -28,16 +28,16 @@ defmodule Tune.Optimizers.MIPROv2 do
   summary; proposals are grounded in the signature and examples.
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
   alias Tune.Example
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Optimizers.BootstrapFewShotWithRandomSearch
   alias Tune.Optimizers.ExampleSets
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Shared
   alias Tune.Optimizers.TPE
+  alias Tune.Search.Context
 
   @own [
     :num_candidates,
@@ -184,7 +184,8 @@ defmodule Tune.Optimizers.MIPROv2 do
       {evaluation, ctx} = Context.evaluate(ctx, build.(choice), batch)
 
       if evaluation.complete? do
-        score = evaluation.selection_score || evaluation.mean || ctx.failure_score || 0
+        score =
+          evaluation.selected_score || Tune.Evaluation.mean(evaluation) || ctx.failure_score || 0
 
         state = %{
           state

@@ -1,99 +1,94 @@
 # Tune
 
-Typed and optimizable language-model programs built on ReqLLM.
+Tune is a lazy evaluation and search pipeline for Elixir.
 
-Define typed predictors, compose them with ordinary Elixir code, inspect the
-exact prompts, evaluate on explicit datasets, tune instructions,
-demonstrations, and declared JSON values for one fixed model configuration,
-and load the learned parameters back into application code.
+Tune can evaluate and tune structured LLM programs on ReqLLM. It can also
+search plain Elixir values with no LLM. A pipeline is immutable. Builder
+functions only add data. `Tune.evaluate/2` and `Tune.tune/1` do the work.
 
 ```elixir
-{:ok, predictor} =
-  Tune.Predictor.new(
-    signature: [
-      instructions: "Classify the support ticket.",
-      inputs: [ticket: Zoi.string()],
-      outputs: [label: Zoi.enum(["billing", "bug", "other"])]
-    ]
-  )
+study =
+  Tune.new(program, model: target, teacher: teacher)
+  |> Tune.data(train: train, validation: validation, test: test)
+  |> Tune.score(:answer, &answer_score/2, range: {0.0, 1.0})
+  |> Tune.score(:citations, &citation_score/2, range: {0.0, 1.0})
+  |> Tune.select(weighted: [answer: 0.8, citations: 0.2])
+  |> Tune.search(:bootstrap_few_shot, max_bootstrapped_demos: 4)
+  |> Tune.limit(model_calls: 200)
 
-model = [model: "openai:gpt-4o-mini", adapter: Tune.Adapter.Chat]
-
-{:ok, result} = Tune.run(predictor, %{ticket: "I was charged twice"}, model: model)
-result.output
-#=> %{"label" => "billing"}
+{:ok, baseline} = Tune.evaluate(study)
+{:ok, result} = Tune.tune(study)
 ```
 
-## What is included
+The public workflow has twelve function names:
 
-- Typed JSON-compatible fields with Zoi; one validated output contract.
-- Pure Chat, JSON (text or structured), and XML prompt adapters.
-- Composition through the `Tune` behaviour and `Execution`, with
-  managed call, step, and deadline limits.
-- Evaluation with numeric or score/feedback metrics, explicit failure
-  scores, and eligibility rules.
-- Fifteen optimizer targets: LabeledFewShot, BootstrapFewShot,
-  BootstrapFewShotWithRandomSearch, BootstrapFewShotWithOptuna (native TPE),
-  KNNFewShot, COPRO, SignatureOptimizer, MIPROv2, InferRules, SIMBA, GEPA,
-  Avatar, Ensemble, Playbook, and Optimize.Anything.
-- Versioned parameter artifacts with allowlisted provenance.
-- A pure prepare/finish boundary for host inference paths.
+- `new`
+- `data`
+- `vary`
+- `score`
+- `select`
+- `search`
+- `limit`
+- `preview`
+- `evaluate`
+- `tune`
+- `dump`
+- `load`
 
-No Python runtime is used. Image, audio, and file inputs, weight training,
-and program structure search are not included.
+## Main capabilities
 
-## Guides
+- Typed structured prompts with Zoi.
+- Chat, JSON, and XML prompt adapters.
+- Exact prompt inspection before a model call.
+- Named scores, text feedback, failure scores, and retained row errors.
+- Faithfulness and context-precision judge scores through ReqLLM.
+- Fifteen prompt and example search targets.
+- Generic genetic search for maps and structs.
+- Enumerable and stream data sources.
+- Opaque Nx and Axon values in application runners.
+- Versioned JSON artifacts for learned, JSON-compatible values.
 
-- [Programs, predictors, and evaluation](guides/programs.md)
-- [Optimizers](guides/optimizers.md)
-- [Compatibility and differences](guides/compatibility.md)
-- [Parameter artifacts](guides/artifacts.md)
-- [Host integration](guides/host_integration.md)
+Tune uses no Python runtime. It has no runtime dependency on Jido, Nx, Axon,
+`jido_eval`, or `jido_evolve`.
 
-Start with the [runnable examples](examples/README.md):
+Tune does not own model transport, provider retries, tools, agent loops,
+storage, model training, or deployment. ReqLLM owns model transport and
+transport retries. The application owns runtime code, credentials, tools, and
+side effects.
+
+## Start here
+
+Run the offline examples from this directory:
 
 ```sh
 mix run examples/inspect_prompts.exs
-MIX_ENV=test mix run examples/offline_qa.exs
+MIX_ENV=test mix run examples/lazy_structured_prompt.exs
+mix run examples/generic_genetic.exs
 ```
 
-The first script renders and parses supplied replies without a model call.
-The second shows two-step QA, evaluation, optimization, prompt inspection,
-and artifact reload with local scripted replies. The examples guide also
-covers local Ollama models and an explicit live-provider comparison.
+The first example shows the exact prompt for each adapter. The second example
+tunes a two-step grounded QA program with two scores and scripted ReqLLM
+replies. The third example tunes a plain Elixir configuration.
 
-## Boundaries
+Read these guides for more detail:
 
-ReqLLM owns provider requests, responses, structured-output handling,
-transport retries, and caching. This package owns signatures, prompt
-formats, demonstrations, named parameters, evaluation, optimization, and
-artifacts. The application owns its code, model configuration, credentials,
-and runtime policy. Jido is an optional host; this package does not depend
-on it.
+- [Programs and evaluation](guides/programs.md)
+- [Search strategies](guides/optimizers.md)
+- [Compatibility and boundaries](guides/compatibility.md)
+- [Artifacts](guides/artifacts.md)
+- [Host integration](guides/host_integration.md)
 
 ## Local checks
 
 ```sh
 mix deps.get
-mix quality
 mix test
+mix quality
+mix docs
 ```
 
-`mix quality` runs formatting, warnings-as-errors compilation, Credo
-(strict), and Dialyzer. Tests are offline: model replies are scripted
-through `Req.Test` behind the public ReqLLM API. No provider key is needed.
+All default tests are offline. They use scripted replies through ReqLLM.
 
 ## Status
 
-Local, unpublished library. No license has been chosen and the package has
-not been published.
-
-The local project was renamed from `req_llm_program` to `tune`. Use the Mix
-application `:tune` and the `Tune` namespace. Existing callers must update
-their aliases, struct names, dependency paths, and commands. The live example
-opt-in variable is now `TUNE_LIVE`. See the artifact guide for version 1
-compatibility.
-
-Combining this package with `jido_eval` and `jido_evolve` remains a design
-proposal. Nx and Axon integration is also a future possibility. This rename
-does not add those capabilities or change the current scope.
+Tune is local and unpublished. No license has been selected.

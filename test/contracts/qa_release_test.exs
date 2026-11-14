@@ -2,17 +2,16 @@ defmodule Tune.Contracts.QAReleaseTest do
   use ExUnit.Case, async: true
 
   alias Tune.Adapter
-  alias Tune.Examples.Comparison
+  alias Tune.Artifact
   alias Tune.Examples.GroundedQA
-  alias Tune.Optimizers.BootstrapFewShotWithRandomSearch
   alias Tune.TestSupport.QAWorld
   alias Tune.TestSupport.Transport
 
   @moduledoc """
-  Offline reference proof: the grounded QA example compared before and after
-  optimization for each fixed target configuration, through all three prompt
-  formats, with prompt inspection, parse success, token use, and reload.
-  All model replies are scripted through Req.Test behind the public ReqLLM API.
+  Offline release proof for the public lazy pipeline.
+
+  It compares a two-step grounded QA program before and after search for each
+  prompt format. All replies use Req.Test through the public ReqLLM API.
   """
 
   defp target(adapter, options) do
@@ -31,77 +30,111 @@ defmodule Tune.Contracts.QAReleaseTest do
      ], stub}
   end
 
-  test "baseline and optimized QA for each fixed target configuration" do
-    targets = [
-      {"chat", Adapter.Chat, []},
-      {"json", Adapter.JSON, [mode: :text]},
-      {"xml", Adapter.XML, []}
-    ]
+  defp teacher do
+    stub = QAWorld.stub()
 
-    configured =
-      Enum.map(targets, fn {name, adapter, options} -> {name, target(adapter, options)} end)
-
-    teacher_stub = QAWorld.stub()
-
-    rows =
-      Comparison.run(
-        &GroundedQA.new/0,
-        Enum.map(configured, fn {name, {config, _stub}} -> {name, config} end),
-        optimizer:
-          {BootstrapFewShotWithRandomSearch,
-           accept_score: 1.0,
-           num_candidate_programs: 1,
-           max_bootstrapped_demos: 1,
-           max_labeled_demos: 0},
-        trainset:
-          QAWorld.rows([
-            {"What is Alpha?", "alpha", "first"},
-            {"What is Beta?", "beta", "second"}
-          ]),
-        valset: QAWorld.rows([{"What is Gamma?", "gamma", "third"}]),
-        testset:
-          QAWorld.rows([
-            {"What is Delta?", "delta", "fourth"},
-            {"What is Omega?", "omega", "last"}
-          ]),
-        metric: &QAWorld.metric/2,
-        teacher: [
-          model: Transport.model(),
-          adapter: Adapter.Chat,
-          request_options: Transport.request_options(teacher_stub)
-        ],
-        max_model_calls: 100
-      )
-
-    assert length(rows) == 3
-
-    for row <- rows do
-      assert row.baseline.selection_score == 0.0
-      assert row.baseline.parse_success == 1.0
-      assert row.optimized.selection_score == 1.0
-      assert row.optimized.eligible?
-      assert row.optimized.parse_success == 1.0
-      assert row.calls > 0
-      assert row.tokens > 0
-      assert row.reloaded?
-      assert row.model == "openai:gpt-4-turbo"
-      assert row.report.calls.teacher > 0
-      assert Map.keys(row.prompts) |> Enum.sort() == ["answer", "extract"]
-    end
-
-    [chat, json, xml] = rows
-    assert prompt(chat, "extract") =~ "[[ ## context ## ]]"
-    assert prompt(json, "answer") =~ "Outputs will be a JSON object"
-    assert prompt(xml, "extract") =~ "<context>"
-    assert Enum.any?(chat.prompts["answer"], &match?({:assistant, _}, &1))
-
-    table = Comparison.table(rows)
-
-    assert table =~
-             "chat | openai:gpt-4-turbo | Tune.Adapter.Chat | 0.000 | 1.000 | true | 100% -> 100%"
-
-    assert table =~ "xml | openai:gpt-4-turbo | Tune.Adapter.XML"
+    {[
+       model: Transport.model(),
+       adapter: Adapter.Chat,
+       request_options: Transport.request_options(stub)
+     ], stub}
   end
 
-  defp prompt(row, name), do: Enum.map_join(row.prompts[name], "\n", &elem(&1, 1))
+  test "the public pipeline tunes and reloads QA for every prompt format" do
+    train =
+      QAWorld.rows([
+        {"What is Alpha?", "alpha", "first"},
+        {"What is Beta?", "beta", "second"}
+      ])
+
+    validation = QAWorld.rows([{"What is Gamma?", "gamma", "third"}])
+
+    test =
+      QAWorld.rows([
+        {"What is Delta?", "delta", "fourth"},
+        {"What is Omega?", "omega", "last"}
+      ])
+
+    {teacher, _teacher_stub} = teacher()
+
+    for {adapter, options, marker} <- [
+          {Adapter.Chat, [], "[[ ## question ## ]]"},
+          {Adapter.JSON, [mode: :text], "Outputs will be a JSON object"},
+          {Adapter.XML, [], "<question>"}
+        ] do
+      {target, target_stub} = target(adapter, options)
+
+      pipeline =
+        GroundedQA.new()
+        |> Tune.new(model: target, teacher: teacher)
+        |> Tune.data(train: train, validation: validation)
+        |> scores()
+        |> Tune.search(:bootstrap_few_shot_random_search,
+          accept_score: 1.0,
+          num_candidate_programs: 1,
+          max_bootstrapped_demos: 1,
+          max_labeled_demos: 0
+        )
+        |> Tune.limit(model_calls: 100)
+
+      assert {:ok, baseline} = evaluate(GroundedQA.new(), target, test)
+      assert baseline.selected_score == 0.2
+
+      assert {:ok, result} = Tune.tune(pipeline)
+      assert {:ok, optimized} = evaluate(result.value, target, test)
+      assert optimized.selected_score == 1.0
+      assert optimized.eligible?
+      assert result.calls.teacher > 0
+
+      [observation | _] = optimized.observations
+      answer_step = Enum.find(observation.prediction.steps, &(&1.name == "answer"))
+
+      assert {:ok, prepared} =
+               result.value
+               |> Tune.new(model: target)
+               |> Tune.preview({"answer", answer_step.inputs})
+
+      prompt = Enum.map_join(prepared.context.messages, "\n", &message_text/1)
+      assert prompt =~ marker
+      assert Enum.any?(prepared.context.messages, &(&1.role == :assistant))
+
+      assert {:ok, artifact} = Tune.dump(result)
+      assert {:ok, json} = Artifact.encode(artifact)
+      assert {:ok, decoded} = Artifact.decode(json)
+      assert {:ok, loaded} = Tune.load(decoded, GroundedQA.new())
+      assert Tune.Program.parameters(loaded) == Tune.Program.parameters(result.value)
+
+      assert Transport.requests(target_stub) != []
+    end
+  end
+
+  defp scores(pipeline) do
+    pipeline
+    |> Tune.score(
+      :answer,
+      fn example, prediction ->
+        if prediction.output["answer"] == example.labels["answer"], do: 1.0, else: 0.0
+      end,
+      range: {0.0, 1.0}
+    )
+    |> Tune.score(
+      :citations,
+      fn example, prediction ->
+        if prediction.output["sources"] == example.labels["sources"], do: 1.0, else: 0.0
+      end,
+      range: {0.0, 1.0}
+    )
+    |> Tune.select(weighted: [answer: 0.8, citations: 0.2])
+  end
+
+  defp evaluate(program, target, test) do
+    program
+    |> Tune.new(model: target)
+    |> Tune.data(test: test)
+    |> scores()
+    |> Tune.limit(model_calls: 8)
+    |> Tune.evaluate()
+  end
+
+  defp message_text(message), do: Enum.map_join(message.content, "", & &1.text)
 end

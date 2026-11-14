@@ -39,7 +39,7 @@ defmodule Tune.Contracts.ArtifactTest do
       QAWorld.rows([{"What is Alpha?", "alpha", "first"}, {"What is Beta?", "beta", "second"}])
 
     {:ok, program, report} =
-      Tune.optimize(GroundedQA.new(),
+      Tune.TestSupport.Search.run(GroundedQA.new(),
         optimizer: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 2},
         trainset: rows,
         metric: &QAWorld.metric/2,
@@ -49,7 +49,7 @@ defmodule Tune.Contracts.ArtifactTest do
       )
 
     {:ok, lessons} = Parameter.put_value(program.lessons, ["Quote the passage id."])
-    {:ok, program} = Tune.replace_parameters(program, %{"lessons" => lessons})
+    {:ok, program} = Tune.Program.replace_parameters(program, %{"lessons" => lessons})
     {program, report}
   end
 

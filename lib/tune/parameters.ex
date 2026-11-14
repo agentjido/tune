@@ -27,9 +27,7 @@ defmodule Tune.Parameters do
   and lessons can contain application text; there is no content-based secret
   removal. Callers own file access.
 
-  New artifacts use `tune.parameters`. Version 1 artifacts with the former
-  `req_llm_program.parameters` identifier remain readable and are encoded with
-  the Tune identifier. Schema fingerprints and parameter payloads are unchanged.
+  Artifacts use the `tune.parameters` format identifier.
   """
 
   alias Tune
@@ -38,13 +36,12 @@ defmodule Tune.Parameters do
   alias Tune.Example
   alias Tune.Field
   alias Tune.ModelConfig
-  alias Tune.Optimizer.Report
   alias Tune.Parameter
   alias Tune.Predictor
+  alias Tune.Result
   alias Tune.Signature
 
   @format "tune.parameters"
-  @legacy_format "req_llm_program.parameters"
   @version 1
   @top_keys ["format", "version", "entries", "provenance"]
   @predictor_keys ["kind", "fingerprint", "instructions", "demos"]
@@ -82,9 +79,9 @@ defmodule Tune.Parameters do
 
     * `:provenance` - a map built by `provenance/1`
   """
-  @spec dump(Tune.t(), keyword()) :: {:ok, artifact()} | {:error, Exception.t()}
+  @spec dump(Tune.Program.t(), keyword()) :: {:ok, artifact()} | {:error, Exception.t()}
   def dump(program, opts \\ []) do
-    with {:ok, parameters} <- Tune.parameters(program),
+    with {:ok, parameters} <- Tune.Program.parameters(program),
          {:ok, provenance} <- check_provenance(Keyword.get(opts, :provenance)) do
       entries = Map.new(parameters, fn {name, value} -> {name, entry(value)} end)
 
@@ -123,8 +120,7 @@ defmodule Tune.Parameters do
 
   @doc "Encodes an artifact as canonical JSON."
   @spec encode(artifact()) :: {:ok, binary()} | {:error, Exception.t()}
-  def encode(%{"format" => format} = artifact) when format in [@format, @legacy_format],
-    do: {:ok, Example.canonical_json(Map.put(artifact, "format", @format))}
+  def encode(%{"format" => @format} = artifact), do: {:ok, Example.canonical_json(artifact)}
 
   def encode(other), do: invalid("not a parameter artifact: #{inspect(other)}")
 
@@ -157,14 +153,14 @@ defmodule Tune.Parameters do
 
   Returns the updated program, or an error and no change.
   """
-  @spec apply(Tune.t(), artifact()) :: {:ok, Tune.t()} | {:error, Exception.t()}
+  @spec apply(Tune.Program.t(), artifact()) :: {:ok, Tune.Program.t()} | {:error, Exception.t()}
   def apply(program, %{"entries" => entries} = artifact) when is_map(entries) do
     with :ok <- check_top(artifact),
          :ok <- check_entries(entries),
-         {:ok, parameters} <- Tune.parameters(program),
+         {:ok, parameters} <- Tune.Program.parameters(program),
          :ok <- same_names(parameters, entries),
          {:ok, updates} <- updates(parameters, entries) do
-      Tune.replace_parameters(program, updates)
+      Tune.Program.replace_parameters(program, updates)
     end
   end
 
@@ -231,25 +227,32 @@ defmodule Tune.Parameters do
     %{"kind" => "value", "fingerprint" => fingerprint(parameter), "value" => parameter.value}
   end
 
-  defp report_provenance(%Report{} = report) do
+  defp report_provenance(%Result{} = result) do
+    metadata = result.metadata
+    notes = Map.get(metadata, :notes, %{})
+    datasets = Map.get(metadata, :datasets, %{})
+    best = result.best
+    evaluation = best && best.evaluation
+    summary = evaluation && Tune.Evaluation.summary(evaluation, :objective)
+
     %{
-      "optimizer" => inspect(report.optimizer),
-      "settings" => Map.get(report.notes, :settings, %{}),
-      "seed" => report.seed,
-      "datasets" => Map.new(report.datasets, fn {key, value} -> {to_string(key), value} end),
+      "optimizer" => inspect(metadata[:strategy]),
+      "settings" => Map.get(notes, :settings, %{}),
+      "seed" => metadata[:seed],
+      "datasets" => Map.new(datasets, fn {key, value} -> {to_string(key), value} end),
       "best" =>
-        report.best &&
+        best &&
           %{
-            "id" => report.best.id,
-            "selection_score" => report.best.selection_score,
-            "mean" => report.best.mean,
-            "coverage" => report.best.coverage,
-            "eligible" => report.best.eligible?
+            "id" => best.id,
+            "selected_score" => evaluation.selected_score,
+            "mean" => summary && summary.mean,
+            "coverage" => summary && summary.coverage,
+            "eligible" => evaluation.eligible?
           },
-      "complete" => report.complete?,
-      "stop_reason" => to_string(report.stop_reason),
-      "calls" => Map.new(report.calls, fn {role, count} -> {to_string(role), count} end),
-      "usage" => Map.new(report.usage, fn {key, value} -> {to_string(key), value} end)
+      "complete" => result.complete?,
+      "stop_reason" => to_string(result.stop_reason),
+      "calls" => Map.new(result.calls, fn {role, count} -> {to_string(role), count} end),
+      "usage" => Map.new(result.usage, fn {key, value} -> {to_string(key), value} end)
     }
   end
 
@@ -266,7 +269,7 @@ defmodule Tune.Parameters do
       Map.keys(data) -- @top_keys != [] ->
         invalid("unknown artifact fields: #{inspect(Map.keys(data) -- @top_keys)}")
 
-      data["format"] not in [@format, @legacy_format] ->
+      data["format"] != @format ->
         invalid("unknown artifact format #{inspect(data["format"])}")
 
       data["version"] != @version ->

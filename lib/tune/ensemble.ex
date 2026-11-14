@@ -17,7 +17,7 @@ defmodule Tune.Ensemble do
   many members is kept, as DSPy's Ensemble does.
   """
 
-  @behaviour Tune
+  @behaviour Tune.Program
 
   alias Tune
   alias Tune.Error
@@ -27,21 +27,24 @@ defmodule Tune.Ensemble do
   @enforce_keys [:members, :reducer]
   defstruct [:members, :reducer]
 
-  @type t :: %__MODULE__{members: [Tune.t()], reducer: :majority | (list(map()) -> term())}
+  @type t :: %__MODULE__{
+          members: [Tune.Program.t()],
+          reducer: :majority | (list(map()) -> term())
+        }
 
   @doc """
   Builds an ensemble.
 
   Options: `:reducer` (`:majority` or a 1-arity function), `:size`, `:seed`.
   """
-  @spec new([Tune.t()], keyword()) :: {:ok, t()} | {:error, Exception.t()}
+  @spec new([Tune.Program.t()], keyword()) :: {:ok, t()} | {:error, Exception.t()}
   def new(members, opts \\ [])
 
   def new([first | _] = members, opts) do
     reducer = Keyword.get(opts, :reducer, :majority)
 
     with :ok <- check_reducer(reducer),
-         {:ok, signature} <- Tune.signature(first),
+         {:ok, signature} <- Tune.Program.signature(first),
          :ok <- check_members(members, signature),
          {:ok, members} <- sample(members, opts) do
       {:ok, %__MODULE__{members: members, reducer: reducer}}
@@ -52,7 +55,7 @@ defmodule Tune.Ensemble do
 
   @impl true
   def signature(%__MODULE__{members: [first | _]}) do
-    {:ok, signature} = Tune.signature(first)
+    {:ok, signature} = Tune.Program.signature(first)
     signature
   end
 
@@ -61,7 +64,7 @@ defmodule Tune.Ensemble do
     members
     |> Enum.with_index()
     |> Enum.flat_map(fn {member, index} ->
-      {:ok, parameters} = Tune.parameters(member)
+      {:ok, parameters} = Tune.Program.parameters(member)
       Enum.map(parameters, fn {name, value} -> {"m#{index}.#{name}", value} end)
     end)
     |> Map.new()
@@ -80,7 +83,7 @@ defmodule Tune.Ensemble do
             {String.replace_prefix(name, prefix, ""), value}
           end
 
-        {:ok, member} = Tune.replace_parameters(member, updates)
+        {:ok, member} = Tune.Program.replace_parameters(member, updates)
         member
       end)
 
@@ -144,9 +147,9 @@ defmodule Tune.Ensemble do
 
   defp check_members(members, signature) do
     Enum.reduce_while(members, :ok, fn member, :ok ->
-      case Tune.signature(member) do
+      case Tune.Program.signature(member) do
         {:ok, other} ->
-          if Tune.same_fields?(signature, other),
+          if Tune.Program.same_fields?(signature, other),
             do: {:cont, :ok},
             else: {:halt, invalid("ensemble members must declare the same fields")}
 

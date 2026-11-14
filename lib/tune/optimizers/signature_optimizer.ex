@@ -11,7 +11,7 @@ defmodule Tune.Optimizers.SignatureOptimizer do
   (default 2), `:evidence_examples` (default 3).
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
   alias Tune.Optimizers.COPRO
   alias Tune.Optimizers.Shared

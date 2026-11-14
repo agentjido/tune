@@ -10,16 +10,16 @@ defmodule Tune.Metric do
 
   alias Tune.Error
   alias Tune.Example
-  alias Tune.Result
+  alias Tune.Prediction
 
   @enforce_keys [:fun]
   defstruct [:fun]
 
-  @type t :: %__MODULE__{fun: (Example.t(), Result.t() -> term())}
+  @type t :: %__MODULE__{fun: (Example.t(), Prediction.t() -> term())}
   @type score :: %{score: number(), feedback: String.t() | nil}
 
   @doc "Normalizes a metric function or an existing metric."
-  @spec new(t() | (Example.t(), Result.t() -> term())) :: {:ok, t()} | {:error, Exception.t()}
+  @spec new(t() | (Example.t(), Prediction.t() -> term())) :: {:ok, t()} | {:error, Exception.t()}
   def new(%__MODULE__{} = metric), do: {:ok, metric}
   def new(fun) when is_function(fun, 2), do: {:ok, %__MODULE__{fun: fun}}
 
@@ -32,8 +32,8 @@ defmodule Tune.Metric do
        )}
 
   @doc "Scores one result. Returns a normalized score or a metric error."
-  @spec score(t(), Example.t(), Result.t()) :: {:ok, score()} | {:error, Exception.t()}
-  def score(%__MODULE__{fun: fun}, %Example{} = example, %Result{} = result) do
+  @spec score(t(), Example.t(), Prediction.t()) :: {:ok, score()} | {:error, Exception.t()}
+  def score(%__MODULE__{fun: fun}, %Example{} = example, %Prediction{} = result) do
     fun.(example, result)
   rescue
     error -> metric_error("the metric raised: #{Exception.message(error)}", error)

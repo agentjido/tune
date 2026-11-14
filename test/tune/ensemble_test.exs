@@ -56,14 +56,14 @@ defmodule Tune.EnsembleTest do
     {:ok, ensemble} = Ensemble.new([member("Vote A"), member("Vote B"), member("Vote C")])
 
     stub = voting_stub([{"Vote A", "bug"}, {"Vote B", "billing"}, {"Vote C", "billing"}])
-    assert {:ok, result} = Tune.run(ensemble, %{ticket: "x"}, model: config(stub))
+    assert {:ok, result} = Tune.Runtime.run(ensemble, %{ticket: "x"}, model: config(stub))
     assert result.output == %{"label" => "billing"}
     assert Enum.map(result.steps, & &1.name) == ["m0.root", "m1.root", "m2.root"]
 
     tie = voting_stub([{"Vote A", "bug"}, {"Vote B", "billing"}, {"Vote C", "other"}])
 
     assert {:ok, %{output: %{"label" => "bug"}}} =
-             Tune.run(ensemble, %{ticket: "x"}, model: config(tie))
+             Tune.Runtime.run(ensemble, %{ticket: "x"}, model: config(tie))
   end
 
   test "a custom reducer is trusted code and its failures are reported" do
@@ -73,13 +73,13 @@ defmodule Tune.EnsembleTest do
     {:ok, ensemble} = Ensemble.new([member("Vote A"), member("Vote B")], reducer: joined)
 
     assert {:ok, %{output: %{"label" => "bug+billing"}}} =
-             Tune.run(ensemble, %{ticket: "x"}, model: config(stub))
+             Tune.Runtime.run(ensemble, %{ticket: "x"}, model: config(stub))
 
     {:ok, failing} =
       Ensemble.new([member("Vote A"), member("Vote B")], reducer: fn _ -> raise "no" end)
 
     assert {:error, %Error.Execution.Failed{cause: %Error.Execution.Callback{}, result: result}} =
-             Tune.run(failing, %{ticket: "x"}, model: config(stub))
+             Tune.Runtime.run(failing, %{ticket: "x"}, model: config(stub))
 
     assert length(result.steps) == 2
   end
@@ -93,7 +93,7 @@ defmodule Tune.EnsembleTest do
               cause: %Error.Execution.LimitReached{limit: :model_calls},
               result: result
             }} =
-             Tune.run(ensemble, %{ticket: "x"}, model: config(stub), max_model_calls: 2)
+             Tune.Runtime.run(ensemble, %{ticket: "x"}, model: config(stub), max_model_calls: 2)
 
     assert result.calls == %{target: 2}
     assert length(Transport.requests(stub)) == 2
@@ -101,11 +101,11 @@ defmodule Tune.EnsembleTest do
 
   test "prefixed names replace members immutably and survive an artifact reload" do
     {:ok, ensemble} = Ensemble.new([member("Vote A"), member("Vote B")])
-    {:ok, parameters} = Tune.parameters(ensemble)
+    {:ok, parameters} = Tune.Program.parameters(ensemble)
     assert Map.keys(parameters) |> Enum.sort() == ["m0.root", "m1.root"]
 
     {:ok, changed} = Predictor.put_instructions(member("Vote B"), "Vote B carefully.")
-    {:ok, updated} = Tune.replace_parameters(ensemble, %{"m1.root" => changed})
+    {:ok, updated} = Tune.Program.replace_parameters(ensemble, %{"m1.root" => changed})
     assert Enum.at(updated.members, 1).signature.instructions == "Vote B carefully."
     assert Enum.at(ensemble.members, 1).signature.instructions == "Vote B"
 
@@ -126,19 +126,33 @@ defmodule Tune.EnsembleTest do
     assert indexes == Enum.sort(indexes)
   end
 
+  test "the ensemble strategy is available through the lazy pipeline" do
+    assert {:ok, result} =
+             member("Vote A")
+             |> Tune.new(model: config(:unused))
+             |> Tune.search(:ensemble, members: [member("Vote B"), member("Vote C")], size: 2)
+             |> Tune.tune()
+
+    assert %Ensemble{members: members} = result.value
+    assert length(members) == 2
+    assert result.complete?
+    assert result.calls == %{}
+  end
+
   test "an ensemble evaluates like any program" do
     stub = voting_stub([{"Vote", "billing"}])
     {:ok, ensemble} = Ensemble.new([member("Vote A"), member("Vote B")])
 
     assert {:ok, evaluation} =
-             Tune.evaluate(ensemble, [%{inputs: %{ticket: "x"}, labels: %{label: "billing"}}],
-               model: config(stub),
-               metric: fn ex, res ->
-                 if res.output["label"] == ex.labels["label"], do: 1, else: 0
-               end
-             )
+             ensemble
+             |> Tune.new(model: config(stub))
+             |> Tune.data(test: [%{inputs: %{ticket: "x"}, labels: %{label: "billing"}}])
+             |> Tune.score(:accuracy, fn example, prediction ->
+               if prediction.output["label"] == example.labels["label"], do: 1, else: 0
+             end)
+             |> Tune.evaluate()
 
-    assert evaluation.selection_score == 1.0
-    assert evaluation.calls == 2
+    assert evaluation.selected_score == 1.0
+    assert evaluation.calls == %{target: 2}
   end
 end

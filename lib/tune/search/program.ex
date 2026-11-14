@@ -1,12 +1,12 @@
-defmodule Tune.Optimize do
+defmodule Tune.Search.Program do
   @moduledoc false
 
   alias Tune
   alias Tune.Error
   alias Tune.Example
   alias Tune.Metric
-  alias Tune.Optimizer.Context
-  alias Tune.Optimizer.Report
+  alias Tune.Result
+  alias Tune.Search.Context
 
   @options [
     :optimizer,
@@ -14,6 +14,8 @@ defmodule Tune.Optimize do
     :valset,
     :metric,
     :failure_score,
+    :scores,
+    :selector,
     :model,
     :teacher,
     :proposal,
@@ -24,15 +26,15 @@ defmodule Tune.Optimize do
     :row_timeout
   ]
 
-  @spec run(Tune.t(), keyword()) :: {:ok, Tune.t(), Report.t()} | {:error, Exception.t()}
+  @spec run(Tune.Program.t(), keyword()) :: {:ok, Result.t()} | {:error, Exception.t()}
   def run(program, opts) do
     with :ok <- reject_testset(opts),
          :ok <- check_keys(opts),
          {:ok, module, config} <- optimizer(opts),
          requirements = module.requirements(config),
          {:ok, run_options} <- run_options(opts, requirements),
-         {:ok, signature} <- Tune.signature(program),
-         {:ok, _parameters} <- Tune.parameters(program),
+         {:ok, signature} <- Tune.Program.signature(program),
+         {:ok, _parameters} <- Tune.Program.parameters(program),
          {:ok, metric} <- metric(opts, requirements),
          {:ok, failure_score} <- failure_score(opts),
          {:ok, max_calls} <- max_calls(opts, requirements),
@@ -45,10 +47,13 @@ defmodule Tune.Optimize do
           optimizer: module,
           metric: metric,
           failure_score: failure_score,
+          scores: Keyword.get(opts, :scores, []),
+          selector: Keyword.get(opts, :selector),
           run_options: run_options,
           max_model_calls: max_calls,
           seed: seed,
           row_timeout: Keyword.get(opts, :row_timeout, 120_000),
+          deadline: Keyword.get(opts, :timeout),
           trainset: trainset,
           valset: valset,
           notes: %{train_duplicates_removed: duplicates, settings: settings(config)}
@@ -56,47 +61,45 @@ defmodule Tune.Optimize do
 
       case module.compile(config, program, ctx) do
         {:ok, optimized, ctx} ->
-          {:ok, optimized, report(ctx, true)}
+          {:ok, result(ctx, optimized, true)}
 
         {:error, %Error.Optimization.Failed{} = error, ctx} ->
-          {:error, %{error | report: report(ctx, false)}}
+          {:error, %{error | report: result(ctx, nil, false)}}
 
         {:error, cause, ctx} ->
           {:error,
            Error.Optimization.Failed.exception(
              message: "optimization failed: #{describe(cause)}",
              cause: cause,
-             report: report(ctx, false)
+             report: result(ctx, nil, false)
            )}
       end
     end
   end
 
-  defp report(%Context{} = ctx, ok?) do
-    best =
-      case ctx.best do
-        {summary, _program, _evaluation} -> summary
-        nil -> nil
+  defp result(%Context{} = ctx, value, ok?) do
+    parameters =
+      case value && Tune.Program.parameters(value) do
+        {:ok, parameters} -> parameters
+        _ -> %{}
       end
 
-    %Report{
-      optimizer: ctx.optimizer,
+    Context.result(ctx, value, parameters,
       complete?: ok? and ctx.stop_reason == nil,
       stop_reason: ctx.stop_reason || if(ok?, do: :completed, else: :failed),
-      best: best,
-      seed: ctx.seed,
-      max_model_calls: ctx.max_model_calls,
-      candidates: Enum.reverse(ctx.candidates),
-      calls: ctx.calls,
-      usage: ctx.usage,
-      datasets: %{
-        train: length(ctx.trainset),
-        validation: length(ctx.valset),
-        train_fingerprint: fingerprint(ctx.trainset),
-        validation_fingerprint: fingerprint(ctx.valset)
-      },
-      notes: ctx.notes
-    }
+      metadata: %{
+        strategy: ctx.optimizer,
+        seed: ctx.seed,
+        max_model_calls: ctx.max_model_calls,
+        datasets: %{
+          train: length(ctx.trainset),
+          validation: length(ctx.valset),
+          train_fingerprint: fingerprint(ctx.trainset),
+          validation_fingerprint: fingerprint(ctx.valset)
+        },
+        notes: ctx.notes
+      }
+    )
   end
 
   defp settings(config) when is_map(config) do
@@ -157,7 +160,7 @@ defmodule Tune.Optimize do
 
       not (Code.ensure_loaded?(module) and function_exported?(module, :compile, 3) and
              function_exported?(module, :init, 1) and function_exported?(module, :requirements, 1)) ->
-        option_error(:optimizer, "#{inspect(module)} is not a Tune.Optimizer")
+        option_error(:optimizer, "#{inspect(module)} is not a Tune.Search.ProgramStrategy")
 
       true ->
         with {:ok, config} <- module.init(config), do: {:ok, module, config}
@@ -167,7 +170,7 @@ defmodule Tune.Optimize do
   defp run_options(opts, requirements) do
     run_keys = [:model, :teacher, :proposal, :max_steps, :timeout]
 
-    with {:ok, options} <- Tune.normalize_run_options(Keyword.take(opts, run_keys)) do
+    with {:ok, options} <- Tune.Runtime.normalize_options(Keyword.take(opts, run_keys)) do
       models = Keyword.fetch!(options, :models)
 
       case Enum.find(requirements.roles, &(not Map.has_key?(models, &1))) do

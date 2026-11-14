@@ -16,7 +16,7 @@ defmodule Tune.KNN do
   default vectorizer is a bag of lowercase words over the input values.
   """
 
-  @behaviour Tune
+  @behaviour Tune.Program
 
   alias Tune
   alias Tune.Error
@@ -41,10 +41,10 @@ defmodule Tune.KNN do
   `:max_labeled_demos`, and `:vectorizer` (a function of an input map returning
   a list of numbers, or a map of term to weight).
   """
-  @spec new(Tune.t(), keyword()) :: {:ok, t()} | {:error, Exception.t()}
+  @spec new(Tune.Program.t(), keyword()) :: {:ok, t()} | {:error, Exception.t()}
   def new(inner, opts) do
-    with {:ok, signature} <- Tune.signature(inner),
-         {:ok, parameters} <- Tune.parameters(inner),
+    with {:ok, signature} <- Tune.Program.signature(inner),
+         {:ok, parameters} <- Tune.Program.parameters(inner),
          :ok <-
            if(Map.has_key?(parameters, @pool),
              do: invalid("the inner program already declares #{@pool}"),
@@ -76,20 +76,20 @@ defmodule Tune.KNN do
 
   @impl true
   def signature(%__MODULE__{inner: inner}) do
-    {:ok, signature} = Tune.signature(inner)
+    {:ok, signature} = Tune.Program.signature(inner)
     signature
   end
 
   @impl true
   def parameters(%__MODULE__{inner: inner, pool: pool}) do
-    {:ok, parameters} = Tune.parameters(inner)
+    {:ok, parameters} = Tune.Program.parameters(inner)
     Map.put(parameters, @pool, pool)
   end
 
   @impl true
   def put_parameters(%__MODULE__{inner: inner} = program, parameters) do
     {pool, inner_parameters} = Map.pop!(parameters, @pool)
-    {:ok, inner} = Tune.replace_parameters(inner, inner_parameters)
+    {:ok, inner} = Tune.Program.replace_parameters(inner, inner_parameters)
     %{program | inner: inner, pool: pool}
   end
 
@@ -171,7 +171,7 @@ defmodule Tune.KNN do
           demos =
             new_steps
             |> Enum.map(&%{&1 | name: String.replace_prefix(&1.name, @scope <> ".", "")})
-            |> then(&Shared.trajectory_demos(%Tune.Result{steps: &1}, names))
+            |> then(&Shared.trajectory_demos(%Tune.Prediction{steps: &1}, names))
 
           {Enum.reduce(demos, acc, fn {name, demo}, acc ->
              Map.update(acc, name, [demo], &[demo | &1])

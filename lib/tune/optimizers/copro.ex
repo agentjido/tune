@@ -18,11 +18,11 @@ defmodule Tune.Optimizers.COPRO do
   than `n` sampled completions; no temperature is changed.
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Shared
+  alias Tune.Search.Context
 
   @options [:breadth, :depth, :evidence_examples, :predictors]
 
@@ -110,7 +110,7 @@ defmodule Tune.Optimizers.COPRO do
             instruction: instruction
           })
 
-        state = update_in(state.attempts[name], &[{instruction, evaluation.selection_score} | &1])
+        state = update_in(state.attempts[name], &[{instruction, evaluation.selected_score} | &1])
 
         state =
           if ctx.best != before, do: %{state | current: candidate, current_id: id}, else: state

@@ -1,7 +1,6 @@
 # Run with: mix run examples/inspect_prompts.exs
-# This example makes no model requests. Replies are supplied below.
+# This example makes no model requests.
 
-alias ReqLLM.Context
 alias Tune.Adapter
 alias Tune.ModelConfig
 alias Tune.Predictor
@@ -22,13 +21,12 @@ alias Tune.Predictor
   )
 
 formats = [
-  {"Chat", Adapter.Chat, [],
-   "[[ ## label ## ]]\nbilling\n\n[[ ## urgent ## ]]\nfalse\n\n[[ ## completed ## ]]"},
-  {"JSON", Adapter.JSON, [mode: :text], ~s({"label":"billing","urgent":false})},
-  {"XML", Adapter.XML, [], "<label>\nbilling\n</label>\n\n<urgent>\nfalse\n</urgent>"}
+  {"Chat", Adapter.Chat, []},
+  {"JSON", Adapter.JSON, [mode: :text]},
+  {"XML", Adapter.XML, []}
 ]
 
-for {name, adapter, options, reply} <- formats do
+for {name, adapter, options} <- formats do
   {:ok, model} =
     ModelConfig.new(
       model: "openai:gpt-4o-mini",
@@ -37,7 +35,9 @@ for {name, adapter, options, reply} <- formats do
     )
 
   {:ok, prepared} =
-    Predictor.prepare(predictor, %{ticket: "I was charged twice this month."}, model)
+    predictor
+    |> Tune.new(model: model)
+    |> Tune.preview(%{ticket: "I was charged twice this month."})
 
   IO.puts("\n=== #{name}: rendered prompt ===")
 
@@ -45,17 +45,6 @@ for {name, adapter, options, reply} <- formats do
     IO.puts("\n[#{message.role}]")
     IO.puts(Enum.map_join(message.content, "", & &1.text))
   end
-
-  response = %ReqLLM.Response{
-    id: "supplied-example-reply",
-    model: model.model_id,
-    context: prepared.context,
-    message: Context.assistant(reply),
-    finish_reason: :stop
-  }
-
-  {:ok, step} = Predictor.finish(prepared, response)
-  IO.puts("Validated supplied reply: #{inspect(step.outputs)}")
 end
 
 IO.puts("\nModel requests: 0. Change the instructions or adapter to inspect another prompt.")

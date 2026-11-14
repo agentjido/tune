@@ -15,14 +15,14 @@ defmodule Tune.Optimizers.InferRules do
   BootstrapFewShot options (`:accept_score` required).
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Optimizers.BootstrapFewShotWithRandomSearch
   alias Tune.Optimizers.ExampleSets
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Shared
+  alias Tune.Search.Context
 
   @own [:num_candidates, :num_rules]
   @rules_header "Please adhere to the following rules when making your prediction:"

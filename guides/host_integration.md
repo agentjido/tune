@@ -1,6 +1,25 @@
 # Host integration
 
-A host such as a Jido agent can keep its own inference path and controls.
+Tune does not own an agent runtime. A Jido agent or another host can expose its
+normal run function to Tune.
+
+```elixir
+study =
+  Tune.new(agent_config, run: fn config, task -> MyAgent.run(config, task) end)
+  |> Tune.data(validation: validation_tasks)
+  |> Tune.score(:correctness, &MyScores.correctness/2)
+  |> Tune.vary(system_prompt: Tune.Space.Text.new(prompt_candidates))
+  |> Tune.search(:genetic)
+  |> Tune.limit(evaluations: 100)
+```
+
+The host keeps control of tools, authorization, sessions, memory, lifecycle,
+and side effects. Tune receives only the target, case input, output, and score
+evidence that the application gives it.
+
+## Hosted structured inference
+
+A host can keep its own inference path for a structured Tune predictor.
 
 ```elixir
 {:ok, prepared} = Tune.Predictor.prepare(predictor, inputs, model)
@@ -11,19 +30,24 @@ with :ok <- MyHost.authorize(prepared),
 end
 ```
 
-- `prepare/3` is pure. It renders the ReqLLM context and output descriptor
-  and holds no model, credentials, or request options.
-- The host chooses its fixed model configuration, applies guards, budgets,
-  and telemetry, and executes the request once. It should pass
-  `json_repair: false` and, for structured output, `output_validation: :strict`
-  to keep the same output contract as direct runs.
-- `finish/2` makes no model request. A host denial never produces a step.
-- Repair or extraction is another explicit program step, never hidden in an
-  adapter.
-- Host instructions, authorization, sessions, tools, and lifecycle are not
-  learnable parameters.
+`prepare/3` is pure. It renders a ReqLLM context and an output descriptor. It
+holds no credentials. `finish/2` parses and validates one supplied response. It
+makes no model request.
 
-`Tune.run/3` is a thin direct path through `ReqLLM.generate_text/3`.
-It is not evidence that a host's controls were applied. This package has no
-Jido dependency; actual Jido integration is separate work that must exercise
-Jido's own inference path.
+The host must keep the same output contract as direct Tune execution. It must
+disable JSON repair and use strict output validation for structured output.
+
+Repair or extraction is an explicit program step. It is not hidden in an
+adapter. A host denial does not create a Tune step.
+
+## Effect accounting
+
+Tune can count model calls that pass through Tune programs and Tune judge
+scores. Tune cannot inspect hidden calls in an opaque application runner. The
+host must enforce its own call, tool, time, and cost limits for those effects.
+
+If a runner returns `%Tune.Prediction{}`, Tune uses its call and usage fields.
+Other runner outputs remain opaque.
+
+Tune has no Jido dependency. A Jido integration must test the real Jido
+inference path and its controls.

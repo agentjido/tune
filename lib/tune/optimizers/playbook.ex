@@ -24,13 +24,13 @@ defmodule Tune.Optimizers.Playbook do
   returned program or artifact.
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Reflective
   alias Tune.Optimizers.Shared
   alias Tune.Parameter
+  alias Tune.Search.Context
 
   @options [:parameter, :rounds, :max_lessons, :max_new, :max_lesson_bytes, :max_total_bytes]
 

@@ -33,7 +33,7 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
       ])
 
   defp optimize(optimizer, target, proposal, extra \\ []) do
-    Tune.optimize(GroundedQA.new(),
+    Tune.TestSupport.Search.run(GroundedQA.new(),
       optimizer: optimizer,
       trainset: Keyword.get(extra, :train, train()),
       valset: val(),
@@ -76,7 +76,7 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
 
       assert best.answer.signature.instructions == "Say the fact from the passage and cite it."
       assert best.extract == GroundedQA.new().extract
-      assert report.best.label == "avatar_1"
+      assert report.best.metadata.label == "avatar_1"
 
       [contrast, rewrite] = Transport.requests(proposal)
       contrast_text = Transport.last_user_text(contrast)
@@ -101,7 +101,7 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
                  avatar_proposal()
                )
 
-      [record] = report.notes.iterations
+      [record] = report.metadata.notes.iterations
       assert "0" in record.negative
       refute "0" in record.positive
       assert record.positive == ["1"]
@@ -119,7 +119,7 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
                )
 
       assert best == GroundedQA.new()
-      assert report.notes.stop == :no_contrast
+      assert report.metadata.notes.stop == :no_contrast
       assert report.calls[:proposal] == nil
     end
 
@@ -154,8 +154,8 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
                optimize({Playbook, parameter: "lessons", rounds: 1}, lesson_target(), proposal)
 
       assert best.lessons.value == ["Quote the source."]
-      assert report.best.label == "round_1"
-      assert hd(report.candidates).label == "baseline"
+      assert report.best.metadata.label == "round_1"
+      assert hd(report.history).metadata.label == "baseline"
 
       for body <- Transport.requests(proposal) do
         text = Transport.prompt_text(body)
@@ -192,7 +192,7 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
                  optimize({Playbook, parameter: "lessons", rounds: 1}, lesson_target(), proposal)
 
         assert best.lessons.value == []
-        assert [%{accepted?: false, reason: message}] = report.notes.rounds
+        assert [%{accepted?: false, reason: message}] = report.metadata.notes.rounds
         assert message =~ reason
       end
     end

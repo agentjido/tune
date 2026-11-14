@@ -94,7 +94,7 @@ defmodule Tune.Error do
     A program run failed after it started.
 
     `cause` is the original error, unchanged, including ReqLLM provider errors.
-    `result` is the partial `Tune.Result` with every completed step.
+    `result` is the partial `Tune.Prediction` with every completed step.
     """
     use Splode.Error, fields: [:cause, :result, :step], class: :execution
 

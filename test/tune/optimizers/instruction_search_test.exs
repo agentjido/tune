@@ -59,17 +59,17 @@ defmodule Tune.Optimizers.InstructionSearchTest do
       end)
 
     assert {:ok, best, report} =
-             Tune.optimize(
+             Tune.TestSupport.Search.run(
                GroundedQA.new(),
                [optimizer: {COPRO, breadth: 3, depth: 1}] ++ base(target(), proposal)
              )
 
     assert best.answer.signature.instructions == "Cite the passage id and answer from the facts."
     assert best.extract.signature.instructions == GroundedQA.new().extract.signature.instructions
-    assert report.best.selection_score == 1.0
-    assert hd(report.candidates).label == "baseline"
-    assert hd(report.candidates).selection_score == 0.0
-    assert length(report.candidates) == 1 + 3 + 2
+    assert report.best.evaluation.selected_score == 1.0
+    assert hd(report.history).metadata.label == "baseline"
+    assert hd(report.history).evaluation.selected_score == 0.0
+    assert length(report.history) == 1 + 3 + 2
     assert report.calls.proposal == 2
   end
 
@@ -82,7 +82,7 @@ defmodule Tune.Optimizers.InstructionSearchTest do
       end)
 
     assert {:ok, best, _report} =
-             Tune.optimize(
+             Tune.TestSupport.Search.run(
                GroundedQA.new(),
                [optimizer: {COPRO, breadth: 1, depth: 2, predictors: ["answer"]}] ++
                  base(target(), proposal)
@@ -98,7 +98,7 @@ defmodule Tune.Optimizers.InstructionSearchTest do
     proposal = proposer(fn _ -> ["Answer."] end)
 
     {:ok, _best, _report} =
-      Tune.optimize(
+      Tune.TestSupport.Search.run(
         GroundedQA.new(),
         [optimizer: {COPRO, breadth: 1, depth: 1}] ++ base(target(), proposal)
       )
@@ -115,13 +115,14 @@ defmodule Tune.Optimizers.InstructionSearchTest do
     proposal = Transport.respond_with(fn _ -> {:text, "I would suggest being clearer."} end)
 
     assert {:ok, best, report} =
-             Tune.optimize(
+             Tune.TestSupport.Search.run(
                GroundedQA.new(),
                [optimizer: {COPRO, breadth: 2, depth: 1}] ++ base(target(), proposal)
              )
 
     assert best == GroundedQA.new()
-    assert [%{label: "baseline"}] = report.candidates
+    assert [baseline] = report.history
+    assert baseline.metadata.label == "baseline"
     assert report.calls.proposal == 2
   end
 
@@ -129,7 +130,7 @@ defmodule Tune.Optimizers.InstructionSearchTest do
     proposal = proposer(fn _ -> ["Cite the passage id, then select or answer."] end)
 
     assert {:ok, best, report} =
-             Tune.optimize(
+             Tune.TestSupport.Search.run(
                GroundedQA.new(),
                [optimizer: {SignatureOptimizer, predictor: "extract", breadth: 1, depth: 1}] ++
                  base(target(), proposal)
@@ -142,14 +143,14 @@ defmodule Tune.Optimizers.InstructionSearchTest do
              &(Transport.prompt_text(&1) =~ "Outputs: `facts`")
            )
 
-    assert Enum.all?(tl(report.candidates), &(&1.predictor == "extract"))
+    assert Enum.all?(tl(report.history), &(&1.metadata.predictor == "extract"))
   end
 
   test "a limit keeps the best complete incumbent" do
     proposal = proposer(fn _ -> ["Cite the passage id and answer.", "Other."] end)
 
     assert {:ok, best, report} =
-             Tune.optimize(
+             Tune.TestSupport.Search.run(
                GroundedQA.new(),
                [optimizer: {COPRO, breadth: 2, depth: 2, predictors: ["answer"]}] ++
                  Keyword.put(base(target(), proposal), :max_model_calls, 4 + 1 + 4 + 2)
@@ -162,19 +163,19 @@ defmodule Tune.Optimizers.InstructionSearchTest do
 
   test "configuration is explicit" do
     assert {:error, %Error.Invalid.Option{option: :predictor}} =
-             Tune.optimize(
+             Tune.TestSupport.Search.run(
                GroundedQA.new(),
                [optimizer: SignatureOptimizer] ++ base(:unused, :unused)
              )
 
     assert {:error, %Error.Invalid.Option{option: :proposal}} =
-             Tune.optimize(
+             Tune.TestSupport.Search.run(
                GroundedQA.new(),
                [optimizer: COPRO] ++ Keyword.delete(base(:unused, :unused), :proposal)
              )
 
     assert {:error, %Error.Optimization.Failed{cause: %Error.Invalid.Option{option: :predictors}}} =
-             Tune.optimize(
+             Tune.TestSupport.Search.run(
                GroundedQA.new(),
                [optimizer: {COPRO, predictors: ["missing"]}] ++ base(:unused, :unused)
              )

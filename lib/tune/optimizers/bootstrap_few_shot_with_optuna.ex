@@ -21,14 +21,14 @@ defmodule Tune.Optimizers.BootstrapFewShotWithOptuna do
   required).
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Optimizers.BootstrapFewShotWithRandomSearch
   alias Tune.Optimizers.ExampleSets
   alias Tune.Optimizers.Shared
   alias Tune.Optimizers.TPE
+  alias Tune.Search.Context
 
   @own [:num_demo_sets, :num_trials, :n_startup]
 
@@ -111,7 +111,9 @@ defmodule Tune.Optimizers.BootstrapFewShotWithOptuna do
           {_id, ctx} = Context.consider(ctx, candidate, evaluation, %{choice: choice})
 
           if evaluation.complete? do
-            score = evaluation.selection_score || evaluation.mean || ctx.failure_score || 0
+            score =
+              evaluation.selected_score || Tune.Evaluation.mean(evaluation) || ctx.failure_score ||
+                0
 
             trials(
               config,

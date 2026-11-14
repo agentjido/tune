@@ -1,421 +1,781 @@
 defmodule Tune do
   @moduledoc """
-  Typed and optimizable language-model programs built on ReqLLM.
+  Lazy evaluation and search pipelines for Elixir values and LLM programs.
 
-  A program is either a `Tune.Predictor`, which is a one-step program
-  with the parameter name `"root"`, or an application struct whose module
-  implements this behaviour:
-
-    * `signature/1` returns the program's input/output `Signature`
-    * `parameters/1` returns a map of unique string names to `Predictor` or
-      `Parameter` values
-    * `put_parameters/2` returns an updated struct of the same module
-    * `call/3` receives the program, normalized inputs, and an `Execution`,
-      and returns `{:ok, output, execution}` or `{:error, error, execution}`
-
-  Composition is ordinary Elixir code:
-
-      def call(_program, inputs, execution) do
-        with {:ok, facts, execution} <- Execution.predict(execution, "extract", inputs),
-             {:ok, answer, execution} <-
-               Execution.predict(execution, "answer", Map.put(facts, "question", inputs["question"])) do
-          {:ok, answer, execution}
-        end
-      end
+  Start with `new/2`, add declarations, and end with `preview/2`, `evaluate/2`,
+  or `tune/1`. Builder calls only return a new `%Tune{}` value.
   """
 
+  alias Tune.Artifact
   alias Tune.Error
-  alias Tune.Execution
   alias Tune.ModelConfig
-  alias Tune.Parameter
+  alias Tune.Parameters
+  alias Tune.Pipeline.Score
   alias Tune.Predictor
+  alias Tune.Program
   alias Tune.Result
-  alias Tune.Signature
 
-  @root "root"
+  @enforce_keys [:target]
+  defstruct target: nil,
+            runner: nil,
+            data: %{},
+            variations: %{},
+            scores: [],
+            selector: nil,
+            strategy: nil,
+            limits: %{},
+            models: %{},
+            metadata: %{}
 
-  @type t :: Predictor.t() | struct()
-  @type parameters :: %{String.t() => Predictor.t() | Parameter.t()}
+  @type t :: %__MODULE__{
+          target: term(),
+          runner: function() | nil,
+          data: map(),
+          variations: map(),
+          scores: [map()],
+          selector: term(),
+          strategy: term(),
+          limits: map(),
+          models: map(),
+          metadata: map()
+        }
 
-  @callback signature(program :: struct()) :: Signature.t()
-  @callback parameters(program :: struct()) :: parameters()
-  @callback put_parameters(program :: struct(), parameters()) :: struct()
-  @callback call(program :: struct(), inputs :: map(), Execution.t()) ::
-              {:ok, map(), Execution.t()} | {:error, term(), Execution.t()}
+  @new_options [:run, :model, :teacher, :proposal, :metadata]
+  @data_roles [:train, :validation, :test]
+  @limit_options [
+    :model_calls,
+    :evaluations,
+    :cases,
+    :concurrency,
+    :row_timeout,
+    :row_calls,
+    :deadline,
+    :steps,
+    :seed
+  ]
 
-  @run_options [:model, :teacher, :proposal, :role, :max_model_calls, :max_steps, :timeout]
+  @doc "Creates a lazy Tune pipeline."
+  @spec new(term(), keyword()) :: t()
+  def new(target, opts \\ []) when is_list(opts) do
+    ensure_keys!(opts, @new_options, "new")
+    runner = Keyword.get(opts, :run)
 
-  @doc """
-  Runs a program on one input map.
+    if runner != nil and not is_function(runner) do
+      raise ArgumentError, "the :run option must be a function"
+    end
 
-  Options:
+    metadata = Keyword.get(opts, :metadata, %{})
 
-    * `:model` - required target `ModelConfig` or its options
-    * `:teacher`, `:proposal` - optional configurations for those roles
-    * `:role` - active role, default `:target`
-    * `:max_model_calls` - optional managed call limit for this run
-    * `:max_steps` - managed call step limit, default 32
-    * `:timeout` - cooperative run deadline in milliseconds or `:infinity`, default 60 000
+    if not is_map(metadata) do
+      raise ArgumentError, "the :metadata option must be a map"
+    end
 
-  Invalid options and inputs return before any model request. A failure after
-  the run starts returns `Tune.Error.Execution.Failed` with the
-  original cause and the partial result.
-  """
-  @spec run(t(), map(), keyword()) :: {:ok, Result.t()} | {:error, Exception.t()}
-  def run(program, inputs, opts) when is_list(opts) do
-    with {:ok, run_opts} <- normalize_run_options(opts),
-         {:ok, execution} <- new_execution(program, run_opts) do
-      run_with(program, inputs, execution)
+    %__MODULE__{
+      target: target,
+      runner: runner,
+      models:
+        opts
+        |> Keyword.take([:model, :teacher, :proposal])
+        |> Map.new(),
+      metadata: metadata
+    }
+  end
+
+  @doc "Adds named train, validation, or test data without consuming it."
+  @spec data(t(), keyword() | map()) :: t()
+  def data(%__MODULE__{} = tune, data) when is_list(data) or is_map(data) do
+    data = Map.new(data)
+    ensure_map_keys!(data, @data_roles, "data")
+    Enum.each(data, fn {role, source} -> validate_source!(role, source) end)
+    %{tune | data: Map.merge(tune.data, data)}
+  end
+
+  @doc "Declares named values that a search strategy can change."
+  @spec vary(t(), keyword() | map()) :: t()
+  def vary(%__MODULE__{} = tune, variations) when is_list(variations) or is_map(variations) do
+    variations = Map.new(variations)
+
+    if Enum.any?(variations, fn {name, _value} -> not is_atom(name) end) do
+      raise ArgumentError, "variation names must be atoms"
+    end
+
+    %{tune | variations: Map.merge(tune.variations, variations)}
+  end
+
+  @doc "Adds one uniquely named score."
+  @spec score(t(), atom(), function() | module(), keyword()) :: t()
+  def score(%__MODULE__{} = tune, name, metric, opts \\ [])
+      when is_atom(name) and is_list(opts) do
+    ensure_keys!(opts, [:direction, :range, :failure_score], "score")
+
+    if Enum.any?(tune.scores, &(&1.name == name)) do
+      raise ArgumentError, "duplicate score name #{inspect(name)}"
+    end
+
+    unless is_function(metric) or is_atom(metric) or score_extension?(metric) do
+      raise ArgumentError, "a score must be a function, module, or Tune.Score struct"
+    end
+
+    direction = Keyword.get(opts, :direction, :maximize)
+
+    if direction not in [:maximize, :minimize] do
+      raise ArgumentError, "score direction must be :maximize or :minimize"
+    end
+
+    failure_score = Keyword.get(opts, :failure_score)
+
+    if failure_score != nil and not is_number(failure_score) do
+      raise ArgumentError, "score failure_score must be a number"
+    end
+
+    range = Keyword.get(opts, :range)
+
+    if range != nil and not valid_range?(range) do
+      raise ArgumentError, "score range must be {low, high} with high greater than low"
+    end
+
+    declaration = %Score{
+      name: name,
+      metric: metric,
+      direction: direction,
+      range: range,
+      failure_score: failure_score
+    }
+
+    %{tune | scores: tune.scores ++ [declaration]}
+  end
+
+  @doc "Selects the score policy used to compare candidates."
+  @spec select(t(), atom() | keyword()) :: t()
+  def select(%__MODULE__{} = tune, name) when is_atom(name),
+    do: %{tune | selector: {:score, name}}
+
+  def select(%__MODULE__{} = tune, weighted: weights) when is_list(weights) do
+    if weights == [] or
+         Enum.any?(weights, fn {name, weight} ->
+           not is_atom(name) or not is_number(weight) or weight <= 0
+         end) do
+      raise ArgumentError, "weighted selection requires score names and positive weights"
+    end
+
+    %{tune | selector: {:weighted, Map.new(weights)}}
+  end
+
+  @doc "Selects a search strategy without starting it."
+  @spec search(t(), atom() | module(), keyword()) :: t()
+  def search(%__MODULE__{} = tune, strategy, opts \\ [])
+      when is_atom(strategy) and is_list(opts) do
+    %{tune | strategy: {strategy, opts}}
+  end
+
+  @doc "Adds explicit work limits."
+  @spec limit(t(), keyword() | map()) :: t()
+  def limit(%__MODULE__{} = tune, limits) when is_list(limits) or is_map(limits) do
+    limits = Map.new(limits)
+    ensure_map_keys!(limits, @limit_options, "limit")
+    Enum.each(limits, &validate_limit!/1)
+    %{tune | limits: Map.merge(tune.limits, limits)}
+  end
+
+  @doc "Prepares one inspectable prompt without making a model call."
+  @spec preview(t(), map() | {String.t(), map()}) ::
+          {:ok, Tune.Prepared.t()} | {:error, Exception.t()}
+  def preview(%__MODULE__{} = tune, input) do
+    with {:ok, model} <- target_model(tune),
+         {:ok, _name, predictor, inputs} <- preview_target(tune.target, input) do
+      Predictor.prepare(predictor, inputs, model)
     end
   end
 
-  @doc """
-  Evaluates a program on a dataset.
-
-  Takes the same model and limit options as `run/3`, where `:max_model_calls`
-  is the total allowance for the evaluation, plus:
-
-    * `:metric` - required 2-arity metric function
-    * `:failure_score` - optional explicit score for failed rows
-    * `:concurrency` - concurrent rows, default 1
-    * `:row_timeout` - hard per-row timeout in milliseconds, default 120 000
-    * `:max_row_calls` - per-row allowance, used to reserve calls for
-      concurrent rows; defaults to 1 per concurrent row when a total limit is set
-
-  Rows are `Tune.Example` values or maps with `:inputs`, `:labels`,
-  and `:id`. Returns `{:ok, evaluation}` or a setup error. There is no
-  optimization or dataset splitting.
-  """
-  @spec evaluate(t(), list(), keyword()) ::
-          {:ok, Tune.Evaluation.t()} | {:error, Exception.t()}
-  def evaluate(program, rows, opts) when is_list(opts) do
-    {eval_opts, run_opts} = Tune.Evaluation.split_options(opts)
-
-    with {:ok, eval_opts} <- Tune.Evaluation.normalize_options(eval_opts),
-         {:ok, run_opts} <- normalize_run_options(run_opts),
-         {:ok, signature} <- signature(program),
-         {:ok, _parameters} <- parameters(program),
-         {:ok, examples} <- Tune.Example.normalize_all(signature, rows) do
-      {:ok, Tune.Evaluation.run(program, examples, run_opts, eval_opts)}
+  @doc "Evaluates the pipeline target on test data, or on an explicit data role."
+  @spec evaluate(t(), atom()) :: {:ok, Tune.Evaluation.t()} | {:error, Exception.t()}
+  def evaluate(%__MODULE__{} = tune, role \\ :test) when role in @data_roles do
+    with {:ok, rows} <- dataset(tune, role),
+         {:ok, selector} <- compiled_selector(tune),
+         {:ok, source, runner} <- evaluation_runner(tune, rows) do
+      {:ok, Tune.Pipeline.Evaluator.evaluate(source, runner, tune.scores, selector, tune.limits)}
     end
   end
 
-  @doc """
-  Optimizes a program and returns a new program with a report.
-
-  Options:
-
-    * `:optimizer` - required optimizer module or `{module, options}`
-    * `:trainset` - training rows; required by algorithms that learn from data
-    * `:valset` - validation rows; required by candidate searches, never split automatically
-    * `:metric` - 2-arity metric; required unless the algorithm declares otherwise
-    * `:failure_score` - optional explicit score for failed rows
-    * `:model` - required target configuration, fixed for the run
-    * `:teacher`, `:proposal` - explicit configurations when the algorithm uses them
-    * `:max_model_calls` - required when the algorithm calls models
-    * `:seed` - local random seed, default 0
-    * `:max_steps`, `:timeout` - per-run limits, as in `run/3`
-    * `:row_timeout` - hard per-row timeout for evaluations
-
-  `:testset` is rejected; final test evaluation is a separate `evaluate/3` call.
-  Exact duplicate training rows are removed once and counted in the report.
-  Validation rows with the same inputs as a training row are a setup error.
-
-  Returns `{:ok, program, report}`, or `{:error, %Tune.Error.Optimization.Failed{}}`
-  with the report and original cause. A run stopped by the call limit returns
-  its best complete eligible candidate with `complete?: false`.
-  """
-  @spec optimize(t(), keyword()) ::
-          {:ok, t(), Tune.Optimizer.Report.t()} | {:error, Exception.t()}
-  def optimize(program, opts) when is_list(opts), do: Tune.Optimize.run(program, opts)
-
-  @doc false
-  @spec run_with(t(), map(), Execution.t()) :: {:ok, Result.t()} | {:error, Exception.t()}
-  def run_with(program, inputs, %Execution{} = execution) do
-    with {:ok, signature} <- signature(program),
-         {:ok, inputs} <- Signature.normalize_inputs(signature, inputs) do
-      case invoke(program, inputs, execution) do
-        {:ok, output, execution} ->
-          case Signature.validate_outputs(signature, output) do
-            {:ok, output} ->
-              {:ok, Execution.result(execution, output)}
-
-            {:error, errors} ->
-              cause =
-                Error.Output.Invalid.exception(
-                  message: Signature.format_errors("invalid program output", errors),
-                  errors: errors,
-                  value: output
-                )
-
-              {:error,
-               Error.Execution.Failed.exception(
-                 cause: cause,
-                 result: Execution.result(execution, nil),
-                 step: nil
-               )}
-          end
-
-        {:error, cause, execution} ->
-          {:error,
-           Error.Execution.Failed.exception(
-             cause: cause,
-             result: Execution.result(execution, nil),
-             step: Execution.last_failure(execution)
-           )}
-      end
+  @doc "Runs the selected search and returns one immutable result."
+  @spec tune(t()) :: {:ok, Result.t()} | {:error, Exception.t()}
+  def tune(%__MODULE__{runner: nil} = tune) do
+    with :ok <- require_program_target(tune),
+         {:ok, optimizer} <- optimizer(tune.strategy),
+         {:ok, requirements} <- optimizer_requirements(optimizer),
+         {:ok, datasets} <- optimization_datasets(tune),
+         {:ok, metric, failure_score, selector} <-
+           selected_metric(tune, requirements.metric?),
+         {:ok, opts} <-
+           optimize_options(tune, optimizer, datasets, metric, failure_score, selector),
+         {:ok, result} <- Tune.Search.Program.run(tune.target, opts) do
+      {:ok, put_in(result.metadata[:models], describe_models(tune.models))}
     end
   end
 
-  @doc false
-  @spec new_execution(t(), keyword()) :: {:ok, Execution.t()} | {:error, Exception.t()}
-  def new_execution(program, run_opts) do
-    with {:ok, parameters} <- parameters(program) do
-      {:ok, Execution.new(parameters, run_opts)}
+  def tune(%__MODULE__{} = tune) do
+    with {:ok, opts} <- genetic_strategy(tune.strategy),
+         :ok <- require_score_call_limit(tune),
+         {:ok, spaces} <- compile_spaces(tune.variations),
+         {:ok, data_factory} <- data_factory(tune, :validation),
+         {:ok, selector} <- compiled_selector(tune) do
+      Tune.Search.Genetic.run(
+        tune.target,
+        tune.runner,
+        data_factory,
+        spaces,
+        tune.scores,
+        selector,
+        tune.limits,
+        opts
+      )
     end
   end
 
-  @doc false
-  @spec normalize_run_options(keyword()) :: {:ok, keyword()} | {:error, Exception.t()}
-  def normalize_run_options(opts) do
-    with :ok <- check_run_keys(opts),
-         {:ok, models} <- models(opts),
-         {:ok, role} <- role(opts, models),
-         {:ok, max_calls} <- optional_count(opts, :max_model_calls, 0),
-         {:ok, max_steps} <- optional_count(opts, :max_steps, 1),
-         {:ok, timeout} <- timeout(opts) do
+  @doc "Builds a versioned artifact from a completed tuning result."
+  @spec dump(Result.t()) :: {:ok, Artifact.t()} | {:error, Exception.t()}
+  def dump(%Result{metadata: %{strategy: :genetic}} = result) do
+    parameters = Map.new(result.parameters, fn {name, value} -> {to_string(name), value} end)
+
+    with {:ok, parameters} <- portable_parameters(parameters) do
+      Artifact.new(%{
+        version: 1,
+        target_fingerprint: contract_fingerprint(parameters),
+        parameters: parameters,
+        provenance: %{
+          "kind" => "generic",
+          "source" => "Tune.tune/1",
+          "strategy" => "genetic",
+          "stop_reason" => to_string(result.stop_reason),
+          "complete" => result.complete?
+        }
+      })
+    end
+  end
+
+  def dump(%Result{} = result) do
+    models = Map.get(result.metadata, :models, %{})
+
+    provenance =
+      Parameters.provenance(
+        source: "Tune.tune/1",
+        report: result
+      )
+      |> Map.put("models", models)
+
+    with {:ok, data} <- Parameters.dump(result.value, provenance: provenance) do
+      parameters = Map.fetch!(data, "entries")
+
+      Artifact.new(%{
+        version: 1,
+        target_fingerprint: fingerprint(parameters),
+        parameters: parameters,
+        provenance: Map.fetch!(data, "provenance")
+      })
+    end
+  end
+
+  @doc "Validates an artifact and applies it to fresh application code."
+  @spec load(Artifact.t(), Program.t()) :: {:ok, Program.t()} | {:error, Exception.t()}
+  def load(%Artifact{provenance: %{"kind" => "generic"}} = artifact, fresh_target)
+      when is_map(fresh_target) do
+    available = Map.new(fresh_target, fn {name, value} -> {to_string(name), {name, value}} end)
+    names = Map.keys(artifact.parameters)
+    current = Map.new(names, fn name -> {name, available[name] && elem(available[name], 1)} end)
+
+    with :ok <- Artifact.validate(artifact),
+         true <- Enum.all?(names, &Map.has_key?(available, &1)),
+         true <- artifact.target_fingerprint == contract_fingerprint(current),
+         {:ok, _parameters} <- portable_parameters(artifact.parameters) do
       {:ok,
-       [
-         models: models,
-         role: role,
-         max_model_calls: max_calls,
-         max_steps: max_steps || 32,
-         timeout: timeout
-       ]}
+       Enum.reduce(artifact.parameters, fresh_target, fn {name, value}, target ->
+         {key, _old} = Map.fetch!(available, name)
+         Map.put(target, key, value)
+       end)}
+    else
+      false -> invalid(:artifact, "artifact parameters do not match the fresh target")
+      error -> error
     end
   end
 
-  @doc "Returns the program's signature."
-  @spec signature(t()) :: {:ok, Signature.t()} | {:error, Exception.t()}
-  def signature(%Predictor{signature: signature}), do: {:ok, signature}
+  def load(%Artifact{} = artifact, fresh_target) do
+    data = %{
+      "format" => "tune.parameters",
+      "version" => artifact.version,
+      "entries" => artifact.parameters,
+      "provenance" => artifact.provenance
+    }
 
-  def signature(%module{} = program) do
-    with :ok <- check_program_module(module) do
-      case module.signature(program) do
-        %Signature{} = signature -> {:ok, signature}
-        other -> callback_error("#{inspect(module)}.signature/1 must return a Signature", other)
-      end
+    with :ok <- Artifact.validate(artifact),
+         true <- artifact.target_fingerprint == fingerprint(artifact.parameters),
+         {:ok, updated} <- Parameters.apply(fresh_target, data) do
+      {:ok, updated}
+    else
+      false -> invalid(:artifact, "target fingerprint does not match the artifact parameters")
+      error -> error
     end
   end
 
-  def signature(other), do: callback_error("not a program", other)
+  defp selected_metric(%__MODULE__{scores: []}),
+    do: invalid(:scores, "at least one score is required")
 
-  @doc "Returns the program's declared parameters."
-  @spec parameters(t()) :: {:ok, parameters()} | {:error, Exception.t()}
-  def parameters(%Predictor{} = predictor), do: {:ok, %{@root => predictor}}
+  defp selected_metric(%__MODULE__{} = tune) do
+    with {:ok, selector} <- selector(tune),
+         :ok <- validate_selector(selector, tune.scores) do
+      failure_score = select_failures(selector, tune.scores)
 
-  def parameters(%module{} = program) do
-    with :ok <- check_program_module(module) do
-      program |> module.parameters() |> check_parameters(module)
-    end
-  end
+      metric = fn example, prediction ->
+        values =
+          Map.new(tune.scores, fn declaration ->
+            result = score_value(declaration, example, prediction)
+            {declaration.name, result}
+          end)
 
-  def parameters(other), do: callback_error("not a program", other)
+        with :ok <- score_errors(values) do
+          normalized = Map.new(values, fn {name, {:ok, value}} -> {name, value} end)
+          selected = select_score(selector, tune.scores, normalized)
 
-  @doc """
-  Replaces named parameters and returns the updated program.
+          feedback =
+            normalized
+            |> Enum.map_join("; ", fn {name, value} ->
+              "#{name}=#{value.score}" <> if(value.feedback, do: " (#{value.feedback})", else: "")
+            end)
 
-  Every name must already be declared, each value must have the same kind, and
-  a replacement predictor must keep the declared signature fields. The original
-  program is unchanged.
-  """
-  @spec replace_parameters(t(), parameters()) :: {:ok, t()} | {:error, Exception.t()}
-  def replace_parameters(program, updates) when is_map(updates) do
-    with {:ok, current} <- parameters(program),
-         :ok <- check_updates(current, updates) do
-      merged = Map.merge(current, updates)
-      put_parameters(program, merged)
-    end
-  end
-
-  defp put_parameters(%Predictor{}, %{@root => %Predictor{} = predictor}), do: {:ok, predictor}
-
-  defp put_parameters(%module{} = program, parameters) do
-    case module.put_parameters(program, parameters) do
-      %^module{} = updated ->
-        case parameters(updated) do
-          {:ok, ^parameters} ->
-            {:ok, updated}
-
-          {:ok, _} ->
-            callback_error(
-              "#{inspect(module)}.put_parameters/2 did not apply every value",
-              updated
-            )
-
-          error ->
-            error
+          %{score: selected, feedback: feedback}
         end
+      end
 
-      other ->
-        callback_error(
-          "#{inspect(module)}.put_parameters/2 must return a #{inspect(module)}",
-          other
-        )
+      {:ok, metric, failure_score, selector}
     end
   end
 
-  @doc false
-  @spec invoke(t(), map(), Execution.t()) ::
-          {:ok, map(), Execution.t()} | {:error, term(), Execution.t()}
-  def invoke(%Predictor{}, inputs, execution), do: Execution.predict(execution, @root, inputs)
+  defp selected_metric(%__MODULE__{scores: []}, false), do: {:ok, nil, nil, nil}
+  defp selected_metric(%__MODULE__{} = tune, _required?), do: selected_metric(tune)
 
-  def invoke(%module{} = program, inputs, execution) do
-    case module.call(program, inputs, execution) do
-      {:ok, output, %Execution{} = execution} when is_map(output) ->
-        {:ok, output, execution}
+  defp selector(%__MODULE__{scores: [%Score{name: name}], selector: nil}),
+    do: {:ok, {:score, name}}
 
-      {:error, error, %Execution{} = execution} ->
-        {:error, error, execution}
+  defp selector(%__MODULE__{scores: scores, selector: nil}) when length(scores) > 1,
+    do: invalid(:selector, "multiple scores require Tune.select/2")
 
-      other ->
-        {:error,
-         Error.Execution.Callback.exception(
-           message:
-             "#{inspect(module)}.call/3 must return {:ok, map, execution} or {:error, error, execution}",
-           value: other
-         ), execution}
+  defp selector(%__MODULE__{selector: selector}), do: {:ok, selector}
+
+  defp compiled_selector(%__MODULE__{scores: []}),
+    do: invalid(:scores, "at least one score is required")
+
+  defp compiled_selector(%__MODULE__{} = tune) do
+    with {:ok, selector} <- selector(tune),
+         :ok <- validate_selector(selector, tune.scores) do
+      {:ok, selector}
     end
   end
 
-  @doc "Returns `true` when two signatures declare the same field names and schemas."
-  @spec same_fields?(Signature.t(), Signature.t()) :: boolean()
-  def same_fields?(%Signature{} = left, %Signature{} = right) do
-    fields(left.inputs) == fields(right.inputs) and fields(left.outputs) == fields(right.outputs)
+  defp validate_selector({:score, name}, scores) do
+    if Enum.any?(scores, &(&1.name == name)),
+      do: :ok,
+      else: elem(invalid(:selector, "unknown score #{inspect(name)}"), 1) |> then(&{:error, &1})
   end
 
-  defp fields(fields), do: Enum.map(fields, &{&1.name, &1.schema})
+  defp validate_selector({:weighted, weights}, scores) do
+    names = MapSet.new(scores, & &1.name)
+    selected = Enum.map(Map.keys(weights), &score!(scores, &1))
 
-  defp check_updates(current, updates) do
-    Enum.reduce_while(updates, :ok, fn {name, value}, :ok ->
-      case {Map.fetch(current, name), value} do
-        {{:ok, %Predictor{signature: old}}, %Predictor{signature: new}} ->
-          if same_fields?(old, new),
-            do: {:cont, :ok},
-            else:
-              {:halt, definition_error("predictor #{inspect(name)} changes its declared fields")}
+    if map_size(weights) > 0 and
+         Enum.all?(weights, fn {name, _} -> MapSet.member?(names, name) end) and
+         Enum.all?(selected, &(&1 && valid_range?(&1.range))),
+       do: :ok,
+       else:
+         elem(
+           invalid(:selector, "weighted selection requires known scores with explicit ranges"),
+           1
+         )
+         |> then(&{:error, &1})
+  end
 
-        {{:ok, %Parameter{schema: schema}}, %Parameter{schema: schema}} ->
-          {:cont, :ok}
+  defp score_value(%Score{metric: metric}, example, prediction) do
+    result =
+      cond do
+        is_function(metric, 2) ->
+          metric.(example, prediction)
 
-        {{:ok, %Parameter{}}, %Parameter{}} ->
-          {:halt, definition_error("parameter #{inspect(name)} changes its schema")}
+        is_atom(metric) and function_exported?(metric, :score, 2) ->
+          metric.score(example, prediction)
 
-        {{:ok, _}, _} ->
-          {:halt, definition_error("parameter #{inspect(name)} changes its kind")}
+        true ->
+          {:error, "score callback must accept two arguments"}
+      end
 
-        {:error, _} ->
-          {:halt, definition_error("unknown parameter #{inspect(name)}")}
+    Tune.Metric.normalize(result)
+  rescue
+    error -> {:error, error}
+  end
+
+  defp score_errors(values) do
+    case Enum.find(values, fn {_name, value} -> match?({:error, _}, value) end) do
+      nil -> :ok
+      {_name, {:error, error}} -> {:error, error}
+    end
+  end
+
+  defp select_score({:score, name}, scores, values) do
+    orient(values[name].score, score!(scores, name).direction)
+  end
+
+  defp select_score({:weighted, weights}, scores, values) do
+    total = weights |> Map.values() |> Enum.sum()
+
+    Enum.sum(
+      Enum.map(weights, fn {name, weight} ->
+        weight * normalize_score(values[name].score, score!(scores, name))
+      end)
+    ) / total
+  end
+
+  defp select_failures({:score, name}, scores) do
+    score = score!(scores, name)
+    if is_number(score.failure_score), do: orient(score.failure_score, score.direction)
+  end
+
+  defp select_failures({:weighted, weights}, scores) do
+    if Enum.all?(weights, fn {name, _} -> is_number(score!(scores, name).failure_score) end) do
+      total = weights |> Map.values() |> Enum.sum()
+
+      Enum.sum(
+        Enum.map(weights, fn {name, weight} ->
+          score = score!(scores, name)
+          normalize_score(score.failure_score, score) * weight
+        end)
+      ) / total
+    end
+  end
+
+  defp normalize_score(value, %Score{range: {low, high}, direction: direction}) do
+    normalized = (value - low) / (high - low)
+    if direction == :maximize, do: normalized, else: 1.0 - normalized
+  end
+
+  defp orient(value, :maximize), do: value
+  defp orient(value, :minimize), do: -value
+
+  defp valid_range?({low, high}), do: is_number(low) and is_number(high) and high > low
+  defp valid_range?(_range), do: false
+
+  defp score!(scores, name), do: Enum.find(scores, &(&1.name == name))
+
+  defp dataset(tune, role) do
+    case Map.fetch(tune.data, role) do
+      {:ok, source} when is_function(source, 0) -> source.() |> enumerable(role)
+      {:ok, source} -> enumerable(source, role)
+      :error -> invalid(role, "#{role} data is required")
+    end
+  rescue
+    error -> invalid(role, "data factory failed: #{Exception.message(error)}")
+  end
+
+  defp enumerable(source, role) do
+    if Enumerable.impl_for(source),
+      do: {:ok, source},
+      else: invalid(role, "data must implement Enumerable")
+  end
+
+  defp runtime_options(tune) do
+    opts =
+      []
+      |> put_model_options(tune.models)
+      |> put_option(:max_steps, tune.limits[:steps])
+      |> put_option(:timeout, tune.limits[:deadline])
+
+    Tune.Runtime.normalize_options(opts)
+  end
+
+  defp optimize_options(tune, optimizer, datasets, metric, failure_score, selector) do
+    opts =
+      [
+        optimizer: optimizer,
+        seed: Map.get(tune.limits, :seed, 0)
+      ]
+      |> put_option(:metric, metric)
+      |> put_option(:failure_score, failure_score)
+      |> put_option(:scores, if(tune.scores == [], do: nil, else: tune.scores))
+      |> put_option(:selector, selector)
+      |> put_datasets(datasets)
+      |> put_model_options(tune.models)
+      |> put_option(:max_model_calls, tune.limits[:model_calls])
+      |> put_option(:max_steps, tune.limits[:steps])
+      |> put_option(:timeout, tune.limits[:deadline])
+      |> put_option(:row_timeout, tune.limits[:row_timeout])
+
+    {:ok, opts}
+  end
+
+  defp optimization_datasets(tune) do
+    Enum.reduce_while([:train, :validation], {:ok, %{}}, fn role, {:ok, acc} ->
+      if Map.has_key?(tune.data, role) do
+        case dataset(tune, role) do
+          {:ok, source} -> {:cont, {:ok, Map.put(acc, role, Enum.to_list(source))}}
+          error -> {:halt, error}
+        end
+      else
+        {:cont, {:ok, acc}}
       end
     end)
   end
 
-  defp check_program_module(module) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :call, 3) and
-         function_exported?(module, :parameters, 1) and
-         function_exported?(module, :put_parameters, 2) and
-         function_exported?(module, :signature, 1),
-       do: :ok,
-       else: callback_error("#{inspect(module)} does not implement Tune", module)
+  defp put_datasets(opts, datasets) do
+    opts
+    |> put_option(:trainset, datasets[:train])
+    |> put_option(:valset, datasets[:validation])
   end
 
-  defp check_parameters(parameters, module) when is_map(parameters) do
-    invalid =
-      Enum.find(parameters, fn {name, value} ->
-        not is_binary(name) or not (match?(%Predictor{}, value) or match?(%Parameter{}, value))
-      end)
+  defp optimizer(nil), do: invalid(:search, "Tune.search/3 is required")
 
-    case invalid do
-      nil ->
+  defp optimizer({strategy, opts}) do
+    case optimizer_module(strategy) do
+      nil -> invalid(:search, "unknown search strategy #{inspect(strategy)}")
+      module -> {:ok, {module, opts}}
+    end
+  end
+
+  defp optimizer_requirements({module, opts}) do
+    with {:ok, config} <- module.init(opts) do
+      requirements = module.requirements(config)
+      {:ok, Map.put_new(requirements, :metric?, true)}
+    end
+  end
+
+  defp optimizer_module(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :compile, 3) do
+      module
+    else
+      Map.get(optimizer_modules(), module)
+    end
+  end
+
+  defp optimizer_modules do
+    %{
+      labeled_few_shot: Tune.Optimizers.LabeledFewShot,
+      bootstrap_few_shot: Tune.Optimizers.BootstrapFewShot,
+      bootstrap_few_shot_random_search: Tune.Optimizers.BootstrapFewShotWithRandomSearch,
+      bootstrap_few_shot_optuna: Tune.Optimizers.BootstrapFewShotWithOptuna,
+      knn_few_shot: Tune.Optimizers.KNNFewShot,
+      copro: Tune.Optimizers.COPRO,
+      signature_optimizer: Tune.Optimizers.SignatureOptimizer,
+      mipro_v2: Tune.Optimizers.MIPROv2,
+      infer_rules: Tune.Optimizers.InferRules,
+      simba: Tune.Optimizers.SIMBA,
+      gepa: Tune.Optimizers.GEPA,
+      avatar: Tune.Optimizers.Avatar,
+      playbook: Tune.Optimizers.Playbook,
+      anything: Tune.Optimizers.Anything,
+      ensemble: Tune.Optimizers.Ensemble
+    }
+  end
+
+  defp genetic_strategy({:genetic, opts}), do: {:ok, opts}
+  defp genetic_strategy(nil), do: invalid(:search, "Tune.search/3 is required")
+
+  defp genetic_strategy({strategy, _opts}),
+    do: invalid(:search, "#{inspect(strategy)} does not support a generic target")
+
+  defp compile_spaces(variations) when map_size(variations) == 0,
+    do: invalid(:vary, "at least one variation is required")
+
+  defp compile_spaces(variations) do
+    Enum.reduce_while(variations, {:ok, %{}}, fn {name, descriptor}, {:ok, acc} ->
+      case Tune.Space.new(descriptor) do
+        {:ok, space} -> {:cont, {:ok, Map.put(acc, name, space)}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp data_factory(tune, role) do
+    case Map.fetch(tune.data, role) do
+      {:ok, factory} when is_function(factory, 0) -> {:ok, factory}
+      {:ok, source} -> {:ok, fn -> source end}
+      :error -> invalid(role, "#{role} data is required")
+    end
+  end
+
+  defp describe_models(models) do
+    Map.new(models, fn {role, config} ->
+      {:ok, config} = ModelConfig.new(config)
+      {to_string(role), ModelConfig.describe(config)}
+    end)
+  end
+
+  defp target_model(tune) do
+    case Map.fetch(tune.models, :model) do
+      {:ok, config} -> ModelConfig.new(config)
+      :error -> invalid(:model, "a target model is required")
+    end
+  end
+
+  defp preview_target(target, {name, inputs}) when is_binary(name) and is_map(inputs) do
+    with {:ok, parameters} <- Program.parameters(target),
+         {:ok, %Predictor{} = predictor} <- Map.fetch(parameters, name) do
+      {:ok, name, predictor, inputs}
+    else
+      :error -> invalid(:preview, "unknown predictor #{inspect(name)}")
+      {:ok, _} -> invalid(:preview, "#{inspect(name)} is not a predictor")
+      error -> error
+    end
+  end
+
+  defp preview_target(%Predictor{} = predictor, inputs) when is_map(inputs),
+    do: {:ok, "root", predictor, inputs}
+
+  defp preview_target(_target, _input),
+    do: invalid(:preview, "a composed program requires {predictor_name, inputs}")
+
+  defp require_program_target(%__MODULE__{runner: nil, target: target}) do
+    with {:ok, _} <- Program.parameters(target), do: :ok
+  end
+
+  defp require_program_target(%__MODULE__{}),
+    do: invalid(:target, "generic runners are implemented in the generic-search unit")
+
+  defp evaluation_runner(%__MODULE__{runner: nil} = tune, rows) do
+    with {:ok, run_options} <- runtime_options(tune),
+         {:ok, signature} <- Program.signature(tune.target),
+         {:ok, _parameters} <- Program.parameters(tune.target),
+         {:ok, examples} <- Tune.Example.normalize_all(signature, Enum.to_list(rows)) do
+      runner = fn tune_case ->
+        allowance = Map.get(tune_case.metadata, :model_call_allowance)
+        options = put_option(run_options, :max_model_calls, allowance)
+
+        with {:ok, execution} <- Tune.Runtime.new_execution(tune.target, options) do
+          case Tune.Runtime.run_with(tune.target, tune_case.input, execution) do
+            {:ok, prediction} ->
+              {:ok, prediction.output, prediction}
+
+            {:error, %Error.Execution.Failed{result: prediction} = error} ->
+              {:error, error, prediction}
+
+            {:error, error} ->
+              {:error, error}
+          end
+        end
+      end
+
+      {:ok, examples, runner}
+    end
+  end
+
+  defp evaluation_runner(%__MODULE__{runner: runner, target: target}, rows) do
+    callback = fn tune_case -> invoke_runner(runner, target, tune_case.input) end
+    {:ok, rows, callback}
+  end
+
+  defp invoke_runner(runner, target, input) when is_function(runner, 2),
+    do: runner.(target, input)
+
+  defp invoke_runner(runner, target, _input) when is_function(runner, 1), do: runner.(target)
+
+  defp put_model_options(opts, models) do
+    Enum.reduce(models, opts, fn {key, value}, acc -> Keyword.put(acc, key, value) end)
+  end
+
+  defp put_option(opts, _key, nil), do: opts
+  defp put_option(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp fingerprint(parameters) do
+    parameters
+    |> Tune.Example.canonical_json()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp portable_parameters(parameters) do
+    case Zoi.parse(Zoi.map(Zoi.string(), Zoi.json()), parameters) do
+      {:ok, parameters} ->
         {:ok, parameters}
 
-      {name, _} ->
-        callback_error(
-          "#{inspect(module)}.parameters/1 has an invalid entry #{inspect(name)}",
-          parameters
-        )
+      {:error, _errors} ->
+        invalid(:artifact, "learned parameters must contain only JSON-compatible values")
     end
   end
 
-  defp check_parameters(other, module),
-    do: callback_error("#{inspect(module)}.parameters/1 must return a map", other)
+  defp contract_fingerprint(value) do
+    value
+    |> value_contract()
+    |> Tune.Example.canonical_json()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
 
-  defp check_run_keys(opts) do
-    case Keyword.keys(opts) -- @run_options do
+  defp value_contract(value) when is_integer(value), do: "integer"
+  defp value_contract(value) when is_float(value), do: "float"
+  defp value_contract(value) when is_binary(value), do: "string"
+  defp value_contract(value) when is_boolean(value), do: "boolean"
+  defp value_contract(nil), do: "null"
+
+  defp value_contract(value) when is_list(value) do
+    %{"list" => value |> Enum.map(&value_contract/1) |> Enum.uniq() |> Enum.sort()}
+  end
+
+  defp value_contract(value) when is_map(value) and not is_struct(value) do
+    %{"map" => Map.new(value, fn {key, item} -> {to_string(key), value_contract(item)} end)}
+  end
+
+  defp value_contract(_value), do: "unsupported"
+
+  defp validate_source!(_role, source) when is_function(source, 0), do: :ok
+
+  defp validate_source!(role, source) do
+    if is_nil(Enumerable.impl_for(source)) do
+      raise ArgumentError, "#{role} data must implement Enumerable or be a zero-arity function"
+    end
+  end
+
+  defp score_extension?(%module{}) do
+    Code.ensure_loaded?(module) and function_exported?(module, :score, 3)
+  end
+
+  defp score_extension?(_metric), do: false
+
+  defp require_score_call_limit(%__MODULE__{} = tune) do
+    calls_models? =
+      Enum.any?(tune.scores, fn %{metric: metric} ->
+        is_struct(metric) and
+          function_exported?(metric.__struct__, :model_calls?, 1) and
+          metric.__struct__.model_calls?(metric)
+      end)
+
+    if calls_models? and not is_integer(tune.limits[:model_calls]),
+      do:
+        elem(invalid(:model_calls, "an explicit model call limit is required"), 1)
+        |> then(&{:error, &1}),
+      else: :ok
+  end
+
+  defp validate_limit!({key, value}) when key in [:model_calls, :evaluations, :cases, :steps] do
+    if not (is_integer(value) and value >= 0) do
+      raise ArgumentError, "#{key} must be a nonnegative integer"
+    end
+  end
+
+  defp validate_limit!({key, value}) when key in [:concurrency, :row_timeout, :row_calls] do
+    if not (is_integer(value) and value > 0) do
+      raise ArgumentError, "#{key} must be a positive integer"
+    end
+  end
+
+  defp validate_limit!({:deadline, :infinity}), do: :ok
+
+  defp validate_limit!({:deadline, value}) when is_integer(value) and value >= 0, do: :ok
+  defp validate_limit!({:seed, value}) when is_integer(value), do: :ok
+  defp validate_limit!({key, _value}), do: raise(ArgumentError, "invalid #{key} limit")
+
+  defp ensure_keys!(opts, allowed, name), do: ensure_map_keys!(Map.new(opts), allowed, name)
+
+  defp ensure_map_keys!(map, allowed, name) do
+    case Map.keys(map) -- allowed do
       [] -> :ok
-      [key | _] -> option_error(key, "unknown run option")
+      [key | _] -> raise ArgumentError, "unknown #{name} option #{inspect(key)}"
     end
   end
 
-  defp models(opts) do
-    Enum.reduce_while(Execution.roles(), {:ok, %{}}, fn role, {:ok, acc} ->
-      key = if role == :target, do: :model, else: role
-
-      case Keyword.fetch(opts, key) do
-        {:ok, config} ->
-          case ModelConfig.new(config) do
-            {:ok, config} -> {:cont, {:ok, Map.put(acc, role, config)}}
-            error -> {:halt, error}
-          end
-
-        :error ->
-          {:cont, {:ok, acc}}
-      end
-    end)
-    |> then(fn
-      {:ok, models} when is_map_key(models, :target) -> {:ok, models}
-      {:ok, _} -> option_error(:model, "is required")
-      error -> error
-    end)
-  end
-
-  defp role(opts, models) do
-    role = Keyword.get(opts, :role, :target)
-
-    cond do
-      role not in Execution.roles() ->
-        option_error(:role, "must be one of #{inspect(Execution.roles())}")
-
-      not Map.has_key?(models, role) ->
-        option_error(:role, "no model configuration for #{inspect(role)}")
-
-      true ->
-        {:ok, role}
-    end
-  end
-
-  defp optional_count(opts, key, min) do
-    case Keyword.get(opts, key) do
-      nil -> {:ok, nil}
-      value when is_integer(value) and value >= min -> {:ok, value}
-      _ -> option_error(key, "must be an integer >= #{min}")
-    end
-  end
-
-  defp timeout(opts) do
-    case Keyword.get(opts, :timeout, 60_000) do
-      :infinity -> {:ok, :infinity}
-      value when is_integer(value) and value >= 0 -> {:ok, value}
-      _ -> option_error(:timeout, "must be a nonnegative integer or :infinity")
-    end
-  end
-
-  defp option_error(option, message),
+  defp invalid(option, message),
     do: {:error, Error.Invalid.Option.exception(option: option, message: message)}
-
-  defp definition_error(message),
-    do: {:error, Error.Invalid.Definition.exception(message: message)}
-
-  defp callback_error(message, value),
-    do: {:error, Error.Execution.Callback.exception(message: message, value: value)}
 end

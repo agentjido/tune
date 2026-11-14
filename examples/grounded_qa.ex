@@ -7,7 +7,7 @@ defmodule Tune.Examples.GroundedQA do
   parameter holds learned guidance that application code passes to `answer`.
   """
 
-  @behaviour Tune
+  @behaviour Tune.Program
 
   alias Tune.Execution
   alias Tune.Parameter

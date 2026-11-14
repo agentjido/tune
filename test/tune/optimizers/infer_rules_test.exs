@@ -53,7 +53,7 @@ defmodule Tune.Optimizers.InferRulesTest do
     proposal = Transport.respond_with(fn _ -> Transport.chat(rules: rules) end)
 
     result =
-      Tune.optimize(classifier(),
+      Tune.TestSupport.Search.run(classifier(),
         optimizer:
           {InferRules,
            Keyword.merge(
@@ -89,8 +89,14 @@ defmodule Tune.Optimizers.InferRulesTest do
              "Label it.\n\nPlease adhere to the following rules when making your prediction:\n1. Always say billing.\n2. Be brief."
 
     assert length(best.demos) == 2
-    assert Enum.map(report.candidates, & &1.label) == ["original", "bootstrapped", "rules_1"]
-    assert report.best.label == "rules_1"
+
+    assert Enum.map(report.history, & &1.metadata.label) == [
+             "original",
+             "bootstrapped",
+             "rules_1"
+           ]
+
+    assert report.best.metadata.label == "rules_1"
 
     for body <- Transport.requests(proposal) do
       text = Transport.prompt_text(body)
@@ -112,13 +118,13 @@ defmodule Tune.Optimizers.InferRulesTest do
 
     {{:ok, best, report}, _} = run(target, ["Never say billing."])
     assert best.signature.instructions == "Label it."
-    assert report.best.label == "bootstrapped"
+    assert report.best.metadata.label == "bootstrapped"
   end
 
   test "the original program remains selectable" do
     target = target(fn _prompt, demo? -> if demo?, do: "bug", else: "billing" end)
     {{:ok, best, report}, _} = run(target, ["Anything."])
     assert best == classifier()
-    assert report.best.label == "original"
+    assert report.best.metadata.label == "original"
   end
 end

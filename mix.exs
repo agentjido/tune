@@ -48,6 +48,8 @@ defmodule Tune.MixProject do
       {:jason, "~> 1.4"},
       {:req, "~> 0.7"},
       {:plug, "~> 1.16", only: :test},
+      {:nx, "~> 1.0", only: :test},
+      {:axon, "~> 0.9", only: :test},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}

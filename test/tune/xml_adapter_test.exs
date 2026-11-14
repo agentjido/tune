@@ -194,7 +194,7 @@ defmodule Tune.XMLAdapterTest do
       request_options: Transport.request_options(stub)
     ]
 
-    assert {:ok, result} = Tune.run(predictor, %{ticket: "charged twice"}, model: config)
+    assert {:ok, result} = Tune.Runtime.run(predictor, %{ticket: "charged twice"}, model: config)
     assert result.output == %{"label" => "billing", "confidence" => 0.8}
     assert [_one] = Transport.requests(stub)
 
@@ -207,7 +207,7 @@ defmodule Tune.XMLAdapterTest do
     ]
 
     assert {:error, %Error.Execution.Failed{cause: %Error.Output.Parse{field: "confidence"}}} =
-             Tune.run(predictor, %{ticket: "x"}, model: config)
+             Tune.Runtime.run(predictor, %{ticket: "x"}, model: config)
 
     assert [_one] = Transport.requests(bad)
   end

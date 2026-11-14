@@ -14,8 +14,8 @@ defmodule Tune.Execution do
   alias Tune.Error
   alias Tune.ModelConfig
   alias Tune.Parameter
+  alias Tune.Prediction
   alias Tune.Predictor
-  alias Tune.Result
 
   @roles [:target, :teacher, :proposal]
 
@@ -45,7 +45,7 @@ defmodule Tune.Execution do
           deadline: integer() | nil,
           scope: [String.t()],
           steps: [Tune.Step.t()],
-          failures: [Result.failure()]
+          failures: [Prediction.failure()]
         }
 
   @doc "Returns the managed roles."
@@ -113,8 +113,8 @@ defmodule Tune.Execution do
     role = Keyword.get(opts, :role, execution.role)
     scope = Keyword.get(opts, :scope)
 
-    with {:ok, parameters} <- Tune.parameters(program),
-         {:ok, signature} <- Tune.signature(program),
+    with {:ok, parameters} <- Tune.Program.parameters(program),
+         {:ok, signature} <- Tune.Program.signature(program),
          {:ok, inputs} <- Tune.Signature.normalize_inputs(signature, inputs) do
       nested = %{
         execution
@@ -126,7 +126,7 @@ defmodule Tune.Execution do
       restore =
         &%{&1 | parameters: execution.parameters, role: execution.role, scope: execution.scope}
 
-      case Tune.invoke(program, inputs, nested) do
+      case Tune.Program.invoke(program, inputs, nested) do
         {:ok, output, nested} -> {:ok, output, restore.(nested)}
         {:error, error, nested} -> {:error, error, restore.(nested)}
       end
@@ -156,9 +156,9 @@ defmodule Tune.Execution do
   def remaining_ms(%__MODULE__{deadline: deadline}), do: max(deadline - now(), 0)
 
   @doc false
-  @spec result(t(), map() | nil) :: Result.t()
-  def result(%__MODULE__{} = execution, output) do
-    %Result{
+  @spec prediction(t(), map() | nil) :: Prediction.t()
+  def prediction(%__MODULE__{} = execution, output) do
+    %Prediction{
       output: output,
       steps: Enum.reverse(execution.steps),
       failures: Enum.reverse(execution.failures),

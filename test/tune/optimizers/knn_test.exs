@@ -39,7 +39,7 @@ defmodule Tune.Optimizers.KNNTest do
 
   defp knn(opts \\ []) do
     {:ok, program, report} =
-      Tune.optimize(classifier(),
+      Tune.TestSupport.Search.run(classifier(),
         optimizer: {KNNFewShot, Keyword.merge([k: 1], opts)},
         trainset: @pool,
         model: config(:unused)
@@ -52,7 +52,7 @@ defmodule Tune.Optimizers.KNNTest do
   test "construction makes no calls and declares the pool as a parameter" do
     program = knn()
     assert %KNN{} = program
-    {:ok, parameters} = Tune.parameters(program)
+    {:ok, parameters} = Tune.Program.parameters(program)
     assert Map.keys(parameters) |> Enum.sort() == ["knn_pool", "root"]
     assert length(parameters["knn_pool"].value) == 3
   end
@@ -62,7 +62,7 @@ defmodule Tune.Optimizers.KNNTest do
     target = Transport.respond_with(fn _ -> Transport.chat(label: "billing") end)
     opts = [model: config(target), teacher: config(teacher), max_model_calls: 10]
 
-    assert {:ok, crash} = Tune.run(knn(), %{ticket: "it crashes when I start it"}, opts)
+    assert {:ok, crash} = Tune.Runtime.run(knn(), %{ticket: "it crashes when I start it"}, opts)
     assert crash.calls == %{teacher: 1, target: 1}
 
     assert Enum.map(crash.steps, &{&1.name, &1.role}) == [
@@ -70,7 +70,7 @@ defmodule Tune.Optimizers.KNNTest do
              {"root", :target}
            ]
 
-    assert {:ok, _payment} = Tune.run(knn(), %{ticket: "card payment refund"}, opts)
+    assert {:ok, _payment} = Tune.Runtime.run(knn(), %{ticket: "card payment refund"}, opts)
 
     [crash_target, payment_target] = Transport.requests(target)
     assert Transport.prompt_text(crash_target) =~ "the app crashes on start"
@@ -84,7 +84,7 @@ defmodule Tune.Optimizers.KNNTest do
     target = Transport.respond_with(fn _ -> Transport.chat(label: "billing") end)
 
     assert {:ok, result} =
-             Tune.run(knn(k: 2), %{ticket: "zzz"},
+             Tune.Runtime.run(knn(k: 2), %{ticket: "zzz"},
                model: config(target),
                teacher: config(teacher),
                max_model_calls: 10
@@ -100,11 +100,11 @@ defmodule Tune.Optimizers.KNNTest do
     stub = Transport.respond_with(fn _ -> Transport.chat(label: "billing") end)
 
     assert {:error, %Error.Execution.Failed{cause: %Error.Invalid.Option{option: :teacher}}} =
-             Tune.run(knn(), %{ticket: "x"}, model: config(stub), max_model_calls: 5)
+             Tune.Runtime.run(knn(), %{ticket: "x"}, model: config(stub), max_model_calls: 5)
 
     assert {:error,
             %Error.Execution.Failed{cause: %Error.Invalid.Option{option: :max_model_calls}}} =
-             Tune.run(knn(), %{ticket: "x"}, model: config(stub), teacher: config(stub))
+             Tune.Runtime.run(knn(), %{ticket: "x"}, model: config(stub), teacher: config(stub))
 
     assert Transport.requests(stub) == []
   end
@@ -118,7 +118,7 @@ defmodule Tune.Optimizers.KNNTest do
               cause: %Error.Execution.LimitReached{limit: :model_calls},
               result: result
             }} =
-             Tune.run(knn(k: 3), %{ticket: "x"},
+             Tune.Runtime.run(knn(k: 3), %{ticket: "x"},
                model: config(target),
                teacher: config(teacher),
                max_model_calls: 3
@@ -134,7 +134,7 @@ defmodule Tune.Optimizers.KNNTest do
     target = Transport.respond_with(fn _ -> Transport.chat(label: "billing") end)
 
     {:ok, _} =
-      Tune.run(program, %{ticket: "crash"},
+      Tune.Runtime.run(program, %{ticket: "crash"},
         model: config(target),
         teacher: config(teacher),
         max_model_calls: 5
@@ -151,7 +151,7 @@ defmodule Tune.Optimizers.KNNTest do
     target = Transport.respond_with(fn _ -> Transport.chat(label: "billing") end)
 
     assert {:ok, result} =
-             Tune.run(empty, %{ticket: "x"},
+             Tune.Runtime.run(empty, %{ticket: "x"},
                model: config(target),
                teacher: config(target),
                max_model_calls: 2
@@ -176,7 +176,7 @@ defmodule Tune.Optimizers.KNNTest do
     target = Transport.respond_with(fn _ -> Transport.chat(label: "billing") end)
 
     {:ok, _} =
-      Tune.run(knn(vectorizer: vectorizer), %{ticket: "invoice question"},
+      Tune.Runtime.run(knn(vectorizer: vectorizer), %{ticket: "invoice question"},
         model: config(target),
         teacher: config(teacher),
         max_model_calls: 5

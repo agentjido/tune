@@ -59,7 +59,7 @@ defmodule Tune.Optimizers.MIPROv2Test do
   end
 
   defp optimize(opts) do
-    Tune.optimize(
+    Tune.TestSupport.Search.run(
       classifier(),
       optimizer:
         {MIPROv2,
@@ -92,11 +92,11 @@ defmodule Tune.Optimizers.MIPROv2Test do
 
     assert best.signature.instructions == "Be exact."
     assert best.demos != []
-    assert report.best.selection_score == 1.0
+    assert report.best.evaluation.selected_score == 1.0
     assert report.complete?
     assert Map.keys(report.calls) |> Enum.sort() == [:proposal, :target, :teacher]
 
-    assert report.notes.instructions["root"] == [
+    assert report.metadata.notes.instructions["root"] == [
              "Label it.",
              "Memorize the answers.",
              "Be exact."
@@ -107,20 +107,22 @@ defmodule Tune.Optimizers.MIPROv2Test do
     assert {:ok, best, report} = optimize([])
 
     memorize =
-      Enum.filter(report.notes.trials, fn trial -> trial.choice["root.instruction"] == 1 end)
+      Enum.filter(report.metadata.notes.trials, fn trial ->
+        trial.choice["root.instruction"] == 1
+      end)
 
     assert memorize != []
     assert Enum.all?(memorize, &(&1.score == 1.0))
     refute best.signature.instructions == "Memorize the answers."
 
-    for candidate <- report.candidates do
-      assert candidate.complete?
+    for candidate <- report.history do
+      assert candidate.evaluation.complete?
     end
   end
 
   test "modeled suggestions concentrate on high-scoring choices after startup" do
     assert {:ok, _best, report} = optimize(num_trials: 14)
-    after_startup = Enum.drop(report.notes.trials, 3)
+    after_startup = Enum.drop(report.metadata.notes.trials, 3)
     good = Enum.count(after_startup, &(&1.score == 1.0))
     assert good > length(after_startup) / 2
   end
@@ -129,11 +131,11 @@ defmodule Tune.Optimizers.MIPROv2Test do
     assert {:ok, _best, report} = optimize_limited(25)
     refute report.complete?
     assert report.stop_reason == :budget_exhausted
-    assert Tune.Optimizer.Report.total_calls(report) <= 25
+    assert report.calls |> Map.values() |> Enum.sum() <= 25
   end
 
   defp optimize_limited(limit) do
-    Tune.optimize(classifier(),
+    Tune.TestSupport.Search.run(classifier(),
       optimizer:
         {MIPROv2,
          accept_score: 1.0,

@@ -21,14 +21,14 @@ defmodule Tune.Optimizers.Anything do
   evaluator/adapter interface.
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
   alias Tune.Field
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Reflective
   alias Tune.Optimizers.Shared
   alias Tune.Parameter
+  alias Tune.Search.Context
 
   @impl true
   def init(opts) do

@@ -35,13 +35,13 @@ defmodule Tune.Optimizers.SIMBA do
   the explicit validation set.
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
   alias Tune.Demo
   alias Tune.Metric
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Shared
+  alias Tune.Search.Context
 
   @options [:bsz, :num_candidates, :max_steps, :max_demos, :temperature, :num_final, :strategies]
 
@@ -298,7 +298,9 @@ defmodule Tune.Optimizers.SIMBA do
         {evaluation, ctx} = Context.evaluate(ctx, entry.program, batch)
 
         if evaluation.complete? do
-          value = evaluation.selection_score || evaluation.mean || ctx.failure_score || 0
+          value =
+            evaluation.selected_score || Tune.Evaluation.mean(evaluation) || ctx.failure_score ||
+              0
 
           pool =
             Enum.map(state.pool, fn e ->

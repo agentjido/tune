@@ -36,7 +36,7 @@ defmodule Tune.Optimizers.SIMBATest do
     do: Transport.respond_with(fn _ -> Transport.chat(feedback: text) end)
 
   defp optimize(target, opts, extra \\ []) do
-    Tune.optimize(
+    Tune.TestSupport.Search.run(
       classifier(),
       optimizer:
         {SIMBA, Keyword.merge([bsz: 3, num_candidates: 2, max_steps: 2, num_final: 2], opts)},
@@ -65,9 +65,9 @@ defmodule Tune.Optimizers.SIMBATest do
     assert {:ok, best, report} = optimize(target, strategies: [:append_a_demo])
     assert [demo | _] = best.demos
     assert demo.inputs["ticket"] =~ "easy"
-    assert report.best.selection_score == 1.0
-    assert hd(report.candidates).label == "baseline"
-    assert hd(report.candidates).selection_score == 0.5
+    assert report.best.evaluation.selected_score == 1.0
+    assert hd(report.history).metadata.label == "baseline"
+    assert hd(report.history).evaluation.selected_score == 0.5
   end
 
   test "variable behavior is targeted first and its own success becomes the demo" do
@@ -95,7 +95,7 @@ defmodule Tune.Optimizers.SIMBATest do
                train: rows(["steady", "flaky case", "other"])
              )
 
-    [step] = report.notes.steps
+    [step] = report.metadata.notes.steps
     assert hd(step.targeted).gap == 1.0
     assert hd(step.targeted).row == "1"
     assert hd(step.created).row == "1"
@@ -131,8 +131,10 @@ defmodule Tune.Optimizers.SIMBATest do
     assert {:error, %Tune.Error.Optimization.Failed{report: report}} =
              optimize(target, [], train: rows(["a", "b", "c"]))
 
-    assert Enum.all?(report.notes.steps, &(&1.created == []))
-    assert [%{label: "baseline", eligible?: false}] = report.candidates
+    assert Enum.all?(report.metadata.notes.steps, &(&1.created == []))
+    assert [baseline] = report.history
+    assert baseline.metadata.label == "baseline"
+    refute baseline.evaluation.eligible?
   end
 
   test "the same seed gives the same search" do
@@ -147,6 +149,6 @@ defmodule Tune.Optimizers.SIMBATest do
     {:ok, a, ra} = optimize(Transport.respond_with(rule), [], seed: 9)
     {:ok, b, rb} = optimize(Transport.respond_with(rule), [], seed: 9)
     assert a == b
-    assert ra.notes.steps == rb.notes.steps
+    assert ra.metadata.notes.steps == rb.metadata.notes.steps
   end
 end

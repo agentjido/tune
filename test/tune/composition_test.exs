@@ -7,8 +7,8 @@ defmodule Tune.CompositionTest do
   alias Tune.Examples.GroundedQA
   alias Tune.Execution
   alias Tune.Parameter
+  alias Tune.Prediction
   alias Tune.Predictor
-  alias Tune.Result
   alias Tune.TestSupport.Transport
 
   @inputs %{
@@ -35,8 +35,8 @@ defmodule Tune.CompositionTest do
     test "runs extraction then answering and records both steps in order" do
       stub = Transport.script([facts_reply(), answer_reply()])
 
-      assert {:ok, %Result{} = result} =
-               Tune.run(GroundedQA.new(), @inputs, model: model(stub))
+      assert {:ok, %Prediction{} = result} =
+               Tune.Runtime.run(GroundedQA.new(), @inputs, model: model(stub))
 
       assert result.output == %{"answer" => "Paris", "sources" => ["p1"]}
       assert Enum.map(result.steps, & &1.name) == ["extract", "answer"]
@@ -61,7 +61,7 @@ defmodule Tune.CompositionTest do
       stub = Transport.script([facts_reply(), {:text, "Paris, I think."}])
 
       assert {:error, %Error.Execution.Failed{cause: cause, result: result, step: "answer"}} =
-               Tune.run(GroundedQA.new(), @inputs, model: model(stub))
+               Tune.Runtime.run(GroundedQA.new(), @inputs, model: model(stub))
 
       assert %Error.Output.Parse{reply: "Paris, I think."} = cause
       assert result.output == nil
@@ -73,10 +73,10 @@ defmodule Tune.CompositionTest do
     test "learned lessons reach the answering prompt through application code" do
       program = GroundedQA.new()
       {:ok, lessons} = Parameter.put_value(program.lessons, ["Cite every source you used."])
-      {:ok, updated} = Tune.replace_parameters(program, %{"lessons" => lessons})
+      {:ok, updated} = Tune.Program.replace_parameters(program, %{"lessons" => lessons})
 
       stub = Transport.script([facts_reply(), answer_reply()])
-      assert {:ok, _result} = Tune.run(updated, @inputs, model: model(stub))
+      assert {:ok, _result} = Tune.Runtime.run(updated, @inputs, model: model(stub))
       [_extract, answer] = Transport.requests(stub)
       assert Transport.prompt_text(answer) =~ "- Cite every source you used."
 
@@ -100,21 +100,21 @@ defmodule Tune.CompositionTest do
         )
 
       assert {:error, %Error.Invalid.Definition{}} =
-               Tune.replace_parameters(program, %{"missing" => program.lessons})
+               Tune.Program.replace_parameters(program, %{"missing" => program.lessons})
 
       assert {:error, %Error.Invalid.Definition{}} =
-               Tune.replace_parameters(program, %{"lessons" => program.extract})
+               Tune.Program.replace_parameters(program, %{"lessons" => program.extract})
 
       assert {:error, %Error.Invalid.Definition{}} =
-               Tune.replace_parameters(program, %{"lessons" => other_schema})
+               Tune.Program.replace_parameters(program, %{"lessons" => other_schema})
 
       assert {:error, %Error.Invalid.Definition{}} =
-               Tune.replace_parameters(program, %{"extract" => changed})
+               Tune.Program.replace_parameters(program, %{"extract" => changed})
     end
 
     test "accepts new instructions and demos without changing the original", %{program: program} do
       {:ok, extract} = Predictor.put_instructions(program.extract, "Quote facts exactly.")
-      {:ok, updated} = Tune.replace_parameters(program, %{"extract" => extract})
+      {:ok, updated} = Tune.Program.replace_parameters(program, %{"extract" => extract})
 
       assert updated.extract.signature.instructions == "Quote facts exactly."
       refute program.extract.signature.instructions == "Quote facts exactly."
@@ -126,7 +126,7 @@ defmodule Tune.CompositionTest do
   end
 
   defmodule Branching do
-    @behaviour Tune
+    @behaviour Tune.Program
     defstruct [:classify, :triage, :mode]
 
     def new(mode \\ :normal) do
@@ -193,14 +193,19 @@ defmodule Tune.CompositionTest do
           Transport.chat(priority: "low")
         ])
 
-      assert {:ok, result} = Tune.run(Branching.new(), %{text: "crash"}, model: model(stub))
+      assert {:ok, result} =
+               Tune.Runtime.run(Branching.new(), %{text: "crash"}, model: model(stub))
+
       assert result.output == %{"result" => "high/low"}
       assert Enum.map(result.steps, & &1.name) == ["classify", "triage", "triage"]
     end
 
     test "the other branch makes only one call" do
       stub = Transport.script([Transport.chat(label: "question")])
-      assert {:ok, result} = Tune.run(Branching.new(), %{text: "how?"}, model: model(stub))
+
+      assert {:ok, result} =
+               Tune.Runtime.run(Branching.new(), %{text: "how?"}, model: model(stub))
+
       assert result.output == %{"result" => "question"}
       assert length(Transport.requests(stub)) == 1
     end
@@ -209,14 +214,14 @@ defmodule Tune.CompositionTest do
       stub = Transport.script([])
 
       assert {:error, %Error.Execution.Failed{cause: %Error.Execution.Callback{value: :ok}}} =
-               Tune.run(Branching.new(:bad_return), %{text: "x"}, model: model(stub))
+               Tune.Runtime.run(Branching.new(:bad_return), %{text: "x"}, model: model(stub))
     end
 
     test "reading a predictor as a value is a kind error" do
       stub = Transport.script([])
 
       assert {:error, %Error.Execution.Failed{cause: %Error.Invalid.Definition{message: message}}} =
-               Tune.run(Branching.new(:wrong_kind), %{text: "x"}, model: model(stub))
+               Tune.Runtime.run(Branching.new(:wrong_kind), %{text: "x"}, model: model(stub))
 
       assert message =~ "not a Tune.Parameter"
     end
@@ -225,7 +230,7 @@ defmodule Tune.CompositionTest do
       stub = Transport.script([])
 
       assert {:error, %Error.Execution.Failed{cause: %Error.Output.Invalid{}}} =
-               Tune.run(Branching.new(:bad_output), %{text: "x"}, model: model(stub))
+               Tune.Runtime.run(Branching.new(:bad_output), %{text: "x"}, model: model(stub))
     end
   end
 
@@ -238,7 +243,7 @@ defmodule Tune.CompositionTest do
                 cause: %Error.Execution.LimitReached{limit: :model_calls},
                 result: result
               }} =
-               Tune.run(Branching.new(), %{text: "crash"},
+               Tune.Runtime.run(Branching.new(), %{text: "crash"},
                  model: model(stub),
                  max_model_calls: 1
                )
@@ -252,7 +257,7 @@ defmodule Tune.CompositionTest do
 
       assert {:error,
               %Error.Execution.Failed{cause: %Error.Execution.LimitReached{limit: :model_calls}}} =
-               Tune.run(Branching.new(), %{text: "crash"},
+               Tune.Runtime.run(Branching.new(), %{text: "crash"},
                  model: model(stub),
                  max_model_calls: 0
                )
@@ -265,7 +270,10 @@ defmodule Tune.CompositionTest do
 
       assert {:error,
               %Error.Execution.Failed{cause: %Error.Execution.LimitReached{limit: :steps}}} =
-               Tune.run(Branching.new(), %{text: "crash"}, model: model(stub), max_steps: 2)
+               Tune.Runtime.run(Branching.new(), %{text: "crash"},
+                 model: model(stub),
+                 max_steps: 2
+               )
 
       assert length(Transport.requests(stub)) == 2
     end
@@ -275,16 +283,16 @@ defmodule Tune.CompositionTest do
 
       assert {:error,
               %Error.Execution.Failed{cause: %Error.Execution.LimitReached{limit: :deadline}}} =
-               Tune.run(Branching.new(), %{text: "crash"}, model: model(stub), timeout: 0)
+               Tune.Runtime.run(Branching.new(), %{text: "crash"}, model: model(stub), timeout: 0)
 
       assert Transport.requests(stub) == []
     end
 
     test "remaining time decreases and is passed as the request deadline" do
       {:ok, execution} =
-        Tune.new_execution(
+        Tune.Runtime.new_execution(
           Branching.new(),
-          elem(Tune.normalize_run_options(model: model(:unused), timeout: 10_000), 1)
+          elem(Tune.Runtime.normalize_options(model: model(:unused), timeout: 10_000), 1)
         )
 
       first = Execution.remaining_ms(execution)
@@ -295,7 +303,10 @@ defmodule Tune.CompositionTest do
 
     test "a missing role configuration is an error, not a silent fallback" do
       assert {:error, %Error.Invalid.Option{option: :role}} =
-               Tune.run(Branching.new(), %{text: "x"}, model: model(:unused), role: :teacher)
+               Tune.Runtime.run(Branching.new(), %{text: "x"},
+                 model: model(:unused),
+                 role: :teacher
+               )
     end
   end
 end

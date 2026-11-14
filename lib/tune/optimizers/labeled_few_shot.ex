@@ -14,10 +14,10 @@ defmodule Tune.Optimizers.LabeledFewShot do
   improvement claim; predictors without complete labeled examples keep no demos.
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.Shared
+  alias Tune.Search.Context
 
   @impl true
   def init(opts) do

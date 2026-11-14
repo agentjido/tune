@@ -6,10 +6,10 @@ defmodule Tune.Optimizers.ExampleLearningTest do
   alias Tune.Error
   alias Tune.Examples.GroundedQA
   alias Tune.Execution
-  alias Tune.Optimizer.Report
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Optimizers.LabeledFewShot
   alias Tune.Predictor
+  alias Tune.Result
   alias Tune.TestSupport.QAWorld
   alias Tune.TestSupport.Transport
 
@@ -46,17 +46,20 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       stub = Transport.script([])
       opts = [optimizer: {LabeledFewShot, k: 3}, trainset: tickets(10), model: config(stub)]
 
-      assert {:ok, first, %Report{} = report} =
-               Tune.optimize(classifier(), Keyword.put(opts, :seed, 7))
+      assert {:ok, first, %Result{} = report} =
+               Tune.TestSupport.Search.run(classifier(), Keyword.put(opts, :seed, 7))
 
-      assert {:ok, again, _} = Tune.optimize(classifier(), Keyword.put(opts, :seed, 7))
-      assert {:ok, other, _} = Tune.optimize(classifier(), Keyword.put(opts, :seed, 8))
+      assert {:ok, again, _} =
+               Tune.TestSupport.Search.run(classifier(), Keyword.put(opts, :seed, 7))
+
+      assert {:ok, other, _} =
+               Tune.TestSupport.Search.run(classifier(), Keyword.put(opts, :seed, 8))
 
       assert length(first.demos) == 3
       assert first.demos == again.demos
       refute first.demos == other.demos
       assert report.complete?
-      assert Report.total_calls(report) == 0
+      assert report.calls |> Map.values() |> Enum.sum() == 0
       assert report.best == nil
       assert Transport.requests(stub) == []
     end
@@ -65,7 +68,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       rows = [%{inputs: %{ticket: "no label"}} | tickets(3)]
 
       assert {:ok, program, _} =
-               Tune.optimize(classifier(),
+               Tune.TestSupport.Search.run(classifier(),
                  optimizer: {LabeledFewShot, k: 2, sample: false},
                  trainset: rows,
                  model: config(:unused)
@@ -76,7 +79,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
     test "rejects test data, validation-free misuse, and unknown options" do
       assert {:error, %Error.Invalid.Option{option: :testset}} =
-               Tune.optimize(classifier(),
+               Tune.TestSupport.Search.run(classifier(),
                  optimizer: LabeledFewShot,
                  trainset: tickets(2),
                  testset: tickets(1),
@@ -84,10 +87,13 @@ defmodule Tune.Optimizers.ExampleLearningTest do
                )
 
       assert {:error, %Error.Invalid.Option{option: :trainset}} =
-               Tune.optimize(classifier(), optimizer: LabeledFewShot, model: config(:unused))
+               Tune.TestSupport.Search.run(classifier(),
+                 optimizer: LabeledFewShot,
+                 model: config(:unused)
+               )
 
       assert {:error, %Error.Invalid.Option{option: :kk}} =
-               Tune.optimize(classifier(),
+               Tune.TestSupport.Search.run(classifier(),
                  optimizer: {LabeledFewShot, kk: 1},
                  trainset: tickets(2),
                  model: config(:unused)
@@ -112,7 +118,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       teacher = QAWorld.stub()
 
       assert {:ok, program, report} =
-               Tune.optimize(GroundedQA.new(),
+               Tune.TestSupport.Search.run(GroundedQA.new(),
                  optimizer: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 2},
                  trainset: rows,
                  metric: &QAWorld.metric/2,
@@ -134,14 +140,14 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       assert first_answer.outputs == %{"answer" => "first", "sources" => ["alpha-1"]}
       assert first_answer.inputs["guidance"] == "None."
 
-      assert report.notes.bootstrapped == %{"answer" => 2, "extract" => 2}
+      assert report.metadata.notes.bootstrapped == %{"answer" => 2, "extract" => 2}
     end
 
     test "a failed answer step cannot supply the extraction trace", %{rows: rows} do
       teacher = QAWorld.stub(overrides: %{"What is Alpha?" => :fail_answer})
 
       assert {:ok, program, report} =
-               Tune.optimize(GroundedQA.new(),
+               Tune.TestSupport.Search.run(GroundedQA.new(),
                  optimizer: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 3},
                  trainset: rows,
                  metric: &QAWorld.metric/2,
@@ -153,14 +159,14 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       questions = Enum.map(program.extract.demos, & &1.inputs["question"])
       refute "What is Alpha?" in questions
       assert questions == ["What is Beta?", "What is Gamma?"]
-      assert report.notes.accepted_rows == 2
+      assert report.metadata.notes.accepted_rows == 2
     end
 
     test "a low score rejects a complete trajectory", %{rows: rows} do
       teacher = QAWorld.stub(overrides: %{"What is Beta?" => {:answer, "wrong"}})
 
       assert {:ok, program, _report} =
-               Tune.optimize(GroundedQA.new(),
+               Tune.TestSupport.Search.run(GroundedQA.new(),
                  optimizer: {BootstrapFewShot, accept_score: 1.0},
                  trainset: rows,
                  metric: &QAWorld.metric/2,
@@ -176,7 +182,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       teacher = QAWorld.stub()
 
       assert {:error, %Error.Optimization.Failed{report: report, cause: cause}} =
-               Tune.optimize(GroundedQA.new(),
+               Tune.TestSupport.Search.run(GroundedQA.new(),
                  optimizer: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 3},
                  trainset: rows,
                  metric: &QAWorld.metric/2,
@@ -190,14 +196,14 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       assert report.stop_reason == :budget_exhausted
       assert report.calls == %{teacher: 3}
       assert length(Transport.requests(teacher)) == 3
-      assert report.notes.bootstrapped["extract"] == 1
+      assert report.metadata.notes.bootstrapped["extract"] == 1
     end
 
     test "a zero budget starts no request", %{rows: rows} do
       teacher = QAWorld.stub()
 
       assert {:error, %Error.Optimization.Failed{report: %{calls: calls}}} =
-               Tune.optimize(GroundedQA.new(),
+               Tune.TestSupport.Search.run(GroundedQA.new(),
                  optimizer: {BootstrapFewShot, accept_score: 1.0},
                  trainset: rows,
                  metric: &QAWorld.metric/2,
@@ -214,13 +220,13 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       base = [trainset: rows, metric: &QAWorld.metric/2, model: config(:unused)]
 
       assert {:error, %Error.Invalid.Option{option: :teacher}} =
-               Tune.optimize(
+               Tune.TestSupport.Search.run(
                  GroundedQA.new(),
                  [optimizer: {BootstrapFewShot, accept_score: 1.0}, max_model_calls: 5] ++ base
                )
 
       assert {:error, %Error.Invalid.Option{option: :max_model_calls}} =
-               Tune.optimize(
+               Tune.TestSupport.Search.run(
                  GroundedQA.new(),
                  [optimizer: {BootstrapFewShot, accept_score: 1.0}, teacher: config(:unused)] ++
                    base
@@ -228,7 +234,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
       assert {:error,
               %Error.Optimization.Failed{cause: %Error.Invalid.Option{option: :accept_score}}} =
-               Tune.optimize(
+               Tune.TestSupport.Search.run(
                  GroundedQA.new(),
                  [optimizer: BootstrapFewShot, teacher: config(:unused), max_model_calls: 5] ++
                    base
@@ -239,7 +245,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       teacher = QAWorld.stub()
 
       assert {:ok, _program, report} =
-               Tune.optimize(GroundedQA.new(),
+               Tune.TestSupport.Search.run(GroundedQA.new(),
                  optimizer: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 5},
                  trainset: rows ++ [hd(rows)],
                  metric: &QAWorld.metric/2,
@@ -248,8 +254,8 @@ defmodule Tune.Optimizers.ExampleLearningTest do
                  max_model_calls: 20
                )
 
-      assert report.notes.train_duplicates_removed == 1
-      assert report.datasets.train == 3
+      assert report.metadata.notes.train_duplicates_removed == 1
+      assert report.metadata.datasets.train == 3
     end
   end
 
@@ -258,7 +264,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       teacher = Transport.respond_with(fn _body -> Transport.chat(label: "bug") end)
 
       assert {:ok, _program, _report} =
-               Tune.optimize(classifier(),
+               Tune.TestSupport.Search.run(classifier(),
                  optimizer: {BootstrapFewShot, max_bootstrapped_demos: 3, max_labeled_demos: 3},
                  trainset: tickets(3),
                  model: config(:unused),
@@ -275,7 +281,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
   end
 
   defmodule Repeating do
-    @behaviour Tune
+    @behaviour Tune.Program
     defstruct [:step]
 
     def new do
@@ -321,7 +327,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       end)
 
     assert {:ok, program, _report} =
-             Tune.optimize(Repeating.new(),
+             Tune.TestSupport.Search.run(Repeating.new(),
                optimizer: {BootstrapFewShot, max_bootstrapped_demos: 1, max_labeled_demos: 0},
                trainset: [%{inputs: %{text: "start"}}],
                model: config(:unused),

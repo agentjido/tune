@@ -5,13 +5,13 @@ defmodule Tune.Optimizers.Shared do
   alias Tune.Demo
   alias Tune.Example
   alias Tune.Parameter
+  alias Tune.Prediction
   alias Tune.Predictor
-  alias Tune.Result
   alias Tune.Signature
 
   @spec predictors(Tune.t()) :: [{String.t(), Predictor.t()}]
   def predictors(program) do
-    {:ok, parameters} = Tune.parameters(program)
+    {:ok, parameters} = Tune.Program.parameters(program)
 
     parameters
     |> Enum.filter(fn {_name, value} -> match?(%Predictor{}, value) end)
@@ -20,7 +20,7 @@ defmodule Tune.Optimizers.Shared do
 
   @spec values(Tune.t()) :: [{String.t(), Parameter.t()}]
   def values(program) do
-    {:ok, parameters} = Tune.parameters(program)
+    {:ok, parameters} = Tune.Program.parameters(program)
 
     parameters
     |> Enum.filter(fn {_name, value} -> match?(%Parameter{}, value) end)
@@ -46,8 +46,8 @@ defmodule Tune.Optimizers.Shared do
     end
   end
 
-  @spec trajectory_demos(Result.t(), [String.t()]) :: %{String.t() => Demo.t()}
-  def trajectory_demos(%Result{steps: steps}, names) do
+  @spec trajectory_demos(Prediction.t(), [String.t()]) :: %{String.t() => Demo.t()}
+  def trajectory_demos(%Prediction{steps: steps}, names) do
     steps
     |> Enum.filter(&(&1.name in names))
     |> Enum.reduce(%{}, fn step, acc ->
@@ -67,27 +67,27 @@ defmodule Tune.Optimizers.Shared do
         {name, %{predictor | demos: Enum.reject(predictor.demos, &(&1.inputs == row_inputs))}}
       end)
 
-    {:ok, program} = Tune.replace_parameters(program, updates)
+    {:ok, program} = Tune.Program.replace_parameters(program, updates)
     program
   end
 
   @spec put_demos(Tune.t(), %{String.t() => [Demo.t()]}) :: Tune.t()
   def put_demos(program, demos_by_name) do
-    {:ok, parameters} = Tune.parameters(program)
+    {:ok, parameters} = Tune.Program.parameters(program)
 
     updates =
       Map.new(demos_by_name, fn {name, demos} ->
         {name, %{Map.fetch!(parameters, name) | demos: demos}}
       end)
 
-    {:ok, program} = Tune.replace_parameters(program, updates)
+    {:ok, program} = Tune.Program.replace_parameters(program, updates)
     program
   end
 
   @spec put_instructions(Tune.t(), %{String.t() => String.t()}) ::
           {:ok, Tune.t()} | {:error, Exception.t()}
   def put_instructions(program, instructions_by_name) do
-    {:ok, parameters} = Tune.parameters(program)
+    {:ok, parameters} = Tune.Program.parameters(program)
 
     instructions_by_name
     |> Enum.reduce_while({:ok, %{}}, fn {name, text}, {:ok, acc} ->
@@ -97,17 +97,17 @@ defmodule Tune.Optimizers.Shared do
       end
     end)
     |> case do
-      {:ok, updates} -> Tune.replace_parameters(program, updates)
+      {:ok, updates} -> Tune.Program.replace_parameters(program, updates)
       error -> error
     end
   end
 
   @spec put_value(Tune.t(), String.t(), term()) :: {:ok, Tune.t()} | {:error, Exception.t()}
   def put_value(program, name, value) do
-    {:ok, parameters} = Tune.parameters(program)
+    {:ok, parameters} = Tune.Program.parameters(program)
 
     with {:ok, parameter} <- Parameter.put_value(Map.fetch!(parameters, name), value) do
-      Tune.replace_parameters(program, %{name => parameter})
+      Tune.Program.replace_parameters(program, %{name => parameter})
     end
   end
 

@@ -26,8 +26,8 @@ defmodule Tune.Optimizers.Reflective do
   alias Tune.Evaluation
   alias Tune.Example
   alias Tune.Metric
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.Shared
+  alias Tune.Search.Context
 
   @type component :: %{
           name: String.t(),
@@ -90,15 +90,15 @@ defmodule Tune.Optimizers.Reflective do
       id: id,
       program: program,
       parents: parents,
-      mean: evaluation.selection_score,
-      row_scores: Map.new(evaluation.rows, &{&1.id, row_score(&1, evaluation)}),
+      mean: evaluation.selected_score,
+      row_scores: Map.new(evaluation.observations, &{&1.id, row_score(&1, evaluation)}),
       texts: Map.new(components, &{&1.name, &1.get.(program)})
     }
   end
 
-  defp row_score(%{status: :ok, score: score}, _evaluation), do: score
-  defp row_score(_row, %{failure_score: nil}), do: nil
-  defp row_score(_row, %{failure_score: score}), do: score
+  defp row_score(%{status: :ok, metadata: %{selected_score: score}}, _evaluation), do: score
+
+  defp row_score(%{metadata: metadata}, _evaluation), do: Map.get(metadata, :selected_score)
 
   defp loop(config, _components, state, ctx, iteration) when iteration > config.max_iterations,
     do: {state, ctx}
@@ -208,11 +208,11 @@ defmodule Tune.Optimizers.Reflective do
     %{state | log: [record | state.log]}
   end
 
-  defp minibatch_total(%Evaluation{rows: rows, failure_score: failure_score}, _ctx) do
+  defp minibatch_total(%Evaluation{} = evaluation, _ctx) do
     Enum.sum(
-      Enum.map(rows, fn
-        %{status: :ok, score: score} -> score
-        _ -> failure_score || 0
+      Enum.map(evaluation.observations, fn
+        %{status: :ok, metadata: %{selected_score: score}} -> score
+        %{metadata: metadata} -> Map.get(metadata, :selected_score, 0)
       end)
     )
   end

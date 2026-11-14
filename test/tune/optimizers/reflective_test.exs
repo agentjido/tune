@@ -77,7 +77,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
   defp gepa(opts, reflector \\ reflector(), metric \\ &QAWorld.metric/2) do
     {seed, opts} = Keyword.pop(opts, :seed, 0)
 
-    Tune.optimize(GroundedQA.new(),
+    Tune.TestSupport.Search.run(GroundedQA.new(),
       optimizer:
         {GEPA, Keyword.merge([max_iterations: 6, minibatch_size: 2, merge_every: 3], opts)},
       trainset:
@@ -100,7 +100,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
       reflector = reflector()
       assert {:ok, best, report} = gepa([use_merge: false], reflector)
 
-      assert report.best.selection_score == 1.0
+      assert report.best.evaluation.selected_score == 1.0
       assert best.answer.signature.instructions == "Cite the passage id and answer."
       assert best.extract.signature.instructions == "Quote the passages exactly."
 
@@ -108,7 +108,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
       assert Transport.prompt_text(first) =~ "feedback: expected"
       assert Transport.prompt_text(first) =~ "score: 0.0"
 
-      pool = report.notes.pool
+      pool = report.metadata.notes.pool
       assert hd(pool).parents == []
       assert Enum.all?(tl(pool), &(&1.parents != []))
     end
@@ -119,7 +119,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
 
       merges =
         for {:ok, _best, report} <- results,
-            record <- report.notes.iterations,
+            record <- report.metadata.notes.iterations,
             record.kind == :merge,
             do: {record, report}
 
@@ -127,9 +127,9 @@ defmodule Tune.Optimizers.ReflectiveTest do
 
       for {record, report} <- merges do
         [a, b] = record.parents
-        merged = Enum.find(report.candidates, &(&1[:merged_from] == [a, b]))
-        assert merged.ancestor == record.ancestor
-        assert merged.selection_score == 1.0
+        merged = Enum.find(report.history, &(&1.lineage[:merged_from] == [a, b]))
+        assert merged.metadata.ancestor == record.ancestor
+        assert merged.evaluation.selected_score == 1.0
       end
     end
 
@@ -139,7 +139,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
       end
 
       assert {:ok, _best, report} = gepa([use_merge: false], reflector(), metric)
-      assert report.best.selection_score == 1.0
+      assert report.best.evaluation.selected_score == 1.0
     end
 
     test "per-row strengths shape the Pareto frontier" do
@@ -157,13 +157,14 @@ defmodule Tune.Optimizers.ReflectiveTest do
       same = Transport.respond_with(fn _ -> Transport.chat(new_instruction: "Try harder.") end)
       assert {:ok, best, report} = gepa([use_merge: false, max_iterations: 2], same)
       assert best == GroundedQA.new()
-      assert Enum.all?(report.notes.iterations, &(not &1.accepted?))
-      assert [%{label: "baseline"}] = report.candidates
+      assert Enum.all?(report.metadata.notes.iterations, &(not &1.accepted?))
+      assert [baseline] = report.history
+      assert baseline.metadata.label == "baseline"
     end
 
     test "the call limit holds during reflection and validation" do
       assert {:ok, _best, report} =
-               Tune.optimize(GroundedQA.new(),
+               Tune.TestSupport.Search.run(GroundedQA.new(),
                  optimizer: {GEPA, max_iterations: 10, minibatch_size: 2},
                  trainset: qa_rows(" train"),
                  valset: qa_rows(""),
@@ -174,12 +175,12 @@ defmodule Tune.Optimizers.ReflectiveTest do
                )
 
       refute report.complete?
-      assert Tune.Optimizer.Report.total_calls(report) <= 13
+      assert report.calls |> Map.values() |> Enum.sum() <= 13
     end
   end
 
   defmodule Styled do
-    @behaviour Tune
+    @behaviour Tune.Program
     defstruct [:root, :style, :other]
 
     def new(schema \\ Zoi.string(), value \\ "Be casual.") do
@@ -248,7 +249,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
     end
 
     result =
-      Tune.optimize(program,
+      Tune.TestSupport.Search.run(program,
         optimizer:
           {Anything,
            Keyword.merge([parameter: "style", max_iterations: 3, minibatch_size: 2], opts)},
@@ -269,7 +270,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
       assert best.style.value == "Be formal and polite."
       assert best.other.value == ["keep"]
       assert best.root == Styled.new().root
-      assert report.best.selection_score == 1.0
+      assert report.best.evaluation.selected_score == 1.0
 
       [request | _] = Transport.requests(proposer)
       assert Transport.prompt_text(request) =~ "Reply style guide"
@@ -286,7 +287,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
         )
 
       assert best.style.value == %{"tone" => "formal", "max_words" => 20}
-      rejected = Enum.filter(report.notes.iterations, &(&1.child_minibatch == nil))
+      rejected = Enum.filter(report.metadata.notes.iterations, &(&1.child_minibatch == nil))
       assert length(rejected) >= 2
     end
 

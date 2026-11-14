@@ -1,34 +1,34 @@
-# Programs, predictors, and evaluation
+# Programs and evaluation
 
-## Signatures and predictors
+## Typed predictors
 
-A signature declares ordered, typed input and output fields and task
-instructions. Field schemas are Zoi schemas restricted to JSON values:
-strings, integers, floats, numbers, booleans, null, string enums, scalar
-literals, arrays, string-keyed objects and records, and unions of those.
-Declared fields are required; use a nullable schema for optional values.
+A `Tune.Predictor` has one typed signature. The signature declares ordered
+input fields, ordered output fields, and instructions.
 
 ```elixir
 {:ok, predictor} =
   Tune.Predictor.new(
     signature: [
       instructions: "Classify the support ticket.",
-      inputs: [ticket: Zoi.string(description: "Customer message")],
-      outputs: [label: Zoi.enum(["billing", "bug", "other"]), confidence: Zoi.float()]
+      inputs: [ticket: Zoi.string()],
+      outputs: [
+        label: Zoi.enum(["billing", "bug", "other"]),
+        confidence: Zoi.float()
+      ]
     ]
   )
 ```
 
-Names are normalized to strings once. Inputs may use the declared atom or
-string keys; values and outputs are string-keyed maps.
+Fields use JSON-compatible Zoi schemas. Tune normalizes field names once. A
+validated output is a string-keyed map.
 
 ## Model configuration
 
-A run uses one explicit, fixed model configuration per role: a ReqLLM model,
-a prompt adapter, adapter options, and ReqLLM request options.
+Each tuning run has one fixed target model configuration. A search can also
+have separate teacher and proposal configurations.
 
 ```elixir
-{:ok, model} =
+{:ok, target} =
   Tune.ModelConfig.new(
     model: "openai:gpt-4o-mini",
     adapter: Tune.Adapter.JSON,
@@ -37,67 +37,124 @@ a prompt adapter, adapter options, and ReqLLM request options.
   )
 ```
 
-Options that would replace the output contract, change the prompt, add tools,
-stream, or repair output (`:output`, `:output_repair`, `:output_validation`,
-`:system_prompt`, `:tools`, `:tool_choice`, `:stream`, `json_repair: true`) are
-rejected. Every managed request sends `json_repair: false`; structured output
-uses strict validation, and any ReqLLM repair or type coercion is rejected.
+The model configuration selects the adapter. Tune does not change the target
+model or adapter during a search. ReqLLM owns the provider request and transport
+retries.
 
-## Adapters
+Chat, JSON, and XML adapters only render a prompt and parse a reply. They do not
+retry, repair, or call a model. Repair and extraction must be explicit program
+steps.
 
-`Adapter.Chat`, `Adapter.JSON` (`mode: :text | :structured`), and
-`Adapter.XML` render and parse only. They never call a model, retry, repair,
-or fall back to another format. All three produce the same validated output
-map. Compare formats by measured score, parse success, and tokens.
+## Prompt inspection
 
-## Inspecting and hosting a request
-
-`Predictor.prepare/3` validates inputs and renders a `Prepared` value with
-the ReqLLM context and output descriptor, without credentials or request
-options. `Predictor.finish/2` checks a `ReqLLM.Response` (no error or
-refusal, finish reason `:stop`, or `:tool_calls` for structured output) and
-returns a validated `Step`. See [Host integration](host_integration.md).
-
-## Composition
-
-A composite program is an application struct implementing the
-`Tune` behaviour. Control flow is ordinary Elixir:
+`Tune.preview/2` prepares one request and makes no model call.
 
 ```elixir
+{:ok, prepared} =
+  predictor
+  |> Tune.new(model: target)
+  |> Tune.preview(%{ticket: "I was charged twice."})
+
+Enum.each(prepared.context.messages, &IO.inspect/1)
+```
+
+For a composed program, give the predictor name with its inputs:
+
+```elixir
+Tune.preview(pipeline, {"answer", %{question: question, facts: facts}})
+```
+
+## Composed programs
+
+A composed program is an application struct that implements `Tune.Program`.
+Its control flow is normal Elixir code.
+
+```elixir
+@behaviour Tune.Program
+
 def call(_program, inputs, execution) do
-  with {:ok, %{"facts" => facts}, execution} <- Execution.predict(execution, "extract", inputs),
-       {:ok, lessons} <- Execution.value(execution, "lessons") |> wrap(execution) do
-    Execution.predict(execution, "answer", %{
+  with {:ok, %{"facts" => facts}, execution} <-
+         Tune.Execution.predict(execution, "extract", inputs) do
+    Tune.Execution.predict(execution, "answer", %{
       "question" => inputs["question"],
-      "facts" => facts,
-      "guidance" => Enum.join(lessons, "\n")
+      "facts" => facts
     })
   end
 end
 ```
 
-`Tune.run/3` returns a `Result` with the validated output, every
-step in call order, failed calls, and attempted calls per role. A failure
-after the run starts returns `Error.Execution.Failed` with the original cause
-and the partial result. Runs enforce `:max_model_calls` (optional), a step
-limit (default 32), and a cooperative deadline (default 60 s) that caps each
-request's `:total_timeout`. Work in application callbacks outside
-`Execution` is not managed.
+The application declares its predictors and learned values through the other
+`Tune.Program` callbacks. Tune can then update those values without changing
+the program code.
 
-## Evaluation
+## Data and scores
+
+`Tune.data/2` accepts `:train`, `:validation`, and `:test` data. A value can be
+an Enumerable or a zero-arity function that returns an Enumerable. Use a
+factory when Tune must read a stream for more than one candidate. Give an
+explicit `cases` or `evaluations` limit for an infinite source.
 
 ```elixir
-{:ok, evaluation} =
-  Tune.evaluate(program, rows,
-    model: model,
-    metric: fn example, result -> if result.output["label"] == example.labels["label"], do: 1, else: 0 end
-  )
+pipeline =
+  Tune.new(program, model: target)
+  |> Tune.data(test: fn -> File.stream!("cases.jsonl") |> Stream.map(&decode/1) end)
+  |> Tune.score(:correct, &correct?/2, failure_score: 0.0)
+  |> Tune.limit(cases: 1_000, concurrency: 4, row_timeout: 30_000)
+
+{:ok, evaluation} = Tune.evaluate(pipeline)
 ```
 
-A metric returns a finite number or `%{score: number, feedback: text}`.
-Higher is better; there is no range. Failed rows are kept. Without
-`:failure_score` a failed row makes the evaluation ineligible and
-`selection_score` is `nil`; with it, the score is included in the mean.
-Labels are passed only to the metric. Rows have a hard timeout; under a call
-limit, a killed row reserves its allowance and no further rows start.
-Optimization never accepts test data; run final test evaluation separately.
+A program row is a `%Tune.Example{}` or a map with `:inputs`, optional
+`:labels`, and optional `:id`. Labels go only to the score callback.
+
+Each `Tune.score/4` call adds one named score. A score returns a number or a map
+with `:score` and optional `:feedback`. Higher values win by default. Use
+`direction: :minimize` for a loss or cost.
+
+Without `failure_score`, a failed row makes the evaluation ineligible. With a
+failure score, the row error stays in the result and the candidate can remain
+eligible.
+
+When a pipeline has more than one score, it needs an explicit selector:
+
+```elixir
+pipeline
+|> Tune.score(:quality, &quality/2, range: {0.0, 1.0})
+|> Tune.score(:cost, &cost/2, direction: :minimize, range: {0.0, 10.0})
+|> Tune.select(weighted: [quality: 0.8, cost: 0.2])
+```
+
+A weighted selector needs an explicit range for every selected score. Raw
+scores stay unchanged in each `%Tune.Observation{}`. Tune normalizes only the
+selection value.
+
+## Evaluation results
+
+`Tune.evaluate/2` uses test data by default. Pass `:train`, `:validation`, or
+`:test` to select another role.
+
+It returns `%Tune.Evaluation{}` with:
+
+- every `%Tune.Observation{}`, including row errors;
+- one `%Tune.Score.Summary{}` for each score;
+- one higher-is-better selected score;
+- eligibility and completion flags;
+- call and usage totals;
+- a stop reason.
+
+Evaluation is an eager terminal. It consumes the source once and returns a
+complete value. Test evaluation is separate from candidate search.
+
+## Generic runners
+
+For a non-program target, give `Tune.new/2` a one-arity or two-arity `:run`
+function. A one-arity runner receives the target. A two-arity runner receives
+the target and one case input.
+
+```elixir
+Tune.new(config, run: fn candidate, batch -> MyBenchmark.run(candidate, batch) end)
+```
+
+Tune treats runner values as opaque Elixir terms. This permits Nx tensors,
+Axon models, and application structs. The score callback must convert its final
+value to a finite Elixir number.

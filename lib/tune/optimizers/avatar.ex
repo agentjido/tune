@@ -21,12 +21,12 @@ defmodule Tune.Optimizers.Avatar do
   ordinary program traces; it needs no Avatar agent runtime or tools.
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Reflective
   alias Tune.Optimizers.Shared
+  alias Tune.Search.Context
 
   @options [:predictor, :upper_bound, :lower_bound, :max_iters, :max_positive, :max_negative]
 

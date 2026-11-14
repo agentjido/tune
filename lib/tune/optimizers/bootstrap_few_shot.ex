@@ -27,12 +27,12 @@ defmodule Tune.Optimizers.BootstrapFewShot do
   callers control provider caching explicitly through request options.
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
   alias Tune.Metric
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.LabeledFewShot
   alias Tune.Optimizers.Shared
+  alias Tune.Search.Context
 
   @options [:accept_score, :max_bootstrapped_demos, :max_labeled_demos, :max_rounds]
 

@@ -19,12 +19,12 @@ defmodule Tune.Optimizers.GEPA do
   tracking, or multi-objective metric framework.
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Reflective
   alias Tune.Optimizers.Shared
+  alias Tune.Search.Context
 
   @impl true
   def init(opts) do

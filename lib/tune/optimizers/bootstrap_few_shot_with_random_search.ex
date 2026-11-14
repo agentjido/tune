@@ -14,12 +14,12 @@ defmodule Tune.Optimizers.BootstrapFewShotWithRandomSearch do
   options (`:accept_score` required).
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Optimizers.ExampleSets
   alias Tune.Optimizers.Shared
+  alias Tune.Search.Context
 
   @impl true
   def init(opts) do

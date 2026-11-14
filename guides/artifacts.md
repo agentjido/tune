@@ -1,55 +1,64 @@
-# Parameter artifacts
+# Artifacts
 
-New artifacts use the format identifier `tune.parameters`, version 1. Tune also
-accepts version 1 artifacts with the former `req_llm_program.parameters`
-identifier, including direct `apply/2` calls. Decoding and encoding use the new
-identifier. Parameter payloads and schema fingerprints are unchanged. Old
-readers do not accept the new identifier. Provenance from an old artifact can
-retain old module names; these strings are descriptive and never load code.
-
-Learned parameters are exchanged as versioned JSON data. Code, model
-configuration, and credentials stay in the application.
+`Tune.dump/1` creates one `%Tune.Artifact{}` from a tuning result. The artifact
+contains learned values and safe run provenance. It does not contain code,
+credentials, request options, functions, response structs, tensors, or models.
 
 ```elixir
-provenance = Tune.Parameters.provenance(source: "nightly", report: report, models: [target: model])
-{:ok, artifact} = Tune.Parameters.dump(optimized, provenance: provenance)
-{:ok, json} = Tune.Parameters.encode(artifact)
-File.write!("qa_params.json", json)
+{:ok, artifact} = Tune.dump(result)
+{:ok, json} = Tune.Artifact.encode(artifact)
+File.write!("tune.json", json)
 
-{:ok, decoded} = Tune.Parameters.decode(File.read!("qa_params.json"))
-{:ok, program} = Tune.Parameters.apply(MyApp.QA.new(), decoded)
+{:ok, decoded} = File.read!("tune.json") |> Tune.Artifact.decode()
+{:ok, updated_program} = Tune.load(decoded, fresh_program)
 ```
 
-## Format (version 1)
+The application supplies fresh code and runtime model configuration. Loading
+an artifact validates the full contract before it changes the target. A failed
+load returns an error and does not partly update the target.
+
+## Artifact shape
 
 ```json
 {
-  "format": "tune.parameters",
   "version": 1,
-  "entries": {
-    "answer": {"kind": "predictor", "fingerprint": "…", "instructions": "…", "demos": [{"inputs": {}, "outputs": {}}]},
-    "lessons": {"kind": "value", "fingerprint": "…", "value": ["…"]}
-  },
-  "provenance": {"source": "…", "models": {}, "optimizer": "…", "settings": {}, "seed": 0,
-                 "datasets": {}, "best": {}, "complete": true, "stop_reason": "completed",
-                 "calls": {}, "usage": {}}
+  "target_fingerprint": "sha256-value",
+  "parameters": {},
+  "provenance": {}
 }
 ```
 
-- Predictor fingerprints cover ordered field names and JSON schemas; value
-  fingerprints cover the schema. Instructions, values, and schema prose
-  (`description`, `title`, `examples`) are excluded. SHA-256 over canonical
-  JSON with sorted keys.
-- `decode/2` rejects unknown formats, versions, fields, and kinds, and
-  enforces byte and entry limits. No atoms are created and no code is loaded.
-- `apply/2` requires exactly the program's declared names, the same kinds and
-  fingerprints, and valid values, then applies everything at once. A failed
-  load changes nothing.
-- Provenance is an allowlist of descriptive data. It never contains request
-  options, credentials, functions, processes, or responses, and it never
-  selects models.
-- Demonstrations and lessons can contain application text. There is no
-  content-based secret removal.
-- A reloaded `Tune.KNN` program still needs a teacher configuration
-  and an explicit `:max_model_calls` at run time; its vectorizer is code and
-  is not saved.
+`Tune.Artifact.decode/1` accepts only these four fields and enforces a fixed
+size limit. It creates no atoms from artifact text. Zoi validates the data as
+JSON-compatible values.
+
+## Structured programs
+
+For a Tune program, `parameters` contains the program's named predictors and
+declared values. Predictor fingerprints cover ordered field names and JSON
+schemas. Instructions and schema prose do not change the fingerprint.
+
+Loading requires the same parameter names, kinds, and field contracts. The
+loaded artifact can change instructions, demonstrations, and declared
+JSON-compatible values. It cannot change application code or a predictor's
+input and output fields.
+
+## Generic targets
+
+For a generic map or struct, `parameters` contains only the values declared by
+`Tune.vary/2`. Loading requires the same names and compatible JSON value kinds
+in a fresh target.
+
+Nx tensors, Axon models, functions, processes, ports, references, and other
+opaque terms can pass through runners and result metadata. They cannot become
+learned artifact parameters.
+
+## Provenance
+
+Provenance can record the strategy, completion state, stop reason, score names,
+safe model descriptions, data fingerprints, call totals, and usage totals.
+Runtime options and credentials stay in the application.
+
+Demonstrations and learned text can contain application data. Tune does not
+remove secrets from that content. The application must control the data that it
+uses for training and artifacts.

@@ -16,11 +16,11 @@ defmodule Tune.Optimizers.KNNFewShot do
   trajectory, as DSPy does when no metric is given.
   """
 
-  @behaviour Tune.Optimizer
+  @behaviour Tune.Search.ProgramStrategy
 
   alias Tune.KNN
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.Shared
+  alias Tune.Search.Context
 
   @impl true
   def init(opts) do

@@ -5,8 +5,8 @@ defmodule Tune.PredictorTest do
   alias Tune.Adapter
   alias Tune.Error
   alias Tune.ModelConfig
+  alias Tune.Prediction
   alias Tune.Predictor
-  alias Tune.Result
   alias Tune.TestSupport.Transport
 
   @expected %{"label" => "billing", "confidence" => 0.8}
@@ -52,8 +52,8 @@ defmodule Tune.PredictorTest do
         stub = Transport.script([reply])
         config = config(stub, adapter, options, extra)
 
-        assert {:ok, %Result{output: @expected, steps: [step]}} =
-                 Tune.run(ctx.predictor, ctx.inputs, model: config)
+        assert {:ok, %Prediction{output: @expected, steps: [step]}} =
+                 Tune.Runtime.run(ctx.predictor, ctx.inputs, model: config)
 
         assert step.name == "root"
         assert step.role == :target
@@ -71,7 +71,7 @@ defmodule Tune.PredictorTest do
           openai_structured_output_mode: :tool_strict
         )
 
-      assert {:ok, _result} = Tune.run(ctx.predictor, ctx.inputs, model: config)
+      assert {:ok, _result} = Tune.Runtime.run(ctx.predictor, ctx.inputs, model: config)
       assert [body] = Transport.requests(stub)
 
       tool = Enum.find(body["tools"], &(&1["function"]["name"] == "structured_output"))
@@ -91,10 +91,10 @@ defmodule Tune.PredictorTest do
       stub = Transport.script([{:text, "unused"}])
 
       assert {:error, %Error.Invalid.Input{}} =
-               Tune.run(ctx.predictor, %{ticket: 42}, model: config(stub, Adapter.Chat))
+               Tune.Runtime.run(ctx.predictor, %{ticket: 42}, model: config(stub, Adapter.Chat))
 
       assert {:error, %Error.Invalid.Input{}} =
-               Tune.run(ctx.predictor, %{}, model: config(stub, Adapter.Chat))
+               Tune.Runtime.run(ctx.predictor, %{}, model: config(stub, Adapter.Chat))
 
       assert Transport.requests(stub) == []
     end
@@ -103,8 +103,8 @@ defmodule Tune.PredictorTest do
       stub = Transport.script([{:text, "billing, probably"}, {:text, "unused"}])
 
       assert {:error,
-              %Error.Execution.Failed{cause: cause, result: %Result{steps: []}, step: "root"}} =
-               Tune.run(ctx.predictor, ctx.inputs, model: config(stub, Adapter.Chat))
+              %Error.Execution.Failed{cause: cause, result: %Prediction{steps: []}, step: "root"}} =
+               Tune.Runtime.run(ctx.predictor, ctx.inputs, model: config(stub, Adapter.Chat))
 
       assert %Error.Output.Parse{response: %ReqLLM.Response{}, reply: "billing, probably"} = cause
       assert [_one] = Transport.requests(stub)
@@ -114,7 +114,9 @@ defmodule Tune.PredictorTest do
       stub = Transport.script([{:text, ~s({"label": "refund", "confidence": 0.8})}])
 
       assert {:error, %Error.Execution.Failed{cause: %Error.Output.Invalid{value: value}}} =
-               Tune.run(ctx.predictor, ctx.inputs, model: config(stub, Adapter.JSON, mode: :text))
+               Tune.Runtime.run(ctx.predictor, ctx.inputs,
+                 model: config(stub, Adapter.JSON, mode: :text)
+               )
 
       assert value == %{"label" => "refund", "confidence" => 0.8}
     end
@@ -129,7 +131,7 @@ defmodule Tune.PredictorTest do
                 %Error.Execution.Failed{
                   cause: %Error.Output.Rejected{reason: :finish_reason, response: response}
                 }} =
-                 Tune.run(ctx.predictor, ctx.inputs,
+                 Tune.Runtime.run(ctx.predictor, ctx.inputs,
                    model: config(stub, Adapter.JSON, mode: :text)
                  )
 
@@ -142,7 +144,7 @@ defmodule Tune.PredictorTest do
 
       assert {:error,
               %Error.Execution.Failed{cause: %Error.Output.Rejected{reason: :finish_reason}}} =
-               Tune.run(ctx.predictor, ctx.inputs, model: config(stub, Adapter.Chat))
+               Tune.Runtime.run(ctx.predictor, ctx.inputs, model: config(stub, Adapter.Chat))
     end
 
     test "repairable malformed structured JSON fails instead of being repaired", ctx do
@@ -154,7 +156,7 @@ defmodule Tune.PredictorTest do
         )
 
       assert {:error, %Error.Execution.Failed{cause: cause}} =
-               Tune.run(ctx.predictor, ctx.inputs, model: config)
+               Tune.Runtime.run(ctx.predictor, ctx.inputs, model: config)
 
       assert ["ReqLLM", "Error" | _] = Module.split(cause.__struct__)
       assert [_one] = Transport.requests(stub)
@@ -171,14 +173,14 @@ defmodule Tune.PredictorTest do
       assert {:error,
               %Error.Execution.Failed{
                 cause: %Error.Output.Rejected{reason: :repaired, response: %ReqLLM.Response{}}
-              }} = Tune.run(ctx.predictor, ctx.inputs, model: config)
+              }} = Tune.Runtime.run(ctx.predictor, ctx.inputs, model: config)
     end
 
     test "provider errors are returned unchanged as the cause", ctx do
       stub = Transport.script([{:http_error, 401, %{"error" => %{"message" => "bad key"}}}])
 
-      assert {:error, %Error.Execution.Failed{cause: cause, result: %Result{steps: []}}} =
-               Tune.run(ctx.predictor, ctx.inputs, model: config(stub, Adapter.Chat))
+      assert {:error, %Error.Execution.Failed{cause: cause, result: %Prediction{steps: []}}} =
+               Tune.Runtime.run(ctx.predictor, ctx.inputs, model: config(stub, Adapter.Chat))
 
       refute cause.__struct__ |> Module.split() |> Enum.take(2) == ["ReqLLM", "Program"]
     end

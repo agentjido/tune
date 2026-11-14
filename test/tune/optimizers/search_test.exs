@@ -4,11 +4,11 @@ defmodule Tune.Optimizers.SearchTest do
   alias Tune
   alias Tune.Adapter
   alias Tune.Error
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.BootstrapFewShotWithOptuna
   alias Tune.Optimizers.BootstrapFewShotWithRandomSearch
   alias Tune.Optimizers.TPE
   alias Tune.Predictor
+  alias Tune.Search.Context
   alias Tune.TestSupport.Transport
 
   defp config(stub),
@@ -85,7 +85,7 @@ defmodule Tune.Optimizers.SearchTest do
         end)
 
       assert {:ok, best, report} =
-               Tune.optimize(classifier(),
+               Tune.TestSupport.Search.run(classifier(),
                  optimizer:
                    {BootstrapFewShotWithRandomSearch,
                     accept_score: 1.0, num_candidate_programs: 2, max_labeled_demos: 0},
@@ -99,7 +99,7 @@ defmodule Tune.Optimizers.SearchTest do
 
       assert report.complete?
 
-      assert Enum.map(report.candidates, & &1.label) == [
+      assert Enum.map(report.history, & &1.metadata.label) == [
                "zero_shot",
                "labeled",
                "bootstrap",
@@ -107,9 +107,9 @@ defmodule Tune.Optimizers.SearchTest do
                "bootstrap_1"
              ]
 
-      assert hd(report.candidates).selection_score == 0.0
-      assert report.best.selection_score == 1.0
-      assert report.best.label == "bootstrap"
+      assert hd(report.history).evaluation.selected_score == 0.0
+      assert report.best.evaluation.selected_score == 1.0
+      assert report.best.metadata.label == "bootstrap"
       assert Enum.any?(best.demos, &(&1.inputs["ticket"] == "ticket 1"))
     end
 
@@ -117,7 +117,7 @@ defmodule Tune.Optimizers.SearchTest do
       stub = target(fn _prompt, _user -> "billing" end)
 
       assert {:ok, best, report} =
-               Tune.optimize(classifier(),
+               Tune.TestSupport.Search.run(classifier(),
                  optimizer:
                    {BootstrapFewShotWithRandomSearch,
                     accept_score: 1.0, num_candidate_programs: 1},
@@ -129,7 +129,7 @@ defmodule Tune.Optimizers.SearchTest do
                  max_model_calls: 100
                )
 
-      assert report.best.label == "zero_shot"
+      assert report.best.metadata.label == "zero_shot"
       assert best.demos == []
     end
 
@@ -144,7 +144,7 @@ defmodule Tune.Optimizers.SearchTest do
         end)
 
       assert {:ok, _best, report} =
-               Tune.optimize(classifier(),
+               Tune.TestSupport.Search.run(classifier(),
                  optimizer:
                    {BootstrapFewShotWithRandomSearch,
                     accept_score: 1.0, num_candidate_programs: 0, max_labeled_demos: 0},
@@ -156,18 +156,18 @@ defmodule Tune.Optimizers.SearchTest do
                  max_model_calls: 100
                )
 
-      [zero | _] = report.candidates
-      assert zero.mean == 1.0
-      refute zero.eligible?
-      assert report.best.label == "bootstrap"
-      assert report.best.selection_score == 0.0
+      [zero | _] = report.history
+      assert Tune.Evaluation.mean(zero.evaluation) == 1.0
+      refute zero.evaluation.eligible?
+      assert report.best.metadata.label == "bootstrap"
+      assert report.best.evaluation.selected_score == 0.0
     end
 
     test "a limit during evaluation returns the previous complete incumbent" do
       stub = target(fn _prompt, _user -> "billing" end)
 
       assert {:ok, _best, report} =
-               Tune.optimize(classifier(),
+               Tune.TestSupport.Search.run(classifier(),
                  optimizer:
                    {BootstrapFewShotWithRandomSearch,
                     accept_score: 1.0, num_candidate_programs: 3},
@@ -181,14 +181,19 @@ defmodule Tune.Optimizers.SearchTest do
 
       refute report.complete?
       assert report.stop_reason == :budget_exhausted
-      assert report.best.label == "zero_shot"
-      assert [%{complete?: true}, %{complete?: false, eligible?: false}] = report.candidates
+      assert report.best.metadata.label == "zero_shot"
+
+      assert Enum.map(report.history, &{&1.evaluation.complete?, &1.evaluation.eligible?}) == [
+               {true, true},
+               {false, false}
+             ]
+
       assert report.calls == %{target: 4}
     end
 
     test "with no complete candidate the error carries the report" do
       assert {:error, %Error.Optimization.Failed{report: report}} =
-               Tune.optimize(classifier(),
+               Tune.TestSupport.Search.run(classifier(),
                  optimizer: {BootstrapFewShotWithRandomSearch, accept_score: 1.0},
                  trainset: train(2),
                  valset: val(3),
@@ -200,7 +205,7 @@ defmodule Tune.Optimizers.SearchTest do
 
       assert report.stop_reason == :budget_exhausted
       assert report.best == nil
-      assert length(report.candidates) == 1
+      assert length(report.history) == 1
     end
 
     test "validation data is required and must not overlap training inputs" do
@@ -214,10 +219,13 @@ defmodule Tune.Optimizers.SearchTest do
       ]
 
       assert {:error, %Error.Invalid.Option{option: :valset}} =
-               Tune.optimize(classifier(), base)
+               Tune.TestSupport.Search.run(classifier(), base)
 
       assert {:error, %Error.Invalid.Definition{message: message}} =
-               Tune.optimize(classifier(), Keyword.put(base, :valset, [hd(train(1))]))
+               Tune.TestSupport.Search.run(
+                 classifier(),
+                 Keyword.put(base, :valset, [hd(train(1))])
+               )
 
       assert message =~ "same inputs"
     end
@@ -235,12 +243,17 @@ defmodule Tune.Optimizers.SearchTest do
       ]
 
       rule = fn prompt, _ -> if has_demo?(prompt, "ticket 4"), do: "billing", else: "bug" end
-      {:ok, first, r1} = Tune.optimize(classifier(), [model: config(target(rule))] ++ opts)
-      {:ok, second, r2} = Tune.optimize(classifier(), [model: config(target(rule))] ++ opts)
+
+      {:ok, first, r1} =
+        Tune.TestSupport.Search.run(classifier(), [model: config(target(rule))] ++ opts)
+
+      {:ok, second, r2} =
+        Tune.TestSupport.Search.run(classifier(), [model: config(target(rule))] ++ opts)
+
       assert first == second
 
-      assert Enum.map(r1.candidates, & &1.selection_score) ==
-               Enum.map(r2.candidates, & &1.selection_score)
+      assert Enum.map(r1.history, & &1.evaluation.selected_score) ==
+               Enum.map(r2.history, & &1.evaluation.selected_score)
     end
   end
 
@@ -252,7 +265,7 @@ defmodule Tune.Optimizers.SearchTest do
         end)
 
       assert {:ok, best, report} =
-               Tune.optimize(classifier(),
+               Tune.TestSupport.Search.run(classifier(),
                  optimizer:
                    {BootstrapFewShotWithOptuna,
                     accept_score: 1.0,
@@ -271,16 +284,16 @@ defmodule Tune.Optimizers.SearchTest do
                )
 
       assert report.complete?
-      assert report.best.selection_score == 1.0
+      assert report.best.evaluation.selected_score == 1.0
       assert [%{inputs: %{"ticket" => "ticket 5"}}] = best.demos
 
-      trials = report.notes.trials
+      trials = report.metadata.notes.trials
       assert length(trials) == 12
       winning = for {choice, 1.0} <- trials, do: choice
       after_startup = trials |> Enum.drop(3) |> Enum.map(&elem(&1, 0))
       assert Enum.count(after_startup, &(&1 in winning)) > length(after_startup) / 2
 
-      evaluated = Enum.count(report.candidates)
+      evaluated = Enum.count(report.history)
       assert evaluated < 12
       assert report.calls.target == evaluated * 2
     end

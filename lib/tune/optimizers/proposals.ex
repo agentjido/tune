@@ -10,9 +10,9 @@ defmodule Tune.Optimizers.Proposals do
   """
 
   alias Tune.Example
-  alias Tune.Optimizer.Context
   alias Tune.Optimizers.Shared
   alias Tune.Predictor
+  alias Tune.Search.Context
 
   @max_text 4_000
 
