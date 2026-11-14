@@ -1,0 +1,42 @@
+==== system
+Your input fields are:
+1. `ticket` (string): Customer message
+Your output fields are:
+1. `label` (enum)
+2. `confidence` (number)
+3. `tags` (array of string)
+All interactions will be structured in the following way, with the appropriate values filled in.
+
+Inputs will have the following structure:
+
+[[ ## ticket ## ]]
+{ticket}
+
+Outputs will be a JSON object with the following fields.
+
+{
+  "label": "{label}",        # note: the value you produce must exactly match (no extra characters) one of: billing; bug; other
+  "confidence": "{confidence}",        # note: the value you produce must adhere to the JSON schema: {"type":"number"}
+  "tags": "{tags}"        # note: the value you produce must adhere to the JSON schema: {"type":"array","items":{"type":"string"}}
+}
+In adhering to this structure, your objective is: 
+        Classify the support ticket.
+
+==== user
+[[ ## ticket ## ]]
+App crashes on launch
+
+==== assistant
+{
+  "label": "bug",
+  "confidence": 0.9,
+  "tags": [
+    "crash"
+  ]
+}
+
+==== user
+[[ ## ticket ## ]]
+I was charged twice
+
+Respond with a JSON object in the following order of fields: `label`, then `confidence` (must be formatted as valid JSON: number), then `tags` (must be formatted as valid JSON: array of string).

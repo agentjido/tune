@@ -1,0 +1,86 @@
+==== system
+Your input fields are:
+1. `question` (string)
+2. `facts` (array of object)
+Your output fields are:
+1. `answer` (string)
+2. `sources` (array of string)
+3. `confident` (boolean)
+All interactions will be structured in the following way, with the appropriate values filled in.
+
+<question>
+{question}
+</question>
+
+<facts>
+{facts}
+</facts>
+
+<answer>
+{answer}
+</answer>
+
+<sources>
+{sources}        # note: write object keys as nested elements and array entries as <item> elements, following the JSON schema: {"type":"array","items":{"type":"string"}}
+</sources>
+
+<confident>
+{confident}        # note: the value you produce must adhere to the JSON schema: {"type":"boolean"}
+</confident>
+In adhering to this structure, your objective is: 
+        Answer from the facts.
+
+==== user
+<question>
+Capital?
+</question>
+
+<facts>
+<item>
+<score>
+null
+</score>
+<source>
+p2
+</source>
+<text>
+Paris is the capital.
+</text>
+</item>
+</facts>
+
+==== assistant
+<answer>
+Paris
+</answer>
+
+<sources>
+<item>
+p2
+</item>
+</sources>
+
+<confident>
+true
+</confident>
+
+==== user
+<question>
+Where?
+</question>
+
+<facts>
+<item>
+<score>
+0.5
+</score>
+<source>
+p1
+</source>
+<text>
+It is in Paris.
+</text>
+</item>
+</facts>
+
+Respond with the corresponding output fields wrapped in XML tags, starting with `<answer>`, then `<sources>`, then `<confident>`.
