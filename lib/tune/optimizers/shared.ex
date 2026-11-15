@@ -2,8 +2,8 @@ defmodule Tune.Optimizers.Shared do
   @moduledoc false
 
   alias Tune
+  alias Tune.Case
   alias Tune.Demo
-  alias Tune.Example
   alias Tune.Parameter
   alias Tune.Prediction
   alias Tune.Predictor
@@ -27,8 +27,8 @@ defmodule Tune.Optimizers.Shared do
     |> Enum.sort_by(&elem(&1, 0))
   end
 
-  @spec labeled_demo(Predictor.t(), Example.t()) :: {:ok, Demo.t()} | :error
-  def labeled_demo(%Predictor{signature: signature}, %Example{inputs: inputs, labels: labels}) do
+  @spec labeled_demo(Predictor.t(), Case.t()) :: {:ok, Demo.t()} | :error
+  def labeled_demo(%Predictor{signature: signature}, %Case{input: inputs, expected: labels}) do
     fields = Map.merge(labels, inputs)
     input_names = Signature.input_names(signature)
     output_names = Signature.output_names(signature)
@@ -55,14 +55,14 @@ defmodule Tune.Optimizers.Shared do
     end)
   end
 
-  @spec without_row_demos(Tune.t(), Example.t()) :: Tune.t()
-  def without_row_demos(program, %Example{} = example) do
+  @spec without_row_demos(Tune.t(), Case.t()) :: Tune.t()
+  def without_row_demos(program, %Case{} = example) do
     updates =
       program
       |> predictors()
       |> Map.new(fn {name, predictor} ->
         names = Signature.input_names(predictor.signature)
-        fields = Map.merge(example.labels, example.inputs)
+        fields = Map.merge(example.expected, example.input)
         row_inputs = Map.take(fields, names)
         {name, %{predictor | demos: Enum.reject(predictor.demos, &(&1.inputs == row_inputs))}}
       end)
@@ -115,15 +115,17 @@ defmodule Tune.Optimizers.Shared do
   def instructions(program),
     do: Map.new(predictors(program), fn {name, p} -> {name, p.signature.instructions} end)
 
-  @spec render_example(Example.t()) :: String.t()
-  def render_example(%Example{inputs: inputs, labels: labels}) do
-    "inputs: " <> Example.canonical_json(inputs) <> "\nlabels: " <> Example.canonical_json(labels)
+  @spec render_example(Case.t()) :: String.t()
+  def render_example(%Case{input: inputs, expected: labels}) do
+    "inputs: " <>
+      Tune.CanonicalJSON.encode!(inputs) <> "\nlabels: " <> Tune.CanonicalJSON.encode!(labels)
   end
 
   @spec render_step(Tune.Step.t()) :: String.t()
   def render_step(step) do
     "inputs: " <>
-      Example.canonical_json(step.inputs) <> "\noutputs: " <> Example.canonical_json(step.outputs)
+      Tune.CanonicalJSON.encode!(step.inputs) <>
+      "\noutputs: " <> Tune.CanonicalJSON.encode!(step.outputs)
   end
 
   @spec require_options(keyword(), [atom()], keyword()) ::

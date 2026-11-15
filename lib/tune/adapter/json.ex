@@ -111,14 +111,13 @@ defmodule Tune.Adapter.JSON do
   end
 
   defp demo_messages(signature, demo) do
-    object =
+    pairs =
       signature.outputs
       |> Enum.map(&{&1.name, Map.fetch!(demo.outputs, &1.name)})
-      |> Jason.OrderedObject.new()
 
     [
       Context.user(Text.marked_fields(signature.inputs, demo.inputs)),
-      Context.assistant(Jason.encode!(object, pretty: true))
+      Context.assistant(Tune.JSON.pretty_encode_object!(pairs))
     ]
   end
 
@@ -137,7 +136,7 @@ defmodule Tune.Adapter.JSON do
         nil -> trimmed
       end
 
-    case Jason.decode(body) do
+    case JSON.decode(body) do
       {:ok, %{} = object} -> {:ok, object}
       {:ok, _other} -> parse_error("the reply is not a JSON object", nil, text)
       {:error, _} -> parse_error("the reply is not valid JSON", nil, text)

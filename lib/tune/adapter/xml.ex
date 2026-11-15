@@ -118,7 +118,7 @@ defmodule Tune.Adapter.XML do
     do: Enum.map_join(value, "\n", &element(@item, render_value(inner, &1)))
 
   defp render_structured(_schema, value) when is_binary(value), do: value
-  defp render_structured(_schema, value), do: Jason.encode!(value)
+  defp render_structured(_schema, value), do: JSON.encode!(value)
 
   defp non_null(%Zoi.Types.Union{schemas: schemas} = union, value) do
     Enum.find(schemas, union, fn schema ->
@@ -153,7 +153,7 @@ defmodule Tune.Adapter.XML do
 
       structured?(field.schema) ->
         "{#{field.name}}        # note: write object keys as nested elements and array entries as <item> elements, following the JSON schema: " <>
-          Jason.encode!(Field.json_schema(field.schema))
+          JSON.encode!(Field.json_schema(field.schema))
 
       true ->
         Text.placeholder(field)
@@ -411,7 +411,7 @@ defmodule Tune.Adapter.XML do
   end
 
   defp parse_typed(_schema, content, path, _depth) do
-    case Jason.decode(content) do
+    case JSON.decode(content) do
       {:ok, value} -> {:ok, value}
       {:error, _} -> parse_error("#{path} is not valid JSON", path, content)
     end

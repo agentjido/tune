@@ -19,8 +19,8 @@ defmodule Tune.KNN do
   @behaviour Tune.Program
 
   alias Tune
+  alias Tune.Case
   alias Tune.Error
-  alias Tune.Example
   alias Tune.Execution
   alias Tune.Optimizers.Shared
   alias Tune.Parameter
@@ -151,7 +151,7 @@ defmodule Tune.KNN do
     |> Enum.sort_by(fn {score, index, _row} -> {-score, index} end)
     |> Enum.take(program.k)
     |> Enum.map(fn {_score, _index, row} ->
-      %Example{id: row["id"], inputs: row["inputs"], labels: row["labels"]}
+      %Case{id: row["id"], input: row["inputs"], expected: row["labels"]}
     end)
   end
 
@@ -160,7 +160,7 @@ defmodule Tune.KNN do
       before = length(execution.steps)
       teacher = Shared.without_row_demos(program.inner, neighbor)
 
-      case Execution.call_program(execution, teacher, neighbor.inputs,
+      case Execution.call_program(execution, teacher, neighbor.input,
              role: :teacher,
              scope: @scope
            ) do
@@ -232,7 +232,7 @@ defmodule Tune.KNN do
   defp values_text(value), do: to_string(value)
 
   defp pool_rows(_signature, []), do: {:ok, []}
-  defp pool_rows(signature, rows), do: Example.normalize_all(signature, rows)
+  defp pool_rows(signature, rows), do: Case.normalize_all(signature, rows)
 
   defp similarity(left, right) do
     dot = Enum.reduce(left, 0, fn {key, value}, acc -> acc + value * Map.get(right, key, 0) end)
@@ -248,8 +248,8 @@ defmodule Tune.KNN do
       Enum.map(rows, fn row ->
         %{
           "id" => row.id,
-          "inputs" => row.inputs,
-          "labels" => Map.take(row.labels, Signature.output_names(signature))
+          "inputs" => row.input,
+          "labels" => Map.take(row.expected, Signature.output_names(signature))
         }
       end)
 

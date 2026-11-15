@@ -33,10 +33,11 @@ defmodule Tune.EvaluationTest do
     end)
   end
 
-  defp rows(texts), do: Enum.map(texts, &%{inputs: %{text: &1}, labels: %{label: "label-" <> &1}})
+  defp rows(texts),
+    do: Enum.map(texts, &%{input: %{text: &1}, expected: %{label: "label-" <> &1}})
 
   defp exact(example, result),
-    do: if(result.output["label"] == example.labels["label"], do: 1, else: 0)
+    do: if(result.output["label"] == example.expected["label"], do: 1, else: 0)
 
   defp evaluate(program, rows, opts) do
     pipeline =
@@ -70,8 +71,37 @@ defmodule Tune.EvaluationTest do
 
   defp total_calls(evaluation), do: evaluation.calls |> Map.values() |> Enum.sum()
 
+  defmodule FailedJudgeScore do
+    @behaviour Tune.Score
+    defstruct []
+
+    @impl true
+    def score(_score, _case, _output) do
+      {:error, :judge_failed,
+       %{
+         calls: %{judge: 1},
+         judge_calls: [
+           %{usage: %{input_tokens: 10, output_tokens: 5, total_tokens: 15}}
+         ]
+       }}
+    end
+  end
+
+  test "failed scores retain judge calls and token use" do
+    assert {:ok, evaluation} =
+             Tune.new(%{}, run: fn _target, input -> input end)
+             |> Tune.data(test: [1])
+             |> Tune.score(:judge, %FailedJudgeScore{})
+             |> Tune.limit(model_calls: 1)
+             |> Tune.evaluate()
+
+    assert evaluation.calls == %{judge: 1}
+    assert evaluation.usage == %{input: 10, output: 5, total: 15}
+    assert [%{status: :error}] = evaluation.observations
+  end
+
   test "scores every row with arbitrary finite numbers", ctx do
-    metric = fn example, _result -> if example.inputs["text"] == "a", do: -2.5, else: 10 end
+    metric = fn example, _result -> if example.input["text"] == "a", do: -2.5, else: 10 end
 
     assert {:ok, %Evaluation{} = eval} =
              evaluate(ctx.predictor, rows(["a", "b"]),
@@ -160,7 +190,7 @@ defmodule Tune.EvaluationTest do
 
   test "labels never reach the program", ctx do
     stub = echo_stub()
-    data = [%{inputs: %{text: "a"}, labels: %{label: "SECRET-LABEL"}}]
+    data = [%{input: %{text: "a"}, expected: %{label: "SECRET-LABEL"}}]
 
     assert {:ok, _eval} =
              evaluate(ctx.predictor, data, model: model(stub), metric: &exact/2)
@@ -177,7 +207,7 @@ defmodule Tune.EvaluationTest do
              )
 
     assert {:error, %Error.Invalid.Definition{}} =
-             evaluate(ctx.predictor, [%{inputs: %{text: "a", label: "x"}}],
+             evaluate(ctx.predictor, [%{input: %{text: "a", label: "x"}}],
                model: model(echo_stub()),
                metric: &exact/2
              )
@@ -224,7 +254,7 @@ defmodule Tune.EvaluationTest do
     stub = echo_stub()
 
     slow = fn example, _result ->
-      if example.inputs["text"] == "a", do: Process.sleep(3_000), else: 1
+      if example.input["text"] == "a", do: Process.sleep(3_000), else: 1
     end
 
     assert {:ok, eval} =
@@ -248,7 +278,7 @@ defmodule Tune.EvaluationTest do
     warm_up(ctx.predictor)
 
     slow = fn example, _result ->
-      if example.inputs["text"] == "a", do: Process.sleep(3_000), else: 1
+      if example.input["text"] == "a", do: Process.sleep(3_000), else: 1
     end
 
     assert {:ok, eval} =

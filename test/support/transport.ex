@@ -28,7 +28,7 @@ defmodule Tune.TestSupport.Transport do
 
     Req.Test.stub(name, fn conn ->
       {:ok, body, conn} = Plug.Conn.read_body(conn)
-      send(test_pid, {:model_request, name, Jason.decode!(body)})
+      send(test_pid, {:model_request, name, JSON.decode!(body)})
 
       reply =
         Agent.get_and_update(agent, fn
@@ -52,7 +52,7 @@ defmodule Tune.TestSupport.Transport do
 
     Req.Test.stub(name, fn conn ->
       {:ok, body, conn} = Plug.Conn.read_body(conn)
-      decoded = Jason.decode!(body)
+      decoded = JSON.decode!(body)
       send(test_pid, {:model_request, name, decoded})
       respond(conn, fun.(decoded))
     end)
@@ -130,7 +130,7 @@ defmodule Tune.TestSupport.Transport do
   def chat(fields) do
     body =
       Enum.map_join(fields, "\n\n", fn {name, value} ->
-        text = if is_binary(value), do: value, else: Jason.encode!(value)
+        text = if is_binary(value), do: value, else: JSON.encode!(value)
         "[[ ## #{name} ## ]]\n#{text}"
       end)
 

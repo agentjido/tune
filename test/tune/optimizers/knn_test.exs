@@ -3,10 +3,10 @@ defmodule Tune.Optimizers.KNNTest do
 
   alias Tune
   alias Tune.Adapter
+  alias Tune.Artifact
   alias Tune.Error
   alias Tune.KNN
   alias Tune.Optimizers.KNNFewShot
-  alias Tune.Parameters
   alias Tune.Predictor
   alias Tune.TestSupport.Transport
 
@@ -25,9 +25,9 @@ defmodule Tune.Optimizers.KNNTest do
   end
 
   @pool [
-    %{inputs: %{ticket: "refund my card payment"}, labels: %{label: "billing"}},
-    %{inputs: %{ticket: "the app crashes on start"}, labels: %{label: "bug"}},
-    %{inputs: %{ticket: "invoice payment failed twice"}, labels: %{label: "billing"}}
+    %{input: %{ticket: "refund my card payment"}, expected: %{label: "billing"}},
+    %{input: %{ticket: "the app crashes on start"}, expected: %{label: "bug"}},
+    %{input: %{ticket: "invoice payment failed twice"}, expected: %{label: "billing"}}
   ]
 
   defp echo_teacher do
@@ -145,7 +145,7 @@ defmodule Tune.Optimizers.KNNTest do
 
   test "an incompatible pool is rejected and an empty pool runs without demos" do
     assert {:error, %Error.Invalid.Definition{}} =
-             KNN.new(classifier(), pool: [%{inputs: %{text: "x"}}])
+             KNN.new(classifier(), pool: [%{input: %{text: "x"}}])
 
     {:ok, empty} = KNN.new(classifier(), pool: [])
     target = Transport.respond_with(fn _ -> Transport.chat(label: "billing") end)
@@ -161,12 +161,12 @@ defmodule Tune.Optimizers.KNNTest do
   end
 
   test "the pool round-trips through an artifact into matching code" do
-    {:ok, artifact} = Parameters.dump(knn())
-    {:ok, json} = Parameters.encode(artifact)
-    {:ok, decoded} = Parameters.decode(json)
+    {:ok, artifact} = Artifact.dump(knn())
+    {:ok, json} = Artifact.encode(artifact)
+    {:ok, decoded} = Artifact.decode(json)
     {:ok, fresh} = KNN.new(classifier(), pool: [], k: 1)
 
-    assert {:ok, loaded} = Parameters.apply(fresh, decoded)
+    assert {:ok, loaded} = Artifact.apply(decoded, fresh)
     assert loaded.pool.value == knn().pool.value
   end
 

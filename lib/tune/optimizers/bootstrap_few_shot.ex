@@ -29,10 +29,10 @@ defmodule Tune.Optimizers.BootstrapFewShot do
 
   @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Metric
   alias Tune.Optimizers.LabeledFewShot
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Score
+  alias Tune.Search.Program.Context
 
   @options [:accept_score, :max_bootstrapped_demos, :max_labeled_demos, :max_rounds]
 
@@ -73,7 +73,7 @@ defmodule Tune.Optimizers.BootstrapFewShot do
   Builds bootstrapped demonstrations from `examples` and returns the program
   with them. Reused by search optimizers and KNNFewShot.
   """
-  @spec build(map(), Tune.t(), [Tune.Example.t()], Context.t()) ::
+  @spec build(map(), Tune.t(), [Tune.Case.t()], Context.t()) ::
           {:ok, Tune.t(), Context.t()} | {:error, term(), Context.t()}
   def build(config, program, examples, ctx) do
     names = Enum.map(Shared.predictors(program), &elem(&1, 0))
@@ -151,7 +151,7 @@ defmodule Tune.Optimizers.BootstrapFewShot do
 
         true ->
           {outcome, ctx} =
-            Context.run(ctx, Shared.without_row_demos(teacher, example), example.inputs, :teacher)
+            Context.run(ctx, Shared.without_row_demos(teacher, example), example.input, :teacher)
 
           state = %{state | attempts: state.attempts + 1}
 
@@ -186,8 +186,8 @@ defmodule Tune.Optimizers.BootstrapFewShot do
       nil ->
         {:ok, result}
 
-      metric ->
-        case Metric.score(metric, example, result) do
+      %Score{} ->
+        case Context.score(ctx, example, result) do
           {:ok, %{score: score}} when score >= config.accept_score -> {:ok, result}
           _ -> :rejected
         end
@@ -207,7 +207,7 @@ defmodule Tune.Optimizers.BootstrapFewShot do
     LabeledFewShot.build(%{k: config.max_labeled_demos, sample: true}, program, remaining, ctx)
   end
 
-  defp check_accept_score(%{accept_score: nil}, %Context{metric: %Metric{}}),
+  defp check_accept_score(%{accept_score: nil}, %Context{metric: %Score{}}),
     do: Shared.option_error(:accept_score, "is required when a metric is given")
 
   defp check_accept_score(_config, _ctx), do: :ok

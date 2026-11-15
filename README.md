@@ -48,6 +48,17 @@ The public workflow has twelve function names:
 - Opaque Nx and Axon values in application runners.
 - Versioned JSON artifacts for learned, JSON-compatible values.
 
+## Architecture
+
+- Runtime owns typed programs, model roles, execution, and predictions.
+- Evaluation owns cases, scores, selection, observations, and summaries.
+- Search owns one shared Study. Program strategies and genetic search keep
+  separate algorithm mechanics.
+- Artifact owns the only persisted format and applies all learned values atomically.
+
+Dependencies point in that order. Runtime does not depend on Evaluation or Search.
+Evaluation accepts an opaque runner and does not know a search algorithm.
+
 Tune uses no Python runtime. It has no runtime dependency on Jido, Nx, Axon,
 `jido_eval`, or `jido_evolve`.
 
@@ -77,6 +88,21 @@ Read these guides for more detail:
 - [Compatibility and boundaries](guides/compatibility.md)
 - [Artifacts](guides/artifacts.md)
 - [Host integration](guides/host_integration.md)
+- [Optional local workbench](guides/ui.md)
+
+## Optional local workbench
+
+Tune can run a local multi-route workbench with Phoenix Playground. Add
+`phoenix_playground` to the host dependencies, then start it:
+
+```sh
+mix tune.ui
+```
+
+The workbench builds studies, accepts JSON data, previews exact prompts, runs
+evaluation or search, and downloads Tune artifacts. It binds only to the local
+computer and keeps state in memory. See the [workbench guide](guides/ui.md) for
+the route list and extension boundary.
 
 ## Local checks
 

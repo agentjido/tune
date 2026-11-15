@@ -9,10 +9,10 @@ defmodule Tune.Optimizers.Proposals do
   evidence only.
   """
 
-  alias Tune.Example
+  alias Tune.Case
   alias Tune.Optimizers.Shared
   alias Tune.Predictor
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @max_text 4_000
 
@@ -130,7 +130,7 @@ defmodule Tune.Optimizers.Proposals do
   end
 
   @doc "Renders up to `n` training examples as evidence text."
-  @spec evidence([Example.t()], non_neg_integer()) :: String.t()
+  @spec evidence([Case.t()], non_neg_integer()) :: String.t()
   def evidence([], _n), do: "None."
   def evidence(_examples, 0), do: "None."
 

@@ -24,7 +24,7 @@ defmodule Tune.Optimizers.GEPA do
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Reflective
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @impl true
   def init(opts) do

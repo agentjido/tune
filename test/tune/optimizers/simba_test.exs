@@ -27,10 +27,10 @@ defmodule Tune.Optimizers.SIMBATest do
     predictor
   end
 
-  defp rows(texts), do: Enum.map(texts, &%{inputs: %{ticket: &1}, labels: %{label: "billing"}})
+  defp rows(texts), do: Enum.map(texts, &%{input: %{ticket: &1}, expected: %{label: "billing"}})
 
   defp metric(example, result),
-    do: if(result.output["label"] == example.labels["label"], do: 1.0, else: 0.0)
+    do: if(result.output["label"] == example.expected["label"], do: 1.0, else: 0.0)
 
   defp proposal(text \\ "Always answer billing."),
     do: Transport.respond_with(fn _ -> Transport.chat(feedback: text) end)

@@ -113,14 +113,14 @@ defmodule Tune.Contracts.QAReleaseTest do
     |> Tune.score(
       :answer,
       fn example, prediction ->
-        if prediction.output["answer"] == example.labels["answer"], do: 1.0, else: 0.0
+        if prediction.output["answer"] == example.expected["answer"], do: 1.0, else: 0.0
       end,
       range: {0.0, 1.0}
     )
     |> Tune.score(
       :citations,
       fn example, prediction ->
-        if prediction.output["sources"] == example.labels["sources"], do: 1.0, else: 0.0
+        if prediction.output["sources"] == example.expected["sources"], do: 1.0, else: 0.0
       end,
       range: {0.0, 1.0}
     )

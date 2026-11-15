@@ -4,12 +4,12 @@ defmodule Tune.Search.ProgramStrategy do
 
   An optimizer validates its own configuration, declares which datasets,
   model roles, and limits it needs, and compiles a new program from a
-  normalized `Tune.Search.Context`. It changes task parameters
+  normalized `Tune.Search.Program.Context`. It changes task parameters
   only. Model configurations, the adapter, and dataset roles are fixed by the
   context for the whole run.
   """
 
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @type requirements :: %{
           required(:datasets) => [:train | :val],

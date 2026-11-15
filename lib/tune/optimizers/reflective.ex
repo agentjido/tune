@@ -23,11 +23,10 @@ defmodule Tune.Optimizers.Reflective do
   keep the earlier candidate.
   """
 
+  alias Tune.Case
   alias Tune.Evaluation
-  alias Tune.Example
-  alias Tune.Metric
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @type component :: %{
           name: String.t(),
@@ -59,7 +58,7 @@ defmodule Tune.Optimizers.Reflective do
   @spec run(map(), Tune.t(), [component()], Context.t()) ::
           {:ok, Tune.t(), Context.t()} | {:error, term(), Context.t()}
   def run(config, program, components, ctx) do
-    {evaluation, ctx} = Context.evaluate(ctx, program, ctx.valset)
+    {evaluation, ctx} = Context.evaluate_validation(ctx, program)
     {id, ctx} = Context.consider(ctx, program, evaluation, %{label: "baseline", parents: []})
     {order, ctx} = Context.shuffle(ctx, ctx.trainset)
 
@@ -139,7 +138,7 @@ defmodule Tune.Optimizers.Reflective do
       child_total = minibatch_total(mini, ctx)
 
       if mini.complete? and child_total > parent_total and not Context.exhausted?(ctx) do
-        {evaluation, ctx} = Context.evaluate(ctx, child, ctx.valset)
+        {evaluation, ctx} = Context.evaluate_validation(ctx, child)
 
         {state, ctx} =
           admit(child, evaluation, [parent.id], components, state, ctx, %{
@@ -218,15 +217,15 @@ defmodule Tune.Optimizers.Reflective do
   end
 
   @doc false
-  @spec traces(Tune.t(), [Example.t()], Context.t()) :: {[map()], Context.t()}
+  @spec traces(Tune.t(), [Case.t()], Context.t()) :: {[map()], Context.t()}
   def traces(program, batch, ctx) do
     Enum.reduce(batch, {[], ctx}, fn example, {acc, ctx} ->
-      {outcome, ctx} = Context.run(ctx, program, example.inputs, :target)
+      {outcome, ctx} = Context.run(ctx, program, example.input, :target)
 
       trace =
         case outcome do
           {:ok, result} ->
-            case Metric.score(ctx.metric, example, result) do
+            case Context.score(ctx, example, result) do
               {:ok, %{score: score, feedback: feedback}} ->
                 %{example: example, result: result, score: score, feedback: feedback, error: nil}
 
@@ -268,7 +267,7 @@ defmodule Tune.Optimizers.Reflective do
       error = if trace.error, do: "\nerror: " <> describe(trace.error), else: ""
       feedback = if trace.feedback, do: "\nfeedback: " <> trace.feedback, else: ""
 
-      "inputs: #{Example.canonical_json(trace.example.inputs)}\n#{steps}\nscore: #{trace.score}#{feedback}#{error}"
+      "inputs: #{Tune.CanonicalJSON.encode!(trace.example.input)}\n#{steps}\nscore: #{trace.score}#{feedback}#{error}"
     end)
   end
 
@@ -368,7 +367,7 @@ defmodule Tune.Optimizers.Reflective do
 
         case result do
           {:ok, child} ->
-            {evaluation, ctx} = Context.evaluate(ctx, child, ctx.valset)
+            {evaluation, ctx} = Context.evaluate_validation(ctx, child)
 
             {state, ctx} =
               admit(child, evaluation, [a.id, b.id], components, state, ctx, %{

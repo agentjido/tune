@@ -3,10 +3,10 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
 
   alias Tune
   alias Tune.Adapter
+  alias Tune.Artifact
   alias Tune.Examples.GroundedQA
   alias Tune.Optimizers.Avatar
   alias Tune.Optimizers.Playbook
-  alias Tune.Parameters
   alias Tune.TestSupport.QAWorld
   alias Tune.TestSupport.Transport
 
@@ -164,9 +164,10 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
         refute text =~ "HIDDEN-ANSWER"
       end
 
-      {:ok, artifact} = Parameters.dump(best)
-      assert artifact["entries"]["lessons"]["value"] == ["Quote the source."]
-      refute Jason.encode!(artifact) =~ "fn"
+      {:ok, artifact} = Artifact.dump(best)
+      assert artifact.parameters["lessons"]["value"] == ["Quote the source."]
+      {:ok, json} = Artifact.encode(artifact)
+      refute json =~ "fn"
     end
 
     test "a lesson that does not help keeps the baseline" do

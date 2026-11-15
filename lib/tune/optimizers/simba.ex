@@ -38,10 +38,9 @@ defmodule Tune.Optimizers.SIMBA do
   @behaviour Tune.Search.ProgramStrategy
 
   alias Tune.Demo
-  alias Tune.Metric
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @options [:bsz, :num_candidates, :max_steps, :max_demos, :temperature, :num_final, :strategies]
 
@@ -147,7 +146,7 @@ defmodule Tune.Optimizers.SIMBA do
             {runs, ctx}
           else
             {entry, ctx} = sample_program(config, state.pool, ctx)
-            {outcome, ctx} = Context.run(ctx, entry.program, example.inputs, :target)
+            {outcome, ctx} = Context.run(ctx, entry.program, example.input, :target)
             {[%{entry: entry, outcome: outcome, score: score(ctx, example, outcome)} | runs], ctx}
           end
         end)
@@ -175,7 +174,7 @@ defmodule Tune.Optimizers.SIMBA do
   end
 
   defp score(ctx, example, {:ok, result}) do
-    case Metric.score(ctx.metric, example, result) do
+    case Context.score(ctx, example, result) do
       {:ok, %{score: score}} -> score
       {:error, _} -> ctx.failure_score || 0
     end
@@ -328,7 +327,7 @@ defmodule Tune.Optimizers.SIMBA do
       if Context.exhausted?(ctx) do
         ctx
       else
-        {evaluation, ctx} = Context.evaluate(ctx, entry.program, ctx.valset)
+        {evaluation, ctx} = Context.evaluate_validation(ctx, entry.program)
 
         {_id, ctx} =
           Context.consider(ctx, entry.program, evaluation, %{

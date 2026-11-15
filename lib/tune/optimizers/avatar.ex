@@ -26,7 +26,7 @@ defmodule Tune.Optimizers.Avatar do
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Reflective
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @options [:predictor, :upper_bound, :lower_bound, :max_iters, :max_positive, :max_negative]
 
@@ -80,7 +80,7 @@ defmodule Tune.Optimizers.Avatar do
   def compile(config, program, %Context{} = ctx) do
     case Map.new(Shared.predictors(program)) |> Map.fetch(config.predictor) do
       {:ok, predictor} ->
-        {evaluation, ctx} = Context.evaluate(ctx, program, ctx.valset)
+        {evaluation, ctx} = Context.evaluate_validation(ctx, program)
         {_id, ctx} = Context.consider(ctx, program, evaluation, %{label: "baseline"})
         task = Proposals.describe(predictor)
         ctx = iterate(config, task, program, ctx, 1, [])
@@ -142,7 +142,7 @@ defmodule Tune.Optimizers.Avatar do
 
         case rewritten && Shared.put_instructions(program, %{config.predictor => rewritten}) do
           {:ok, candidate} ->
-            {evaluation, ctx} = Context.evaluate(ctx, candidate, ctx.valset)
+            {evaluation, ctx} = Context.evaluate_validation(ctx, candidate)
 
             {_id, ctx} =
               Context.consider(ctx, candidate, evaluation, %{

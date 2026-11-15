@@ -1,11 +1,10 @@
 defmodule Tune.Search.Genetic do
   @moduledoc false
 
-  alias Tune.Candidate
   alias Tune.Error
-  alias Tune.Pipeline.Evaluator
+  alias Tune.Evaluator
   alias Tune.Result
-  alias Tune.Search.Context
+  alias Tune.Search.Study
   alias Tune.Space
 
   @options [
@@ -32,24 +31,19 @@ defmodule Tune.Search.Genetic do
           {:ok, Result.t()} | {:error, Exception.t()}
   def run(target, runner, data_factory, spaces, scores, selector, limits, opts) do
     with {:ok, config} <- config(opts),
-         {:ok, max_evaluations} <- evaluation_limit(limits),
+         :ok <- evaluation_limit(limits),
          :ok <- validate_target(target, spaces) do
-      context =
-        Context.new(
-          optimizer: __MODULE__,
-          run_options: [],
+      study =
+        Study.new(
           seed: Map.get(limits, :seed, 0),
-          target: target,
-          data: %{validation: data_factory},
-          scores: scores,
-          selector: selector,
           limits: limits,
-          max_model_calls: Map.get(limits, :model_calls),
+          model_calls: Map.get(limits, :model_calls),
+          deadline: Map.get(limits, :deadline),
           metadata: %{strategy: :genetic}
         )
 
       state = %{
-        context: context,
+        study: study,
         config: config,
         target: target,
         runner: runner,
@@ -57,28 +51,20 @@ defmodule Tune.Search.Genetic do
         spaces: spaces,
         scores: scores,
         selector: selector,
-        limits: limits,
-        max_evaluations: max_evaluations,
-        evaluations: 0,
-        random: :rand.seed_s(:exsss, Map.get(limits, :seed, 0)),
-        baseline: nil,
-        started_at: System.monotonic_time(:millisecond),
-        stop_reason: nil
+        baseline: nil
       }
 
-      case search(state) do
-        %{context: %{best: %Candidate{}}} = state -> {:ok, result(state)}
-        state -> no_candidate(state)
-      end
+      state = search(state)
+      if Study.incumbent(state.study), do: {:ok, result(state)}, else: no_candidate(state)
     end
   end
 
   defp search(state) do
-    count = min(state.config.population_size, state.max_evaluations)
+    count = min(state.config.population_size, Study.remaining_evaluations(state.study))
     {population, state} = initial_population(state, count)
     state = %{state | baseline: population |> List.first() |> then(&(&1 && &1.evaluation))}
 
-    if state.stop_reason do
+    if Study.stop_reason(state.study) do
       state
     else
       generations(state, population, 1)
@@ -98,24 +84,24 @@ defmodule Tune.Search.Genetic do
 
   defp generations(state, _population, generation)
        when generation > state.config.generations,
-       do: %{state | stop_reason: :completed}
+       do: stop(state, :completed)
 
   defp generations(state, population, generation) do
     cond do
       cancelled?(state) ->
-        %{state | stop_reason: :cancelled}
+        stop(state, :cancelled)
 
-      deadline?(state) ->
-        %{state | stop_reason: :deadline}
+      Study.limit_reason(state.study) == :deadline ->
+        stop(state, :deadline)
 
-      Context.exhausted?(state.context) ->
-        %{state | stop_reason: :model_call_limit}
+      Study.limit_reason(state.study) == :model_call_limit ->
+        stop(state, :model_call_limit)
 
-      state.max_evaluations - state.evaluations < state.config.population_size ->
-        %{state | stop_reason: :evaluation_limit}
+      remaining_evaluations(state) < state.config.population_size ->
+        stop(state, :evaluation_limit)
 
       Enum.all?(population, &(not &1.evaluation.eligible?)) ->
-        %{state | stop_reason: :no_eligible_parent}
+        stop(state, :no_eligible_parent)
 
       true ->
         {requests, state} = next_generation(population, generation, state)
@@ -152,24 +138,20 @@ defmodule Tune.Search.Genetic do
 
   defp reproduce(left, right, state) do
     Enum.reduce(state.spaces, {%{}, state}, fn {name, space}, {params, state} ->
-      {unit, random} = Space.uniform(state.random)
-      state = %{state | random: random}
+      {unit, state} = random(state, &Space.uniform/1)
 
       {value, state} =
         if unit < state.config.crossover_rate do
-          {value, random} = Space.crossover(space, left[name], right[name], state.random)
-          {value, %{state | random: random}}
+          random(state, &Space.crossover(space, left[name], right[name], &1))
         else
           {left[name], state}
         end
 
-      {unit, random} = Space.uniform(state.random)
-      state = %{state | random: random}
+      {unit, state} = random(state, &Space.uniform/1)
 
       {value, state} =
         if unit < state.config.mutation_rate do
-          {value, random} = Space.mutate(space, value, state.random)
-          {value, %{state | random: random}}
+          random(state, &Space.mutate(space, value, &1))
         else
           {value, state}
         end
@@ -183,8 +165,8 @@ defmodule Tune.Search.Genetic do
 
     {sample, state} =
       Enum.map_reduce(1..count//1, state, fn _, state ->
-        {index, random} = Space.integer(state.random, length(population))
-        {Enum.at(population, index), %{state | random: random}}
+        {index, state} = random(state, &Space.integer(&1, length(population)))
+        {Enum.at(population, index), state}
       end)
 
     {Enum.max_by(sample, & &1.evaluation.selected_score), state}
@@ -192,8 +174,8 @@ defmodule Tune.Search.Genetic do
 
   defp sample_parameters(state) do
     Enum.reduce(state.spaces, {%{}, state}, fn {name, space}, {params, state} ->
-      {value, random} = Space.sample(space, state.random)
-      {Map.put(params, name, value), %{state | random: random}}
+      {value, state} = random(state, &Space.sample(space, &1))
+      {Map.put(params, name, value), state}
     end)
   end
 
@@ -202,7 +184,8 @@ defmodule Tune.Search.Genetic do
 
     callback = fn tune_case -> invoke(state.runner, value, tune_case.input) end
 
-    limits = Map.put(state.limits, :model_calls, state.context.budget)
+    limits =
+      Map.put(state.study.limits, :model_calls, Study.remaining_model_calls(state.study))
 
     evaluation =
       Evaluator.evaluate(
@@ -213,20 +196,12 @@ defmodule Tune.Search.Genetic do
         Map.delete(limits, :evaluations)
       )
 
-    candidate = %Candidate{
-      id: Integer.to_string(state.context.next_id),
-      parameters: params,
-      value: value,
-      evaluation: evaluation,
-      lineage: lineage
-    }
+    study = Study.account_evaluation(state.study, evaluation)
 
-    context =
-      state.context
-      |> Context.account_evaluation(evaluation)
-      |> Context.record(candidate)
+    {candidate, study} =
+      Study.record(study, value, params, evaluation, %{lineage: lineage, metadata: %{}})
 
-    state = %{state | context: context, evaluations: state.evaluations + 1}
+    state = %{state | study: study}
 
     {candidate, state}
   end
@@ -235,15 +210,16 @@ defmodule Tune.Search.Genetic do
   defp invoke(runner, target, _input) when is_function(runner, 1), do: runner.(target)
 
   defp result(state) do
-    best = state.context.best
+    best = Study.incumbent(state.study)
+    reason = Study.stop_reason(state.study) || :completed
 
-    Context.result(state.context, best.value, best.parameters,
+    Study.result(state.study, best.value, best.parameters,
       baseline: state.baseline,
-      stop_reason: state.stop_reason || :completed,
-      complete?: state.stop_reason == :completed,
+      stop_reason: reason,
+      complete?: reason == :completed,
       metadata: %{
         strategy: :genetic,
-        evaluations: state.evaluations,
+        evaluations: state.study.evaluations,
         settings: Map.delete(state.config, :cancel)
       }
     )
@@ -251,13 +227,13 @@ defmodule Tune.Search.Genetic do
 
   defp no_candidate(state) do
     report =
-      Context.result(state.context, nil, %{},
+      Study.result(state.study, nil, %{},
         baseline: state.baseline,
-        stop_reason: state.stop_reason || :no_eligible_candidate,
+        stop_reason: Study.stop_reason(state.study) || :no_eligible_candidate,
         complete?: false,
         metadata: %{
           strategy: :genetic,
-          evaluations: state.evaluations,
+          evaluations: state.study.evaluations,
           settings: Map.delete(state.config, :cancel)
         }
       )
@@ -328,7 +304,7 @@ defmodule Tune.Search.Genetic do
 
   defp evaluation_limit(limits) do
     case Map.get(limits, :evaluations) do
-      value when is_integer(value) and value > 0 -> {:ok, value}
+      value when is_integer(value) and value > 0 -> :ok
       _ -> invalid("an explicit positive evaluation limit is required")
     end
   end
@@ -336,14 +312,14 @@ defmodule Tune.Search.Genetic do
   defp cancelled?(%{config: %{cancel: nil}}), do: false
   defp cancelled?(%{config: %{cancel: cancel}}), do: cancel.()
 
-  defp deadline?(%{limits: %{deadline: :infinity}}), do: false
+  defp remaining_evaluations(state), do: Study.remaining_evaluations(state.study)
 
-  defp deadline?(%{limits: %{deadline: deadline}, started_at: started_at})
-       when is_integer(deadline) do
-    System.monotonic_time(:millisecond) - started_at >= deadline
+  defp random(state, operation) do
+    {value, study} = Study.random(state.study, operation)
+    {value, %{state | study: study}}
   end
 
-  defp deadline?(_state), do: false
+  defp stop(state, reason), do: %{state | study: Study.stop(state.study, reason)}
 
   defp positive?(value), do: is_integer(value) and value > 0
   defp non_negative?(value), do: is_integer(value) and value >= 0

@@ -30,7 +30,7 @@ defmodule Tune.Optimizers.Playbook do
   alias Tune.Optimizers.Reflective
   alias Tune.Optimizers.Shared
   alias Tune.Parameter
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @options [:parameter, :rounds, :max_lessons, :max_new, :max_lesson_bytes, :max_total_bytes]
 
@@ -73,7 +73,7 @@ defmodule Tune.Optimizers.Playbook do
     with {:ok, %Parameter{} = parameter} <-
            Map.new(Shared.values(program)) |> Map.fetch(config.parameter),
          {:ok, _} <- Parameter.validate(parameter.schema, ["probe"]) do
-      {evaluation, ctx} = Context.evaluate(ctx, program, ctx.valset)
+      {evaluation, ctx} = Context.evaluate_validation(ctx, program)
 
       {_id, ctx} =
         Context.consider(ctx, program, evaluation, %{label: "baseline", lessons: parameter.value})
@@ -139,7 +139,7 @@ defmodule Tune.Optimizers.Playbook do
            :ok <- check_growth(config, current, proposed),
            {:ok, challenger} <- Shared.put_value(incumbent, config.parameter, proposed),
            false <- Context.exhausted?(ctx) do
-        {evaluation, ctx} = Context.evaluate(ctx, challenger, ctx.valset)
+        {evaluation, ctx} = Context.evaluate_validation(ctx, challenger)
 
         {_id, ctx} =
           Context.consider(ctx, challenger, evaluation, %{

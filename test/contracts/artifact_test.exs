@@ -3,12 +3,12 @@ defmodule Tune.Contracts.ArtifactTest do
 
   alias Tune
   alias Tune.Adapter
+  alias Tune.Artifact
   alias Tune.Error
   alias Tune.Examples.GroundedQA
   alias Tune.ModelConfig
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Parameter
-  alias Tune.Parameters
   alias Tune.Predictor
   alias Tune.TestSupport.QAWorld
   alias Tune.TestSupport.Transport
@@ -57,23 +57,23 @@ defmodule Tune.Contracts.ArtifactTest do
     model: model
   } do
     {program, report} = optimized()
-    provenance = Parameters.provenance(source: "test", report: report, models: [target: model])
+    provenance = Artifact.provenance(source: "test", report: report, models: [target: model])
 
-    assert {:ok, artifact} = Parameters.dump(program, provenance: provenance)
-    assert {:ok, json} = Parameters.encode(artifact)
-    assert {:ok, decoded} = Parameters.decode(json)
-    assert {:ok, loaded} = Parameters.apply(GroundedQA.new(), decoded)
+    assert {:ok, artifact} = Artifact.dump(program, provenance: provenance)
+    assert {:ok, json} = Artifact.encode(artifact)
+    assert {:ok, decoded} = Artifact.decode(json)
+    assert {:ok, loaded} = Artifact.apply(decoded, GroundedQA.new())
 
     assert loaded.extract.demos == program.extract.demos
     assert loaded.answer.demos == program.answer.demos
     assert loaded.answer.signature.instructions == program.answer.signature.instructions
     assert loaded.lessons.value == ["Quote the passage id."]
 
-    assert decoded["provenance"]["optimizer"] == "Tune.Optimizers.BootstrapFewShot"
-    assert decoded["provenance"]["calls"] == %{"teacher" => 4}
-    assert decoded["provenance"]["models"]["target"]["model"] == "openai:gpt-4-turbo"
-    assert decoded["provenance"]["datasets"]["train"] == 2
-    assert is_binary(decoded["provenance"]["datasets"]["train_fingerprint"])
+    assert decoded.provenance["optimizer"] == "Tune.Optimizers.BootstrapFewShot"
+    assert decoded.provenance["calls"] == %{"teacher" => 4}
+    assert decoded.provenance["models"]["target"]["model"] == "openai:gpt-4-turbo"
+    assert decoded.provenance["datasets"]["train"] == 2
+    assert is_binary(decoded.provenance["datasets"]["train_fingerprint"])
 
     refute json =~ @secret
     refute json =~ "api_key"
@@ -82,9 +82,10 @@ defmodule Tune.Contracts.ArtifactTest do
 
   test "encoding is canonical and stable" do
     {program, _report} = optimized()
-    {:ok, artifact} = Parameters.dump(program)
-    {:ok, first} = Parameters.encode(artifact)
-    {:ok, second} = Parameters.encode(artifact |> Jason.encode!() |> Jason.decode!())
+    {:ok, artifact} = Artifact.dump(program)
+    {:ok, first} = Artifact.encode(artifact)
+    {:ok, decoded} = Artifact.decode(JSON.encode!(wire(artifact)))
+    {:ok, second} = Artifact.encode(decoded)
     assert first == second
   end
 
@@ -109,8 +110,8 @@ defmodule Tune.Contracts.ArtifactTest do
           ]
         )
 
-      assert Parameters.fingerprint(base) == Parameters.fingerprint(instructed)
-      assert Parameters.fingerprint(base) == Parameters.fingerprint(described)
+      assert Artifact.fingerprint(base) == Artifact.fingerprint(instructed)
+      assert Artifact.fingerprint(base) == Artifact.fingerprint(described)
     end
 
     test "change with field order, names, or schemas", %{base: base} do
@@ -130,7 +131,7 @@ defmodule Tune.Contracts.ArtifactTest do
       {:ok, renamed} =
         Predictor.new(signature: [inputs: [question: Zoi.string()], outputs: [a: Zoi.string()]])
 
-      fingerprints = Enum.map([base, two, swapped, typed, renamed], &Parameters.fingerprint/1)
+      fingerprints = Enum.map([base, two, swapped, typed, renamed], &Artifact.fingerprint/1)
       assert length(Enum.uniq(fingerprints)) == 5
     end
   end
@@ -138,26 +139,34 @@ defmodule Tune.Contracts.ArtifactTest do
   describe "mismatches apply nothing" do
     setup do
       {program, _report} = optimized()
-      {:ok, artifact} = Parameters.dump(program)
+      {:ok, artifact} = Artifact.dump(program)
       %{artifact: artifact}
     end
 
     test "a missing or extra entry", %{artifact: artifact} do
-      assert {:error, %Error.Invalid.Definition{}} =
-               Parameters.apply(
-                 GroundedQA.new(),
-                 update_in(artifact["entries"], &Map.delete(&1, "lessons"))
-               )
+      missing = %{artifact | parameters: Map.delete(artifact.parameters, "lessons")}
 
-      extra = put_in(artifact, ["entries", "other"], artifact["entries"]["lessons"])
-      assert {:error, %Error.Invalid.Definition{}} = Parameters.apply(GroundedQA.new(), extra)
+      assert {:error, %Error.Invalid.Definition{}} =
+               Artifact.apply(missing, GroundedQA.new())
+
+      extra =
+        %{
+          artifact
+          | parameters: Map.put(artifact.parameters, "other", artifact.parameters["lessons"])
+        }
+
+      assert {:error, %Error.Invalid.Definition{}} = Artifact.apply(extra, GroundedQA.new())
     end
 
     test "a kind change", %{artifact: artifact} do
-      swapped = put_in(artifact, ["entries", "lessons"], artifact["entries"]["answer"])
+      swapped =
+        %{
+          artifact
+          | parameters: Map.put(artifact.parameters, "lessons", artifact.parameters["answer"])
+        }
 
       assert {:error, %Error.Invalid.Definition{message: message}} =
-               Parameters.apply(GroundedQA.new(), swapped)
+               Artifact.apply(swapped, GroundedQA.new())
 
       assert message =~ "different kind"
     end
@@ -168,76 +177,87 @@ defmodule Tune.Contracts.ArtifactTest do
       program = %{program | lessons: changed}
 
       assert {:error, %Error.Invalid.Definition{message: message}} =
-               Parameters.apply(program, artifact)
+               Artifact.apply(artifact, program)
 
-      assert message =~ "different field or schema contract"
+      assert message =~ "different program contract"
     end
 
     test "an invalid demonstration or value", %{artifact: artifact} do
       bad_demo =
-        update_in(artifact, ["entries", "answer", "demos"], fn [demo | rest] ->
-          [put_in(demo, ["outputs", "sources"], "not a list") | rest]
+        update_in(artifact.parameters["answer"]["demos"], fn [demo | rest] ->
+          [put_in(demo["outputs"]["sources"], "not a list") | rest]
         end)
 
       fresh = GroundedQA.new()
-      assert {:error, %Error.Invalid.Definition{}} = Parameters.apply(fresh, bad_demo)
+      assert {:error, %Error.Invalid.Definition{}} = Artifact.apply(bad_demo, fresh)
       assert fresh == GroundedQA.new()
 
-      bad_value = put_in(artifact, ["entries", "lessons", "value"], [1])
-      assert {:error, %Error.Invalid.Definition{}} = Parameters.apply(GroundedQA.new(), bad_value)
+      bad_value = put_in(artifact.parameters["lessons"]["value"], [1])
+      assert {:error, %Error.Invalid.Definition{}} = Artifact.apply(bad_value, GroundedQA.new())
     end
   end
 
   describe "decode" do
     setup do
       {program, _report} = optimized()
-      {:ok, artifact} = Parameters.dump(program)
-      {:ok, json} = Parameters.encode(artifact)
+      {:ok, artifact} = Artifact.dump(program)
+      {:ok, json} = Artifact.encode(artifact)
       %{artifact: artifact, json: json}
     end
 
     test "rejects unknown versions, formats, fields, and kinds", %{artifact: artifact} do
+      artifact = wire(artifact)
+
       cases = [
         Map.put(artifact, "version", 2),
         Map.put(artifact, "format", "other"),
         Map.put(artifact, "module", "Elixir.System"),
-        put_in(artifact, ["entries", "lessons", "kind"], "function"),
-        put_in(artifact, ["entries", "lessons", "code"], "System.halt()"),
+        put_in(artifact["parameters"]["lessons"]["kind"], "function"),
+        put_in(artifact["parameters"]["lessons"]["code"], "System.halt()"),
         Map.put(artifact, "provenance", %{"api_key" => "x"})
       ]
 
       for data <- cases do
-        assert {:error, %Error.Invalid.Definition{}} = Parameters.decode(Jason.encode!(data))
+        assert {:error, %Error.Invalid.Definition{}} = Artifact.decode(JSON.encode!(data))
       end
     end
 
     test "enforces byte and entry limits", %{json: json} do
-      assert {:error, %Error.Invalid.Definition{}} = Parameters.decode(json, max_bytes: 10)
-      assert {:error, %Error.Invalid.Definition{}} = Parameters.decode(json, max_entries: 1)
-      assert {:ok, _} = Parameters.decode(json)
+      assert {:error, %Error.Invalid.Definition{}} = Artifact.decode(json, max_bytes: 10)
+      assert {:error, %Error.Invalid.Definition{}} = Artifact.decode(json, max_entries: 1)
+      assert {:ok, _} = Artifact.decode(json)
     end
 
     test "creates no atoms from artifact data", %{artifact: artifact} do
       key = "never_seen_atom_#{System.unique_integer([:positive])}"
 
       data =
-        put_in(artifact, ["entries", key], %{
+        put_in(wire(artifact)["parameters"][key], %{
           "kind" => "value",
           "fingerprint" => "x",
           "value" => %{key => 1}
         })
 
-      assert {:ok, decoded} = Parameters.decode(Jason.encode!(data))
-      assert {:error, _} = Parameters.apply(GroundedQA.new(), decoded)
+      assert {:ok, decoded} = Artifact.decode(JSON.encode!(data))
+      assert {:error, _} = Artifact.apply(decoded, GroundedQA.new())
       assert_raise ArgumentError, fn -> String.to_existing_atom(key) end
     end
   end
 
   test "dump rejects provenance that is not plain allowlisted data" do
     assert {:error, %Error.Invalid.Definition{}} =
-             Parameters.dump(GroundedQA.new(), provenance: %{"source" => fn -> :x end})
+             Artifact.dump(GroundedQA.new(), provenance: %{"source" => fn -> :x end})
 
     assert {:error, %Error.Invalid.Definition{}} =
-             Parameters.dump(GroundedQA.new(), provenance: %{"request_options" => []})
+             Artifact.dump(GroundedQA.new(), provenance: %{"request_options" => []})
+  end
+
+  defp wire(artifact) do
+    %{
+      "version" => artifact.version,
+      "target_fingerprint" => artifact.target_fingerprint,
+      "parameters" => artifact.parameters,
+      "provenance" => artifact.provenance
+    }
   end
 end

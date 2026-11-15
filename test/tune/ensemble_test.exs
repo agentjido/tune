@@ -3,9 +3,9 @@ defmodule Tune.EnsembleTest do
 
   alias Tune
   alias Tune.Adapter
+  alias Tune.Artifact
   alias Tune.Ensemble
   alias Tune.Error
-  alias Tune.Parameters
   alias Tune.Predictor
   alias Tune.TestSupport.Transport
 
@@ -109,9 +109,9 @@ defmodule Tune.EnsembleTest do
     assert Enum.at(updated.members, 1).signature.instructions == "Vote B carefully."
     assert Enum.at(ensemble.members, 1).signature.instructions == "Vote B"
 
-    {:ok, artifact} = Parameters.dump(updated)
+    {:ok, artifact} = Artifact.dump(updated)
     {:ok, fresh} = Ensemble.new([member("Vote A"), member("Vote B")])
-    {:ok, loaded} = Parameters.apply(fresh, artifact)
+    {:ok, loaded} = Artifact.apply(artifact, fresh)
     assert Enum.at(loaded.members, 1).signature.instructions == "Vote B carefully."
   end
 
@@ -146,9 +146,9 @@ defmodule Tune.EnsembleTest do
     assert {:ok, evaluation} =
              ensemble
              |> Tune.new(model: config(stub))
-             |> Tune.data(test: [%{inputs: %{ticket: "x"}, labels: %{label: "billing"}}])
+             |> Tune.data(test: [%{input: %{ticket: "x"}, expected: %{label: "billing"}}])
              |> Tune.score(:accuracy, fn example, prediction ->
-               if prediction.output["label"] == example.labels["label"], do: 1, else: 0
+               if prediction.output["label"] == example.expected["label"], do: 1, else: 0
              end)
              |> Tune.evaluate()
 

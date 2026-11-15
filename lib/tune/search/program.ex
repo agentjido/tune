@@ -2,11 +2,11 @@ defmodule Tune.Search.Program do
   @moduledoc false
 
   alias Tune
+  alias Tune.Case
   alias Tune.Error
-  alias Tune.Example
-  alias Tune.Metric
   alias Tune.Result
-  alias Tune.Search.Context
+  alias Tune.Score
+  alias Tune.Search.Program.Context
 
   @options [
     :optimizer,
@@ -40,8 +40,13 @@ defmodule Tune.Search.Program do
          {:ok, max_calls} <- max_calls(opts, requirements),
          {:ok, seed} <- seed(opts),
          {:ok, trainset, duplicates} <- trainset(signature, opts, requirements),
-         {:ok, valset} <- valset(signature, opts, requirements),
+         {:ok, valset, validation_factory} <- valset(signature, opts, requirements),
          :ok <- check_overlap(trainset, valset) do
+      metric =
+        if metric,
+          do: Score.new!(:objective, metric, failure_score: failure_score),
+          else: nil
+
       ctx =
         Context.new(
           optimizer: module,
@@ -56,6 +61,7 @@ defmodule Tune.Search.Program do
           deadline: Keyword.get(opts, :timeout),
           trainset: trainset,
           valset: valset,
+          validation_factory: validation_factory,
           notes: %{train_duplicates_removed: duplicates, settings: settings(config)}
         )
 
@@ -85,19 +91,19 @@ defmodule Tune.Search.Program do
       end
 
     Context.result(ctx, value, parameters,
-      complete?: ok? and ctx.stop_reason == nil,
-      stop_reason: ctx.stop_reason || if(ok?, do: :completed, else: :failed),
+      complete?: ok? and Context.stop_reason(ctx) == nil,
+      stop_reason: Context.stop_reason(ctx) || if(ok?, do: :completed, else: :failed),
       metadata: %{
         strategy: ctx.optimizer,
-        seed: ctx.seed,
-        max_model_calls: ctx.max_model_calls,
+        seed: Context.seed(ctx),
+        max_model_calls: Context.max_model_calls(ctx),
         datasets: %{
           train: length(ctx.trainset),
           validation: length(ctx.valset),
           train_fingerprint: fingerprint(ctx.trainset),
           validation_fingerprint: fingerprint(ctx.valset)
         },
-        notes: ctx.notes
+        notes: Context.notes(ctx)
       }
     )
   end
@@ -127,8 +133,8 @@ defmodule Tune.Search.Program do
 
   defp fingerprint(examples) do
     examples
-    |> Enum.map(&[&1.id, &1.inputs, &1.labels])
-    |> Example.canonical_json()
+    |> Enum.map(&[&1.id, &1.input, &1.expected])
+    |> Tune.CanonicalJSON.encode!()
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
   end
@@ -185,8 +191,11 @@ defmodule Tune.Search.Program do
 
   defp metric(opts, requirements) do
     case Keyword.fetch(opts, :metric) do
+      {:ok, metric} when is_function(metric, 2) ->
+        {:ok, metric}
+
       {:ok, metric} ->
-        Metric.new(metric)
+        option_error(:metric, "must be a 2-arity function, got: #{inspect(metric)}")
 
       :error ->
         if Map.get(requirements, :metric?, true),
@@ -234,9 +243,9 @@ defmodule Tune.Search.Program do
           else: {:ok, [], 0}
 
       rows ->
-        with {:ok, examples} <- Example.normalize_all(signature, rows) do
+        with {:ok, examples} <- Case.normalize_all(signature, rows) do
           unique =
-            Enum.uniq_by(examples, &{Example.input_key(&1), Example.canonical_json(&1.labels)})
+            Enum.uniq_by(examples, &{Case.input_key(&1), Tune.CanonicalJSON.encode!(&1.expected)})
 
           {:ok, unique, length(examples) - length(unique)}
         end
@@ -248,17 +257,28 @@ defmodule Tune.Search.Program do
       nil ->
         if :val in requirements.datasets,
           do: option_error(:valset, "is required; there is no automatic split"),
-          else: {:ok, []}
+          else: {:ok, [], fn -> [] end}
 
       rows ->
-        Example.normalize_all(signature, rows)
+        factory = if is_function(rows, 0), do: rows, else: fn -> rows end
+
+        with {:ok, examples} <- Case.normalize_all(signature, factory.()) do
+          validation_factory = fn ->
+            case Case.normalize_all(signature, factory.()) do
+              {:ok, cases} -> cases
+              {:error, error} -> raise error
+            end
+          end
+
+          {:ok, examples, validation_factory}
+        end
     end
   end
 
   defp check_overlap(trainset, valset) do
-    train_keys = MapSet.new(trainset, &Example.input_key/1)
+    train_keys = MapSet.new(trainset, &Case.input_key/1)
 
-    case Enum.filter(valset, &MapSet.member?(train_keys, Example.input_key(&1))) do
+    case Enum.filter(valset, &MapSet.member?(train_keys, Case.input_key(&1))) do
       [] ->
         :ok
 

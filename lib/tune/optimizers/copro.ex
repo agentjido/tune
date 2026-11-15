@@ -22,7 +22,7 @@ defmodule Tune.Optimizers.COPRO do
 
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @options [:breadth, :depth, :evidence_examples, :predictors]
 
@@ -60,7 +60,7 @@ defmodule Tune.Optimizers.COPRO do
 
   @doc false
   def search(config, program, names, ctx) do
-    {evaluation, ctx} = Context.evaluate(ctx, program, ctx.valset)
+    {evaluation, ctx} = Context.evaluate_validation(ctx, program)
 
     {baseline_id, ctx} =
       Context.consider(ctx, program, evaluation, %{label: "baseline", parent: nil})
@@ -99,8 +99,8 @@ defmodule Tune.Optimizers.COPRO do
         {:halt, {state, ctx}}
       else
         {:ok, candidate} = Shared.put_instructions(state.current, %{name => instruction})
-        {evaluation, ctx} = Context.evaluate(ctx, candidate, ctx.valset)
-        before = ctx.best
+        {evaluation, ctx} = Context.evaluate_validation(ctx, candidate)
+        before = Context.incumbent(ctx)
 
         {id, ctx} =
           Context.consider(ctx, candidate, evaluation, %{
@@ -113,7 +113,9 @@ defmodule Tune.Optimizers.COPRO do
         state = update_in(state.attempts[name], &[{instruction, evaluation.selected_score} | &1])
 
         state =
-          if ctx.best != before, do: %{state | current: candidate, current_id: id}, else: state
+          if Context.incumbent(ctx) != before,
+            do: %{state | current: candidate, current_id: id},
+            else: state
 
         {:cont, {state, ctx}}
       end

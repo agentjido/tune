@@ -8,7 +8,7 @@ defmodule Tune.Optimizers.SearchTest do
   alias Tune.Optimizers.BootstrapFewShotWithRandomSearch
   alias Tune.Optimizers.TPE
   alias Tune.Predictor
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
   alias Tune.TestSupport.Transport
 
   defp config(stub),
@@ -26,10 +26,10 @@ defmodule Tune.Optimizers.SearchTest do
   end
 
   defp train(n),
-    do: for(i <- 1..n, do: %{inputs: %{ticket: "ticket #{i}"}, labels: %{label: "billing"}})
+    do: for(i <- 1..n, do: %{input: %{ticket: "ticket #{i}"}, expected: %{label: "billing"}})
 
   defp val(n),
-    do: for(i <- 1..n, do: %{inputs: %{ticket: "val #{i}"}, labels: %{label: "billing"}})
+    do: for(i <- 1..n, do: %{input: %{ticket: "val #{i}"}, expected: %{label: "billing"}})
 
   defp teacher, do: Transport.respond_with(fn _ -> Transport.chat(label: "billing") end)
 
@@ -46,7 +46,7 @@ defmodule Tune.Optimizers.SearchTest do
   end
 
   defp metric(example, result),
-    do: if(result.output["label"] == example.labels["label"], do: 1.0, else: 0.0)
+    do: if(result.output["label"] == example.expected["label"], do: 1.0, else: 0.0)
 
   defp has_demo?(prompt, ticket), do: String.contains?(prompt, "[[ ## ticket ## ]]\n#{ticket}\n")
 

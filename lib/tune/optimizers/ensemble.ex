@@ -9,7 +9,7 @@ defmodule Tune.Optimizers.Ensemble do
   @behaviour Tune.Search.ProgramStrategy
 
   alias Tune.Error
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @options [:members, :size, :seed, :reducer]
 

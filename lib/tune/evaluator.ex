@@ -1,13 +1,13 @@
-defmodule Tune.Pipeline.Evaluator do
+defmodule Tune.Evaluator do
   @moduledoc false
 
   alias Tune.Case
   alias Tune.Error
   alias Tune.Evaluation
-  alias Tune.Metric
   alias Tune.Observation
-  alias Tune.Pipeline.Score
   alias Tune.Prediction
+  alias Tune.Score
+  alias Tune.Score.Selector
   alias Tune.Score.Summary
 
   @type state :: %{
@@ -170,6 +170,10 @@ defmodule Tune.Pipeline.Evaluator do
 
         {:error, error, result_metadata} ->
           score_calls = merge_counts(score_calls, Map.get(result_metadata, :calls, %{}))
+
+          score_metadata =
+            Map.put(score_metadata, score.name, Map.delete(result_metadata, :calls))
+
           {:halt, {:error, error, score_metadata, score_calls}}
       end
     end)
@@ -206,75 +210,19 @@ defmodule Tune.Pipeline.Evaluator do
   end
 
   defp apply_score(%Score{metric: metric}, tune_case, output, prediction) do
-    value =
-      cond do
-        prediction && match?(%Metric{}, metric) ->
-          Metric.score(metric, tune_case.metadata.example, prediction)
-
-        is_struct(metric) and function_exported?(metric.__struct__, :score, 3) ->
-          metric.__struct__.score(metric, tune_case, output)
-
-        prediction && is_function(metric, 2) ->
-          metric.(tune_case.metadata.example, prediction)
-
-        is_function(metric, 2) ->
-          metric.(tune_case, output)
-
-        is_function(metric, 1) ->
-          metric.(output)
-
-        is_atom(metric) and function_exported?(metric, :score, 2) ->
-          metric.score(tune_case, output)
-
-        true ->
-          {:error, "score callback has no supported arity"}
-      end
-
-    normalize_score(value)
-  rescue
-    error ->
-      {:error,
-       Error.Execution.Callback.exception(
-         message: "the score raised: #{Exception.message(error)}",
-         value: error
-       ), %{}}
-  end
-
-  defp normalize_score({:ok, value}), do: normalize_score(value)
-
-  defp normalize_score({:error, error, metadata}) when is_map(metadata),
-    do: {:error, error, metadata}
-
-  defp normalize_score({:error, error}), do: {:error, error, %{}}
-
-  defp normalize_score(%{score: _score} = value) do
-    case Metric.normalize(value) do
-      {:ok, normalized} ->
-        metadata = Map.get(value, :metadata, Map.drop(value, [:score, :feedback]))
-        {:ok, normalized, metadata}
-
-      {:error, error} ->
-        {:error, error, %{}}
-    end
-  end
-
-  defp normalize_score(value) do
-    case Metric.normalize(value) do
-      {:ok, normalized} -> {:ok, normalized, %{}}
-      {:error, error} -> {:error, error, %{}}
-    end
+    Score.execute(%Score{name: :runtime, metric: metric}, tune_case, output, prediction)
   end
 
   defp summarize(state, scores, selector, limits) do
     observations =
       state.observations
       |> Enum.reverse()
-      |> Enum.map(&put_selected_score(&1, scores, selector))
+      |> Enum.map(&put_selection(&1, scores, selector))
 
     total = length(observations)
     summaries = Map.new(scores, &{&1.name, summary(&1, observations, total)})
     complete? = state.stop_reason in [nil, :case_limit] and all_attempted?(observations)
-    eligible? = complete? and total > 0 and eligible?(observations, scores, selector)
+    eligible? = complete? and total > 0 and Enum.all?(observations, & &1.eligible?)
 
     %Evaluation{
       observations: observations,
@@ -311,21 +259,6 @@ defmodule Tune.Pipeline.Evaluator do
   defp all_attempted?(observations),
     do: Enum.all?(observations, &(&1.status in [:ok, :error]))
 
-  defp eligible?(observations, scores, selector) do
-    required = selector_names(selector)
-
-    Enum.all?(observations, fn
-      %Observation{status: :ok} ->
-        true
-
-      %Observation{status: :error} ->
-        Enum.all?(required, &is_number(score!(scores, &1).failure_score))
-
-      %Observation{} ->
-        false
-    end)
-  end
-
   defp selected_mean(observations, scores, selector) do
     observations
     |> Enum.map(&selected_value(&1, scores, selector))
@@ -333,58 +266,38 @@ defmodule Tune.Pipeline.Evaluator do
   end
 
   defp selected_value(%Observation{status: :ok, scores: values}, scores, selector),
-    do: select(values, scores, selector)
+    do: Selector.select(values, scores, selector)
 
   defp selected_value(%Observation{}, scores, selector) do
-    values = Map.new(scores, &{&1.name, &1.failure_score})
-    select(values, scores, selector)
+    {:ok, values} = Selector.failure_values(scores, selector)
+    Selector.select(values, scores, selector)
   end
 
-  defp put_selected_score(%Observation{status: :ok} = observation, scores, selector) do
-    put_in(observation.metadata[:selected_score], select(observation.scores, scores, selector))
+  defp put_selection(%Observation{status: :ok} = observation, scores, selector) do
+    observation
+    |> Map.put(:eligible?, true)
+    |> put_in(
+      [Access.key(:metadata), :selected_score],
+      Selector.select(observation.scores, scores, selector)
+    )
   end
 
-  defp put_selected_score(%Observation{status: :error} = observation, scores, selector) do
-    required = selector_names(selector)
+  defp put_selection(%Observation{status: :error} = observation, scores, selector) do
+    case Selector.failure_values(scores, selector) do
+      {:ok, values} ->
+        observation
+        |> Map.put(:eligible?, true)
+        |> put_in(
+          [Access.key(:metadata), :selected_score],
+          Selector.select(values, scores, selector)
+        )
 
-    if Enum.all?(required, &is_number(score!(scores, &1).failure_score)) do
-      values = Map.new(scores, &{&1.name, &1.failure_score})
-      put_in(observation.metadata[:selected_score], select(values, scores, selector))
-    else
-      observation
+      :error ->
+        %{observation | eligible?: false}
     end
   end
 
-  defp put_selected_score(observation, _scores, _selector), do: observation
-
-  defp select(values, scores, {:score, name}) do
-    orient(values[name], score!(scores, name).direction)
-  end
-
-  defp select(values, scores, {:weighted, weights}) do
-    total = weights |> Map.values() |> Enum.sum()
-
-    Enum.sum(
-      Enum.map(weights, fn {name, weight} ->
-        score = score!(scores, name)
-        weight * normalize(values[name], score)
-      end)
-    ) / total
-  end
-
-  defp normalize(value, %Score{range: {low, high}, direction: direction})
-       when is_number(low) and is_number(high) and high > low do
-    normalized = (value - low) / (high - low)
-    if direction == :maximize, do: normalized, else: 1.0 - normalized
-  end
-
-  defp normalize(value, %Score{direction: direction}), do: orient(value, direction)
-  defp orient(value, :maximize), do: value
-  defp orient(value, :minimize), do: -value
-
-  defp selector_names({:score, name}), do: [name]
-  defp selector_names({:weighted, weights}), do: Map.keys(weights)
-  defp score!(scores, name), do: Enum.find(scores, &(&1.name == name))
+  defp put_selection(observation, _scores, _selector), do: %{observation | eligible?: false}
 
   defp task_observation({:ok, %Observation{} = observation}, _tune_case, _allowance),
     do: observation
@@ -434,15 +347,6 @@ defmodule Tune.Pipeline.Evaluator do
   end
 
   defp normalize_case(%Case{} = tune_case, _index), do: tune_case
-
-  defp normalize_case(%Tune.Example{} = example, _index) do
-    %Case{
-      id: example.id,
-      input: example.inputs,
-      expected: example.labels,
-      metadata: %{example: example}
-    }
-  end
 
   defp normalize_case(%{} = value, index) do
     input = Map.get(value, :input, Map.get(value, "input", value))
@@ -522,11 +426,47 @@ defmodule Tune.Pipeline.Evaluator do
 
   defp sum_usage(observations) do
     Enum.reduce(observations, %{input: 0, output: 0, total: 0}, fn observation, acc ->
-      usage = observation.prediction && Prediction.token_totals(observation.prediction)
-      usage = usage || %{input: 0, output: 0, total: 0}
+      prediction = observation.prediction && Prediction.token_totals(observation.prediction)
+      score_usage = score_usage(observation.metadata)
+      usage = add_usage(prediction || empty_usage(), score_usage)
       Map.new(acc, fn {key, value} -> {key, value + usage[key]} end)
     end)
   end
+
+  defp score_usage(%{scores: scores}) do
+    scores
+    |> Map.values()
+    |> Enum.flat_map(&Map.get(&1, :judge_calls, []))
+    |> Enum.reduce(empty_usage(), fn call, acc -> add_usage(acc, usage(Map.get(call, :usage))) end)
+  end
+
+  defp score_usage(_metadata), do: empty_usage()
+
+  defp usage(nil), do: empty_usage()
+
+  defp usage(value) do
+    %{
+      input: token(value, :input_tokens),
+      output: token(value, :output_tokens),
+      total: token(value, :total_tokens)
+    }
+  end
+
+  defp token(value, key) do
+    case Map.get(value, key) || Map.get(value, Atom.to_string(key)) do
+      count when is_integer(count) -> count
+      _ -> 0
+    end
+  end
+
+  defp add_usage(left, right),
+    do: %{
+      input: left.input + right.input,
+      output: left.output + right.output,
+      total: left.total + right.total
+    }
+
+  defp empty_usage, do: %{input: 0, output: 0, total: 0}
 
   defp deadline?(state, %{deadline: deadline})
        when is_integer(deadline) and deadline >= 0 do

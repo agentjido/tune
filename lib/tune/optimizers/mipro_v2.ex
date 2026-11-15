@@ -30,14 +30,13 @@ defmodule Tune.Optimizers.MIPROv2 do
 
   @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Example
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Optimizers.BootstrapFewShotWithRandomSearch
   alias Tune.Optimizers.ExampleSets
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Shared
   alias Tune.Optimizers.TPE
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @own [
     :num_candidates,
@@ -84,7 +83,7 @@ defmodule Tune.Optimizers.MIPROv2 do
   @impl true
   def compile(config, program, %Context{} = ctx) do
     names = Enum.map(Shared.predictors(program), &elem(&1, 0))
-    {baseline, ctx} = Context.evaluate(ctx, program, ctx.valset)
+    {baseline, ctx} = Context.evaluate_validation(ctx, program)
     {_id, ctx} = Context.consider(ctx, program, baseline, %{label: "baseline"})
 
     {boot_sets, ctx} =
@@ -214,7 +213,7 @@ defmodule Tune.Optimizers.MIPROv2 do
       state.minibatch
       |> Enum.reject(fn {choice, _} -> MapSet.member?(state.promoted, choice) end)
       |> Enum.sort_by(fn {choice, scores} ->
-        {-(Enum.sum(scores) / length(scores)), Example.canonical_json(choice)}
+        {-(Enum.sum(scores) / length(scores)), Tune.CanonicalJSON.encode!(choice)}
       end)
       |> List.first()
 
@@ -227,7 +226,7 @@ defmodule Tune.Optimizers.MIPROv2 do
           {state, ctx}
         else
           candidate = build.(choice)
-          {evaluation, ctx} = Context.evaluate(ctx, candidate, ctx.valset)
+          {evaluation, ctx} = Context.evaluate_validation(ctx, candidate)
 
           {_id, ctx} =
             Context.consider(ctx, candidate, evaluation, %{

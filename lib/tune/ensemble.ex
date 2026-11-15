@@ -21,7 +21,6 @@ defmodule Tune.Ensemble do
 
   alias Tune
   alias Tune.Error
-  alias Tune.Example
   alias Tune.Execution
 
   @enforce_keys [:members, :reducer]
@@ -109,9 +108,9 @@ defmodule Tune.Ensemble do
   @doc "Majority vote with canonical equality; ties go to the earliest output."
   @spec majority([map()]) :: map()
   def majority(outputs) do
-    counts = Enum.frequencies_by(outputs, &Example.canonical_json/1)
+    counts = Enum.frequencies_by(outputs, &Tune.CanonicalJSON.encode!/1)
     top = counts |> Map.values() |> Enum.max()
-    Enum.find(outputs, &(Map.fetch!(counts, Example.canonical_json(&1)) == top))
+    Enum.find(outputs, &(Map.fetch!(counts, Tune.CanonicalJSON.encode!(&1)) == top))
   end
 
   defp reduce(:majority, outputs, execution), do: {:ok, majority(outputs), execution}

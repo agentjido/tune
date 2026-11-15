@@ -28,7 +28,7 @@ defmodule Tune.Optimizers.BootstrapFewShotWithOptuna do
   alias Tune.Optimizers.ExampleSets
   alias Tune.Optimizers.Shared
   alias Tune.Optimizers.TPE
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @own [:num_demo_sets, :num_trials, :n_startup]
 
@@ -107,7 +107,7 @@ defmodule Tune.Optimizers.BootstrapFewShotWithOptuna do
 
         :error ->
           candidate = apply_choice(program, sets, choice)
-          {evaluation, ctx} = Context.evaluate(ctx, candidate, ctx.valset)
+          {evaluation, ctx} = Context.evaluate_validation(ctx, candidate)
           {_id, ctx} = Context.consider(ctx, candidate, evaluation, %{choice: choice})
 
           if evaluation.complete? do

@@ -28,16 +28,16 @@ defmodule Tune.Optimizers.InferRulesTest do
   end
 
   defp train,
-    do: for(i <- 1..3, do: %{inputs: %{ticket: "ticket #{i}"}, labels: %{label: "billing"}})
+    do: for(i <- 1..3, do: %{input: %{ticket: "ticket #{i}"}, expected: %{label: "billing"}})
 
   defp val,
     do: [
-      %{inputs: %{ticket: "val 1"}, labels: %{label: "billing"}},
-      %{inputs: %{ticket: "val 2"}, labels: %{label: "SECRET"}}
+      %{input: %{ticket: "val 1"}, expected: %{label: "billing"}},
+      %{input: %{ticket: "val 2"}, expected: %{label: "SECRET"}}
     ]
 
   defp metric(example, result),
-    do: if(result.output["label"] == example.labels["label"], do: 1.0, else: 0.0)
+    do: if(result.output["label"] == example.expected["label"], do: 1.0, else: 0.0)
 
   defp teacher, do: Transport.respond_with(fn _ -> Transport.chat(label: "billing") end)
 

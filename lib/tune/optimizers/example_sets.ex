@@ -4,7 +4,7 @@ defmodule Tune.Optimizers.ExampleSets do
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Optimizers.LabeledFewShot
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @bootstrap_options [:accept_score, :max_bootstrapped_demos, :max_labeled_demos, :max_rounds]
 

@@ -22,7 +22,7 @@ defmodule Tune.Optimizers.InferRules do
   alias Tune.Optimizers.ExampleSets
   alias Tune.Optimizers.Proposals
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @own [:num_candidates, :num_rules]
   @rules_header "Please adhere to the following rules when making your prediction:"
@@ -49,12 +49,12 @@ defmodule Tune.Optimizers.InferRules do
 
   @impl true
   def compile(config, program, %Context{} = ctx) do
-    {original, ctx} = Context.evaluate(ctx, program, ctx.valset)
+    {original, ctx} = Context.evaluate_validation(ctx, program)
     {_id, ctx} = Context.consider(ctx, program, original, %{label: "original"})
 
     case BootstrapFewShot.build(ExampleSets.bootstrap_config(config), program, ctx.trainset, ctx) do
       {:ok, bootstrapped, ctx} ->
-        {evaluation, ctx} = Context.evaluate(ctx, bootstrapped, ctx.valset)
+        {evaluation, ctx} = Context.evaluate_validation(ctx, bootstrapped)
         {_id, ctx} = Context.consider(ctx, bootstrapped, evaluation, %{label: "bootstrapped"})
         ctx = Enum.reduce(1..config.num_candidates, ctx, &candidate(config, bootstrapped, &1, &2))
         ctx = if Context.exhausted?(ctx), do: Context.stop(ctx, :budget_exhausted), else: ctx
@@ -74,9 +74,13 @@ defmodule Tune.Optimizers.InferRules do
     instruction <> "\n\n" <> @rules_header <> "\n" <> numbered
   end
 
-  defp candidate(_config, _bootstrapped, _index, %Context{} = ctx) when ctx.budget == 0, do: ctx
+  defp candidate(config, bootstrapped, index, %Context{} = ctx) do
+    if Context.budget(ctx) == 0,
+      do: ctx,
+      else: build_candidate(config, bootstrapped, index, ctx)
+  end
 
-  defp candidate(config, bootstrapped, index, ctx) do
+  defp build_candidate(config, bootstrapped, index, ctx) do
     if Context.exhausted?(ctx) do
       ctx
     else
@@ -102,7 +106,7 @@ defmodule Tune.Optimizers.InferRules do
         ctx
       else
         {:ok, candidate} = Shared.put_instructions(bootstrapped, instructions)
-        {evaluation, ctx} = Context.evaluate(ctx, candidate, ctx.valset)
+        {evaluation, ctx} = Context.evaluate_validation(ctx, candidate)
 
         {_id, ctx} =
           Context.consider(ctx, candidate, evaluation, %{label: "rules_#{index}", rules: rules})

@@ -17,7 +17,7 @@ defmodule Tune.Optimizers.LabeledFewShot do
   @behaviour Tune.Search.ProgramStrategy
 
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @impl true
   def init(opts) do
@@ -44,7 +44,7 @@ defmodule Tune.Optimizers.LabeledFewShot do
   end
 
   @doc false
-  @spec build(map(), Tune.t(), [Tune.Example.t()], Context.t()) ::
+  @spec build(map(), Tune.t(), [Tune.Case.t()], Context.t()) ::
           {%{String.t() => [Tune.Demo.t()]}, Context.t()}
   def build(%{k: k, sample: sample}, program, examples, ctx) do
     Enum.reduce(Shared.predictors(program), {%{}, ctx}, fn {name, predictor}, {acc, ctx} ->

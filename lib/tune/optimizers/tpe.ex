@@ -15,7 +15,7 @@ defmodule Tune.Optimizers.TPE do
   mode, or Parzen weighting of older trials.
   """
 
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   defstruct space: %{}, n_startup: 10, gamma: 0.1, prior_weight: 1.0, n_candidates: 24
 

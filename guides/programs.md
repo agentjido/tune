@@ -104,8 +104,8 @@ pipeline =
 {:ok, evaluation} = Tune.evaluate(pipeline)
 ```
 
-A program row is a `%Tune.Example{}` or a map with `:inputs`, optional
-`:labels`, and optional `:id`. Labels go only to the score callback.
+A program row is a `%Tune.Case{}` or a map with `:input`, optional
+`:expected`, and optional `:id`. Expected values go only to the score callback.
 
 Each `Tune.score/4` call adds one named score. A score returns a number or a map
 with `:score` and optional `:feedback`. Higher values win by default. Use

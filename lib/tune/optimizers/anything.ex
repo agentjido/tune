@@ -28,7 +28,7 @@ defmodule Tune.Optimizers.Anything do
   alias Tune.Optimizers.Reflective
   alias Tune.Optimizers.Shared
   alias Tune.Parameter
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @impl true
   def init(opts) do
@@ -79,14 +79,14 @@ defmodule Tune.Optimizers.Anything do
   @spec to_text(Parameter.t() | Zoi.schema(), term()) :: String.t()
   def to_text(%Parameter{schema: schema}, value), do: to_text(schema, value)
   def to_text(%Zoi.Types.String{}, value) when is_binary(value), do: value
-  def to_text(_schema, value), do: Jason.encode!(value)
+  def to_text(_schema, value), do: JSON.encode!(value)
 
   @doc "Parses proposal text into a value for a schema, without validation."
   @spec from_text(Zoi.schema(), String.t()) :: {:ok, term()} | :error
   def from_text(%Zoi.Types.String{}, text), do: {:ok, text}
 
   def from_text(_schema, text) do
-    case Jason.decode(text) do
+    case JSON.decode(text) do
       {:ok, value} -> {:ok, value}
       {:error, _} -> :error
     end
@@ -95,7 +95,7 @@ defmodule Tune.Optimizers.Anything do
   defp component(config, %Parameter{schema: schema} = parameter) do
     name = config.parameter
     objective = config.objective || parameter.description || "Improve the value of #{name}."
-    schema_text = Jason.encode!(Field.json_schema(schema))
+    schema_text = JSON.encode!(Field.json_schema(schema))
 
     %{
       name: name,

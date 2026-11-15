@@ -20,8 +20,8 @@ defmodule Tune.TestSupport.QAWorld do
   def rows(items) do
     Enum.map(items, fn {question, subject, answer} ->
       %{
-        inputs: %{context: passages(subject, answer), question: question},
-        labels: %{answer: answer, sources: ["#{subject}-1"]}
+        input: %{context: passages(subject, answer), question: question},
+        expected: %{answer: answer, sources: ["#{subject}-1"]}
       }
     end)
   end
@@ -89,12 +89,12 @@ defmodule Tune.TestSupport.QAWorld do
 
   @doc "Exact-answer metric with feedback."
   def metric(example, result) do
-    if result.output["answer"] == example.labels["answer"] do
+    if result.output["answer"] == example.expected["answer"] do
       %{score: 1.0, feedback: "correct"}
     else
       %{
         score: 0.0,
-        feedback: "expected #{example.labels["answer"]}, got #{result.output["answer"]}"
+        feedback: "expected #{example.expected["answer"]}, got #{result.output["answer"]}"
       }
     end
   end
@@ -138,7 +138,7 @@ defmodule Tune.TestSupport.QAWorld do
     for [_, id, text] <- Regex.scan(pattern, section), do: %{"id" => id, "text" => text}
   end
 
-  defp passages_field(format, user), do: Jason.decode!(text_field(format, user, "context"))
+  defp passages_field(format, user), do: JSON.decode!(text_field(format, user, "context"))
 
   defp facts_field(:xml, user) do
     section = text_field(:xml, user, "facts") || ""
@@ -148,7 +148,7 @@ defmodule Tune.TestSupport.QAWorld do
         do: %{"source" => source, "text" => text}
   end
 
-  defp facts_field(format, user), do: Jason.decode!(text_field(format, user, "facts"))
+  defp facts_field(format, user), do: JSON.decode!(text_field(format, user, "facts"))
 
   defp reply(:chat, fields), do: Transport.chat(fields)
 
@@ -156,8 +156,7 @@ defmodule Tune.TestSupport.QAWorld do
     {:text,
      fields
      |> Enum.map(fn {k, v} -> {Atom.to_string(k), v} end)
-     |> Jason.OrderedObject.new()
-     |> Jason.encode!()}
+     |> Tune.JSON.encode_object!()}
   end
 
   defp reply(:xml, fields) do

@@ -50,7 +50,7 @@ defmodule Tune.JudgeScoresTest do
       Transport.respond_with(fn body ->
         prompt = Transport.prompt_text(body)
         relevant = not String.contains?(prompt, "irrelevant")
-        {:tool, Jason.encode!(%{relevant: relevant, reasoning: "scripted"})}
+        {:tool, JSON.encode!(%{relevant: relevant, reasoning: "scripted"})}
       end)
 
     {:ok, score} = ContextPrecision.new(judge_options(stub))

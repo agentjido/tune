@@ -40,7 +40,7 @@ defmodule Tune.Adapter.Text do
 
   @spec format_value(term(), Zoi.schema()) :: String.t()
   def format_value(value, _schema) when is_binary(value), do: value
-  def format_value(value, _schema), do: Jason.encode!(value)
+  def format_value(value, _schema), do: JSON.encode!(value)
 
   @spec type_label(Zoi.schema()) :: String.t()
   def type_label(%Zoi.Types.String{}), do: "string"
@@ -50,7 +50,7 @@ defmodule Tune.Adapter.Text do
   def type_label(%Zoi.Types.Boolean{}), do: "boolean"
   def type_label(%Zoi.Types.Null{}), do: "null"
   def type_label(%Zoi.Types.Enum{}), do: "enum"
-  def type_label(%Zoi.Types.Literal{value: value}), do: "literal #{Jason.encode!(value)}"
+  def type_label(%Zoi.Types.Literal{value: value}), do: "literal #{JSON.encode!(value)}"
   def type_label(%Zoi.Types.Array{inner: inner}), do: "array of #{type_label(inner)}"
   def type_label(%Zoi.Types.Map{}), do: "object"
 
@@ -68,7 +68,7 @@ defmodule Tune.Adapter.Text do
   def value_requirement(schema) do
     if Field.text_valued?(schema),
       do: nil,
-      else: "must adhere to the JSON schema: " <> Jason.encode!(Field.json_schema(schema))
+      else: "must adhere to the JSON schema: " <> JSON.encode!(Field.json_schema(schema))
   end
 
   @spec placeholder(Field.t()) :: String.t()
@@ -108,7 +108,7 @@ defmodule Tune.Adapter.Text do
         {:ok, text}
 
       true ->
-        case Jason.decode(text) do
+        case JSON.decode(text) do
           {:ok, value} ->
             {:ok, value}
 

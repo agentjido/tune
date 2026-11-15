@@ -26,7 +26,8 @@ defmodule Tune.MixProject do
         "guides/optimizers.md",
         "guides/compatibility.md",
         "guides/artifacts.md",
-        "guides/host_integration.md"
+        "guides/host_integration.md",
+        "guides/ui.md"
       ]
     ]
   end
@@ -45,9 +46,9 @@ defmodule Tune.MixProject do
       {:req_llm, "~> 1.30"},
       {:zoi, "~> 0.19"},
       {:splode, "~> 0.3"},
-      {:jason, "~> 1.4"},
       {:req, "~> 0.7"},
-      {:plug, "~> 1.16", only: :test},
+      {:phoenix_playground, "~> 0.1.9", optional: true},
+      {:plug, "~> 1.18", optional: true},
       {:nx, "~> 1.0", only: :test},
       {:axon, "~> 0.9", only: :test},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},

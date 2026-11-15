@@ -20,7 +20,7 @@ defmodule Tune.Optimizers.KNNFewShot do
 
   alias Tune.KNN
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @impl true
   def init(opts) do
@@ -54,7 +54,7 @@ defmodule Tune.Optimizers.KNNFewShot do
 
   @impl true
   def compile(config, program, %Context{} = ctx) do
-    rows = Enum.map(ctx.trainset, &%{id: &1.id, inputs: &1.inputs, labels: &1.labels})
+    rows = Enum.map(ctx.trainset, &%{id: &1.id, input: &1.input, expected: &1.expected})
 
     case KNN.new(program, Map.to_list(config) ++ [pool: rows]) do
       {:ok, knn} -> {:ok, knn, Context.note(ctx, :pool_size, length(rows))}

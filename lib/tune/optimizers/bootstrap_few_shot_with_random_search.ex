@@ -19,7 +19,7 @@ defmodule Tune.Optimizers.BootstrapFewShotWithRandomSearch do
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Optimizers.ExampleSets
   alias Tune.Optimizers.Shared
-  alias Tune.Search.Context
+  alias Tune.Search.Program.Context
 
   @impl true
   def init(opts) do
@@ -46,7 +46,7 @@ defmodule Tune.Optimizers.BootstrapFewShotWithRandomSearch do
       Enum.reduce_while(seeds, ctx, fn seed, ctx ->
         with false <- Context.exhausted?(ctx),
              {:ok, label, candidate, ctx} <- ExampleSets.build(seed, config, program, ctx) do
-          {evaluation, ctx} = Context.evaluate(ctx, candidate, ctx.valset)
+          {evaluation, ctx} = Context.evaluate_validation(ctx, candidate)
           {_id, ctx} = Context.consider(ctx, candidate, evaluation, %{label: label, seed: seed})
           {:cont, ctx}
         else

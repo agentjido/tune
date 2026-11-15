@@ -35,8 +35,8 @@ defmodule Tune.Optimizers.ExampleLearningTest do
   defp tickets(n) do
     for i <- 1..n do
       %{
-        inputs: %{ticket: "ticket #{i}"},
-        labels: %{label: Enum.at(["billing", "bug", "other"], rem(i, 3))}
+        input: %{ticket: "ticket #{i}"},
+        expected: %{label: Enum.at(["billing", "bug", "other"], rem(i, 3))}
       }
     end
   end
@@ -65,7 +65,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
     end
 
     test "takes the first k rows when sampling is off and skips incomplete rows" do
-      rows = [%{inputs: %{ticket: "no label"}} | tickets(3)]
+      rows = [%{input: %{ticket: "no label"}} | tickets(3)]
 
       assert {:ok, program, _} =
                Tune.TestSupport.Search.run(classifier(),
@@ -329,7 +329,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
     assert {:ok, program, _report} =
              Tune.TestSupport.Search.run(Repeating.new(),
                optimizer: {BootstrapFewShot, max_bootstrapped_demos: 1, max_labeled_demos: 0},
-               trainset: [%{inputs: %{text: "start"}}],
+               trainset: [%{input: %{text: "start"}}],
                model: config(:unused),
                teacher: config(teacher),
                max_model_calls: 5

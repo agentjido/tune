@@ -22,6 +22,51 @@ defmodule Tune.PipelineTest do
     ]
   end
 
+  defmodule RepeatValidation do
+    @behaviour Tune.Search.ProgramStrategy
+
+    alias Tune.Search.Program.Context
+
+    @impl true
+    def init(opts), do: {:ok, opts}
+
+    @impl true
+    def requirements(_opts),
+      do: %{datasets: [:val], roles: [], model_calls?: true, metric?: true}
+
+    @impl true
+    def compile(_opts, program, ctx) do
+      {_first, ctx} = Context.evaluate_validation(ctx, program)
+      {second, ctx} = Context.evaluate_validation(ctx, program)
+      {_id, ctx} = Context.consider(ctx, program, second)
+      Context.best(ctx)
+    end
+  end
+
+  test "program search requests fresh validation data for each candidate" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    validation = fn ->
+      Agent.update(counter, &(&1 + 1))
+      [%{input: %{text: "a"}, expected: %{label: "A"}}]
+    end
+
+    stub = Transport.respond_with(fn _body -> Transport.chat(label: "A") end)
+
+    assert {:ok, %Result{}} =
+             predictor()
+             |> Tune.new(model: model(stub))
+             |> Tune.data(validation: validation)
+             |> Tune.score(:correct, fn tune_case, prediction ->
+               if prediction.output == tune_case.expected, do: 1.0, else: 0.0
+             end)
+             |> Tune.search(RepeatValidation)
+             |> Tune.limit(model_calls: 2)
+             |> Tune.tune()
+
+    assert Agent.get(counter, & &1) == 3
+  end
+
   test "the facade contains only the selected workflow names" do
     functions = Tune.__info__(:functions) |> Enum.map(&elem(&1, 0)) |> MapSet.new()
 
@@ -56,7 +101,7 @@ defmodule Tune.PipelineTest do
 
     configured =
       original
-      |> Tune.data(train: [%{inputs: %{text: "a"}, labels: %{label: "A"}}])
+      |> Tune.data(train: [%{input: %{text: "a"}, expected: %{label: "A"}}])
       |> Tune.score(:correct, fn _example, _prediction -> 1.0 end)
       |> Tune.search(:labeled_few_shot, k: 1)
       |> Tune.limit(model_calls: 10)
@@ -81,7 +126,7 @@ defmodule Tune.PipelineTest do
 
   test "a training-only optimizer returns Tune.Result and reloads its artifact" do
     source = predictor()
-    rows = [%{inputs: %{text: "a"}, labels: %{label: "A"}}]
+    rows = [%{input: %{text: "a"}, expected: %{label: "A"}}]
 
     assert {:ok, %Result{} = result} =
              source
@@ -103,7 +148,7 @@ defmodule Tune.PipelineTest do
 
   test "artifact decoding rejects fields outside the public contract" do
     json =
-      Jason.encode!(%{
+      JSON.encode!(%{
         "version" => 1,
         "target_fingerprint" => "fingerprint",
         "parameters" => %{},
@@ -118,7 +163,7 @@ defmodule Tune.PipelineTest do
     pipeline =
       predictor()
       |> Tune.new(model: model(:unused))
-      |> Tune.data(test: [%{inputs: %{text: "a"}, labels: %{label: "A"}}])
+      |> Tune.data(test: [%{input: %{text: "a"}, expected: %{label: "A"}}])
       |> Tune.score(:first, fn _example, _prediction -> 1.0 end)
       |> Tune.score(:second, fn _example, _prediction -> 1.0 end)
 

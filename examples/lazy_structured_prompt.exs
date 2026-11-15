@@ -29,11 +29,11 @@ defmodule Tune.Examples.LazyStructuredPrompt do
     {:ok, teacher} = teacher_model()
 
     answer_score = fn example, result ->
-      if result.output["answer"] == example.labels["answer"], do: 1.0, else: 0.0
+      if result.output["answer"] == example.expected["answer"], do: 1.0, else: 0.0
     end
 
     citation_score = fn example, result ->
-      if result.output["sources"] == example.labels["sources"], do: 1.0, else: 0.0
+      if result.output["sources"] == example.expected["sources"], do: 1.0, else: 0.0
     end
 
     pipeline =

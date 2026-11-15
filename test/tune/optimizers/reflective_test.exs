@@ -3,13 +3,13 @@ defmodule Tune.Optimizers.ReflectiveTest do
 
   alias Tune
   alias Tune.Adapter
+  alias Tune.Artifact
   alias Tune.Examples.GroundedQA
   alias Tune.Execution
   alias Tune.Optimizers.Anything
   alias Tune.Optimizers.GEPA
   alias Tune.Optimizers.Reflective
   alias Tune.Parameter
-  alias Tune.Parameters
   alias Tune.Predictor
   alias Tune.TestSupport.QAWorld
   alias Tune.TestSupport.Transport
@@ -34,13 +34,13 @@ defmodule Tune.Optimizers.ReflectiveTest do
       user = Transport.last_user_text(body)
 
       if user =~ "[[ ## context ## ]]" do
-        context = Jason.decode!(field(user, "context"))
+        context = JSON.decode!(field(user, "context"))
         [passage | _] = context
         prefix = if prompt =~ "Quote", do: "QUOTED ", else: ""
         Transport.chat(facts: [%{"text" => prefix <> passage["text"], "source" => passage["id"]}])
       else
         question = field(user, "question")
-        [fact] = Jason.decode!(field(user, "facts"))
+        [fact] = JSON.decode!(field(user, "facts"))
         [_, answer] = Regex.run(~r/: (.*)\.$/, fact["text"])
 
         cond do
@@ -135,7 +135,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
 
     test "score-only metrics still drive reflection" do
       metric = fn example, result ->
-        if result.output["answer"] == example.labels["answer"], do: 1, else: 0
+        if result.output["answer"] == example.expected["answer"], do: 1, else: 0
       end
 
       assert {:ok, _best, report} = gepa([use_merge: false], reflector(), metric)
@@ -217,7 +217,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
     @impl true
     def call(_p, inputs, execution) do
       {:ok, style} = Execution.value(execution, "style")
-      text = if is_binary(style), do: style, else: Jason.encode!(style)
+      text = if is_binary(style), do: style, else: JSON.encode!(style)
       Execution.predict(execution, "root", Map.put(inputs, "style", text))
     end
   end
@@ -230,7 +230,7 @@ defmodule Tune.Optimizers.ReflectiveTest do
   end
 
   defp polite(example, result) do
-    if result.output["reply"] == example.labels["reply"],
+    if result.output["reply"] == example.expected["reply"],
       do: %{score: 1.0, feedback: "good"},
       else: %{score: 0.0, feedback: "the reply must be formal"}
   end
@@ -245,7 +245,8 @@ defmodule Tune.Optimizers.ReflectiveTest do
       end)
 
     rows = fn prefix ->
-      for i <- 1..2, do: %{inputs: %{ticket: "#{prefix} #{i}"}, labels: %{reply: "Dear customer"}}
+      for i <- 1..2,
+          do: %{input: %{ticket: "#{prefix} #{i}"}, expected: %{reply: "Dear customer"}}
     end
 
     result =
@@ -293,8 +294,8 @@ defmodule Tune.Optimizers.ReflectiveTest do
 
     test "the optimized value reloads into the same application code" do
       {{:ok, best, _report}, _} = anything(Styled.new(), ["Be formal."])
-      {:ok, artifact} = Parameters.dump(best)
-      {:ok, loaded} = Parameters.apply(Styled.new(), artifact)
+      {:ok, artifact} = Artifact.dump(best)
+      {:ok, loaded} = Artifact.apply(artifact, Styled.new())
       assert loaded.style.value == "Be formal."
     end
 
