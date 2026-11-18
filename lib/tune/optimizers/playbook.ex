@@ -32,37 +32,20 @@ defmodule Tune.Optimizers.Playbook do
   alias Tune.Parameter
   alias Tune.Search.Program.Context
 
-  @options [:parameter, :rounds, :max_lessons, :max_new, :max_lesson_bytes, :max_total_bytes]
+  @options Zoi.keyword(
+             [
+               parameter: Zoi.string() |> Zoi.required(),
+               rounds: Zoi.integer() |> Zoi.positive() |> Zoi.default(2),
+               max_lessons: Zoi.integer() |> Zoi.positive() |> Zoi.default(8),
+               max_new: Zoi.integer() |> Zoi.positive() |> Zoi.default(3),
+               max_lesson_bytes: Zoi.integer() |> Zoi.positive() |> Zoi.default(400),
+               max_total_bytes: Zoi.integer() |> Zoi.positive() |> Zoi.default(4_000)
+             ],
+             unrecognized_keys: :error
+           )
 
   @impl true
-  def init(opts) do
-    defaults = [
-      parameter: nil,
-      rounds: 2,
-      max_lessons: 8,
-      max_new: 3,
-      max_lesson_bytes: 400,
-      max_total_bytes: 4_000
-    ]
-
-    with {:ok, opts} <- Shared.require_options(opts, @options, defaults),
-         :ok <-
-           Shared.with_checks(
-             [
-               fn ->
-                 if is_binary(opts[:parameter]),
-                   do: :ok,
-                   else: Shared.option_error(:parameter, "is required")
-               end
-             ] ++
-               Enum.map(
-                 [:rounds, :max_lessons, :max_new, :max_lesson_bytes, :max_total_bytes],
-                 fn key -> fn -> Shared.positive(opts, key) end end
-               )
-           ) do
-      {:ok, Map.new(opts)}
-    end
-  end
+  def init(opts), do: Shared.options(@options, opts)
 
   @impl true
   def requirements(_config),

@@ -4,26 +4,44 @@ Tune is a lazy evaluation and search pipeline for Elixir.
 
 Tune can evaluate and tune structured LLM programs on ReqLLM. It can also
 search plain Elixir values with no LLM. A pipeline is immutable. Builder
-functions only add data. `Tune.evaluate/2` and `Tune.tune/1` do the work.
+functions add declarations. Call `Tune.evaluate/2`, `Tune.tune/1`, or
+`Tune.compare/3` to run the pipeline.
+
+Run the offline search and compare the winner on a separate test split:
+
+```sh
+mix deps.get
+MIX_ENV=test mix run examples/lazy_structured_prompt.exs
+```
+
+The example uses scripted ReqLLM replies and needs no provider credentials.
+It prints the paired results and the optimized prompt. The first lines are:
+
+```text
+Test answer accuracy: 0.3333333333333333 -> 0.6666666666666666
+Answer rows: 2 improved, 1 regressed
+Model calls: 6 -> 6
+```
 
 ```elixir
 study =
   Tune.new(program, model: target, teacher: teacher)
   |> Tune.data(train: train, validation: validation, test: test)
-  |> Tune.score(:answer, &answer_score/2, range: {0.0, 1.0})
-  |> Tune.score(:citations, &citation_score/2, range: {0.0, 1.0})
+  |> Tune.score(:answer, &answer_score/2, argument: :output, range: {0.0, 1.0})
+  |> Tune.score(:citations, &citation_score/2, argument: :output, range: {0.0, 1.0})
   |> Tune.select(weighted: [answer: 0.8, citations: 0.2])
   |> Tune.search(:bootstrap_few_shot, max_bootstrapped_demos: 4)
   |> Tune.limit(model_calls: 200)
 
-{:ok, baseline} = Tune.evaluate(study)
-{:ok, result} = Tune.tune(study)
+{:ok, winner} = Tune.tune(study)
+{:ok, comparison} = Tune.compare(study, winner, split: :test)
 ```
 
-The public workflow has twelve function names:
+The public workflow uses these functions:
 
 - `new`
 - `data`
+- `replay`
 - `vary`
 - `score`
 - `select`
@@ -32,6 +50,7 @@ The public workflow has twelve function names:
 - `preview`
 - `evaluate`
 - `tune`
+- `compare`
 - `dump`
 - `load`
 
@@ -43,7 +62,7 @@ The public workflow has twelve function names:
 - Named scores, text feedback, failure scores, and retained row errors.
 - Faithfulness and context-precision judge scores through ReqLLM.
 - Fifteen prompt and example search targets.
-- Generic genetic search for maps and structs.
+- Grid and genetic search for maps and structs.
 - Enumerable and stream data sources.
 - Opaque Nx and Axon values in application runners.
 - Versioned JSON artifacts for learned, JSON-compatible values.
@@ -52,8 +71,7 @@ The public workflow has twelve function names:
 
 - Runtime owns typed programs, model roles, execution, and predictions.
 - Evaluation owns cases, scores, selection, observations, and summaries.
-- Search owns one shared Study. Program strategies and genetic search keep
-  separate algorithm mechanics.
+- Search owns shared limits, candidate history, and selection.
 - Artifact owns the only persisted format and applies all learned values atomically.
 
 Dependencies point in that order. Runtime does not depend on Evaluation or Search.
@@ -74,12 +92,12 @@ Run the offline examples from this directory:
 ```sh
 mix run examples/inspect_prompts.exs
 MIX_ENV=test mix run examples/lazy_structured_prompt.exs
+mix run examples/generic_grid.exs
 mix run examples/generic_genetic.exs
 ```
 
-The first example shows the exact prompt for each adapter. The second example
-tunes a two-step grounded QA program with two scores and scripted ReqLLM
-replies. The third example tunes a plain Elixir configuration.
+The examples show prompt inspection, grounded QA tuning and comparison,
+and search over plain Elixir configurations.
 
 Read these guides for more detail:
 

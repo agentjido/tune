@@ -5,12 +5,25 @@ defmodule Tune.Artifact.Program do
   alias Tune.Demo
   alias Tune.Error
   alias Tune.Field
+  alias Tune.Input
   alias Tune.Parameter
   alias Tune.Predictor
   alias Tune.Signature
 
-  @predictor_keys ["kind", "fingerprint", "instructions", "demos"]
-  @value_keys ["kind", "fingerprint", "value"]
+  @demo Zoi.map(%{"inputs" => Zoi.map(), "outputs" => Zoi.map()}, unrecognized_keys: :error)
+  @predictor Zoi.map(
+               %{
+                 "kind" => Zoi.literal("predictor"),
+                 "fingerprint" => Zoi.string(),
+                 "instructions" => Zoi.string(),
+                 "demos" => Zoi.array(@demo)
+               },
+               unrecognized_keys: :error
+             )
+  @value Zoi.map(
+           %{"kind" => Zoi.literal("value"), "fingerprint" => Zoi.string(), "value" => Zoi.any()},
+           unrecognized_keys: :error
+         )
   @prose_keys [
     :description,
     :title,
@@ -41,18 +54,15 @@ defmodule Tune.Artifact.Program do
     end
   end
 
-  @spec apply(Tune.Program.t(), map()) :: {:ok, Tune.Program.t()} | {:error, Exception.t()}
-  def apply(program, entries) when is_map(entries) do
-    with :ok <- validate_entries(entries),
-         {:ok, parameters} <- Tune.Program.parameters(program),
+  @spec apply_validated(Tune.Program.t(), map()) ::
+          {:ok, Tune.Program.t()} | {:error, Exception.t()}
+  def apply_validated(program, entries) do
+    with {:ok, parameters} <- Tune.Program.parameters(program),
          :ok <- same_names(parameters, entries),
          {:ok, updates} <- updates(parameters, entries) do
       Tune.Program.replace_parameters(program, updates)
     end
   end
-
-  def apply(_program, other),
-    do: invalid("artifact parameters must be an object: #{inspect(other)}")
 
   @spec validate_entries(map()) :: :ok | {:error, Exception.t()}
   def validate_entries(entries) when is_map(entries) do
@@ -129,48 +139,17 @@ defmodule Tune.Artifact.Program do
   defp kind(%Predictor{}), do: "predictor"
   defp kind(%Parameter{}), do: "value"
 
-  defp check_entry(name, %{"kind" => "predictor"} = entry) do
-    cond do
-      Enum.sort(Map.keys(entry)) != Enum.sort(@predictor_keys) ->
-        invalid("entry #{inspect(name)} has unknown or missing fields")
+  defp check_entry(name, %{"kind" => "predictor"} = entry),
+    do: check_entry_shape(@predictor, name, entry)
 
-      not is_binary(entry["fingerprint"]) ->
-        invalid("entry #{inspect(name)} needs a fingerprint")
-
-      not is_binary(entry["instructions"]) ->
-        invalid("entry #{inspect(name)} needs instructions")
-
-      not is_list(entry["demos"]) ->
-        invalid("entry #{inspect(name)} needs a demos list")
-
-      not Enum.all?(entry["demos"], &demo_shape?/1) ->
-        invalid("entry #{inspect(name)} has invalid demos")
-
-      true ->
-        :ok
-    end
-  end
-
-  defp check_entry(name, %{"kind" => "value"} = entry) do
-    cond do
-      Enum.sort(Map.keys(entry)) != Enum.sort(@value_keys) ->
-        invalid("entry #{inspect(name)} has unknown or missing fields")
-
-      not is_binary(entry["fingerprint"]) ->
-        invalid("entry #{inspect(name)} needs a fingerprint")
-
-      true ->
-        :ok
-    end
-  end
+  defp check_entry(name, %{"kind" => "value"} = entry),
+    do: check_entry_shape(@value, name, entry)
 
   defp check_entry(name, _entry), do: invalid("entry #{inspect(name)} has an unknown kind")
 
-  defp demo_shape?(%{"inputs" => inputs, "outputs" => outputs} = demo)
-       when is_map(inputs) and is_map(outputs) and map_size(demo) == 2,
-       do: true
-
-  defp demo_shape?(_demo), do: false
+  defp check_entry_shape(schema, name, entry) do
+    with {:ok, _entry} <- Input.definition(schema, entry, "entry #{inspect(name)}"), do: :ok
+  end
 
   defp same_names(parameters, entries) do
     expected = parameters |> Map.keys() |> Enum.sort()

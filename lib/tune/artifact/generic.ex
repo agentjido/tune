@@ -39,8 +39,7 @@ defmodule Tune.Artifact.Generic do
       end)
 
     with true <- Enum.all?(names, &Map.has_key?(available, &1)),
-         true <- target_fingerprint(current) == fingerprint,
-         {:ok, parameters} <- project(parameters) do
+         true <- target_fingerprint(current) == fingerprint do
       {:ok,
        Enum.reduce(parameters, fresh_target, fn {name, value}, target ->
          {key, _old} = Map.fetch!(available, name)
@@ -48,12 +47,31 @@ defmodule Tune.Artifact.Generic do
        end)}
     else
       false -> invalid("artifact parameters do not match the fresh target")
-      error -> error
     end
   end
 
   def apply(_fresh_target, _parameters, _fingerprint),
     do: invalid("a generic artifact requires a map or struct target")
+
+  @spec genome_fingerprint(term()) :: String.t()
+  def genome_fingerprint(value) do
+    type =
+      cond do
+        is_map(value) and not is_struct(value) -> "map"
+        is_list(value) -> "list"
+        true -> value_contract(value)
+      end
+
+    :crypto.hash(:sha256, type) |> Base.encode16(case: :lower)
+  end
+
+  @spec apply_genome(term(), map(), String.t()) :: {:ok, term()} | {:error, Exception.t()}
+  def apply_genome(fresh_target, %{"genome" => replacement}, fingerprint) do
+    if genome_fingerprint(fresh_target) == fingerprint and
+         genome_fingerprint(replacement) == fingerprint,
+       do: {:ok, replacement},
+       else: invalid("artifact genome does not match the fresh target type")
+  end
 
   defp value_contract(value) when is_integer(value), do: "integer"
   defp value_contract(value) when is_float(value), do: "float"

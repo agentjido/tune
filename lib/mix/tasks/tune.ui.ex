@@ -34,8 +34,14 @@ defmodule Mix.Tasks.Tune.Ui do
         Mix.shell().info("Tune workbench is available at http://localhost:#{start_opts[:port]}")
         Process.sleep(:infinity)
 
-      {:error, error} ->
-        Mix.raise(Exception.message(error))
+      {:error, reason} ->
+        Mix.raise("Could not start the Tune workbench:\n#{startup_error(reason)}")
     end
   end
+
+  defp startup_error(%_{__exception__: true} = exception), do: Exception.message(exception)
+
+  defp startup_error({{:shutdown, _} = reason, _child}), do: Exception.format_exit(reason)
+
+  defp startup_error(reason), do: Exception.format_exit(reason)
 end

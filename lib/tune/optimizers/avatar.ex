@@ -28,47 +28,24 @@ defmodule Tune.Optimizers.Avatar do
   alias Tune.Optimizers.Shared
   alias Tune.Search.Program.Context
 
-  @options [:predictor, :upper_bound, :lower_bound, :max_iters, :max_positive, :max_negative]
+  @options Zoi.keyword(
+             [
+               predictor: Zoi.string() |> Zoi.required(),
+               upper_bound: Zoi.number() |> Zoi.required(),
+               lower_bound: Zoi.number() |> Zoi.required(),
+               max_iters: Zoi.integer() |> Zoi.positive() |> Zoi.default(3),
+               max_positive: Zoi.integer() |> Zoi.positive() |> Zoi.default(5),
+               max_negative: Zoi.integer() |> Zoi.positive() |> Zoi.default(5)
+             ],
+             unrecognized_keys: :error
+           )
 
   @impl true
   def init(opts) do
-    defaults = [
-      predictor: nil,
-      upper_bound: nil,
-      lower_bound: nil,
-      max_iters: 3,
-      max_positive: 5,
-      max_negative: 5
-    ]
-
-    with {:ok, opts} <- Shared.require_options(opts, @options, defaults),
-         :ok <-
-           Shared.with_checks([
-             fn ->
-               if is_binary(opts[:predictor]),
-                 do: :ok,
-                 else: Shared.option_error(:predictor, "is required")
-             end,
-             fn ->
-               if is_number(opts[:upper_bound]),
-                 do: :ok,
-                 else: Shared.option_error(:upper_bound, "is required")
-             end,
-             fn ->
-               if is_number(opts[:lower_bound]),
-                 do: :ok,
-                 else: Shared.option_error(:lower_bound, "is required")
-             end,
-             fn ->
-               if opts[:lower_bound] < opts[:upper_bound],
-                 do: :ok,
-                 else: Shared.option_error(:lower_bound, "must be below upper_bound")
-             end,
-             fn -> Shared.positive(opts, :max_iters) end,
-             fn -> Shared.positive(opts, :max_positive) end,
-             fn -> Shared.positive(opts, :max_negative) end
-           ]) do
-      {:ok, Map.new(opts)}
+    with {:ok, config} <- Shared.options(@options, opts) do
+      if config.lower_bound < config.upper_bound,
+        do: {:ok, config},
+        else: Shared.option_error(:lower_bound, "must be below upper_bound")
     end
   end
 

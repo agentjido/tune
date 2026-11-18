@@ -24,22 +24,21 @@ defmodule Tune.Optimizers.InferRules do
   alias Tune.Optimizers.Shared
   alias Tune.Search.Program.Context
 
-  @own [:num_candidates, :num_rules]
+  @fields [
+    num_candidates: Zoi.integer() |> Zoi.positive() |> Zoi.default(2),
+    num_rules: Zoi.integer() |> Zoi.positive() |> Zoi.default(5)
+  ]
+  @options Zoi.keyword(@fields, unrecognized_keys: :error)
   @rules_header "Please adhere to the following rules when making your prediction:"
 
   @impl true
   def init(opts) do
-    {own, boot} = Keyword.split(opts, @own)
+    {own, boot} = Keyword.split(opts, Keyword.keys(@fields))
 
-    with {:ok, own} <- Shared.require_options(own, @own, num_candidates: 2, num_rules: 5),
-         :ok <-
-           Shared.with_checks([
-             fn -> Shared.positive(own, :num_candidates) end,
-             fn -> Shared.positive(own, :num_rules) end
-           ]),
+    with {:ok, own} <- Shared.options(@options, own),
          {:ok, boot} <- BootstrapFewShot.init(boot),
          :ok <- BootstrapFewShotWithRandomSearch.require_accept(boot) do
-      {:ok, Map.merge(boot, Map.new(own))}
+      {:ok, Map.merge(boot, own)}
     end
   end
 

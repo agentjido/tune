@@ -30,12 +30,8 @@ defmodule Tune.Scores.Faithfulness do
 
   @spec new(keyword()) :: {:ok, t()} | {:error, Exception.t()}
   def new(opts) do
-    {score_opts, judge_opts} = Keyword.split(opts, [:timeout, :concurrency])
-
-    with {:ok, judge} <- Judge.new(judge_opts),
-         {:ok, timeout} <- positive(score_opts, :timeout, 30_000),
-         {:ok, concurrency} <- positive(score_opts, :concurrency, 3) do
-      {:ok, %__MODULE__{judge: judge, timeout: timeout, concurrency: concurrency}}
+    with {:ok, fields} <- Judge.configure(opts) do
+      {:ok, struct!(__MODULE__, fields)}
     end
   end
 
@@ -44,22 +40,28 @@ defmodule Tune.Scores.Faithfulness do
     with {:ok, response} <- response(output),
          {:ok, contexts} <- contexts(tune_case.input),
          :ok <- require_calls(tune_case, 1),
-         {:ok, statements, extraction_call} <- statements(score, response),
-         :ok <- require_checks(tune_case, statements, extraction_call),
+         {:ok, statements, extraction_call} <- statements(score, response) do
+      score_statements(score, tune_case, statements, contexts, extraction_call)
+    else
+      {:error, error, call} -> {:error, error, Judge.evidence([Map.put(call, :error, error)])}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp score_statements(score, tune_case, statements, contexts, extraction_call) do
+    with :ok <- require_calls(tune_case, 1 + length(statements)),
          {:ok, checks, check_calls} <- checks(score, statements, contexts) do
       supported = Enum.count(checks, & &1.supported)
       value = if checks == [], do: 0.0, else: supported / length(checks)
 
-      %{
+      Map.merge(Judge.evidence([extraction_call | check_calls]), %{
         score: value,
         feedback: "#{supported}/#{length(checks)} statements supported",
-        details: %{statements: checks, supported_count: supported},
-        judge_calls: [extraction_call | check_calls],
-        calls: %{judge: 1 + length(check_calls)}
-      }
+        details: %{statements: checks, supported_count: supported}
+      })
     else
-      {:error, error, metadata} -> {:error, error, metadata}
-      {:error, error} -> {:error, error}
+      {:error, error, calls} -> {:error, error, Judge.evidence([extraction_call | calls])}
+      {:error, error} -> {:error, error, Judge.evidence([extraction_call])}
     end
   end
 
@@ -91,28 +93,12 @@ defmodule Tune.Scores.Faithfulness do
   defp checks(score, statements, contexts) do
     rendered_contexts = Enum.map_join(contexts, "\n\n", &to_string/1)
 
-    statements
-    |> Task.async_stream(
+    Judge.collect(
+      statements,
       fn statement -> check(score, statement, rendered_contexts) end,
-      ordered: true,
-      max_concurrency: score.concurrency,
-      timeout: score.timeout,
-      on_timeout: :kill_task
+      score.concurrency,
+      score.timeout
     )
-    |> Enum.reduce_while({:ok, [], []}, fn
-      {:ok, {:ok, check, call}}, {:ok, checks, calls} ->
-        {:cont, {:ok, [check | checks], [call | calls]}}
-
-      {:ok, {:error, error}}, _acc ->
-        {:halt, {:error, error}}
-
-      {:exit, reason}, _acc ->
-        {:halt, {:error, {:judge_timeout, reason}}}
-    end)
-    |> then(fn
-      {:ok, checks, calls} -> {:ok, Enum.reverse(checks), Enum.reverse(calls)}
-      error -> error
-    end)
   end
 
   defp check(score, statement, contexts) do
@@ -157,26 +143,6 @@ defmodule Tune.Scores.Faithfulness do
   end
 
   defp contexts(_input), do: invalid("case input must be a map")
-
-  defp positive(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_integer(value) and value > 0 -> {:ok, value}
-      _ -> invalid("#{key} must be a positive integer")
-    end
-  end
-
-  defp require_checks(tune_case, statements, extraction_call) do
-    case allowance(tune_case) do
-      nil ->
-        :ok
-
-      value when value >= 1 + length(statements) ->
-        :ok
-
-      _value ->
-        {:error, limit_error(), %{judge_calls: [extraction_call], calls: %{judge: 1}}}
-    end
-  end
 
   defp require_calls(tune_case, required) do
     case allowance(tune_case) do

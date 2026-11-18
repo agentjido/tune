@@ -22,6 +22,7 @@ defmodule Tune.Ensemble do
   alias Tune
   alias Tune.Error
   alias Tune.Execution
+  alias Tune.Input
 
   @enforce_keys [:members, :reducer]
   defstruct [:members, :reducer]
@@ -30,6 +31,14 @@ defmodule Tune.Ensemble do
           members: [Tune.Program.t()],
           reducer: :majority | (list(map()) -> term())
         }
+
+  @options Zoi.keyword(
+             reducer:
+               Zoi.union([Zoi.literal(:majority), Zoi.function(arity: 1)])
+               |> Zoi.default(:majority),
+             size: Zoi.integer() |> Zoi.positive() |> Zoi.nullable(),
+             seed: Zoi.any() |> Zoi.default(0)
+           )
 
   @doc """
   Builds an ensemble.
@@ -40,13 +49,11 @@ defmodule Tune.Ensemble do
   def new(members, opts \\ [])
 
   def new([first | _] = members, opts) do
-    reducer = Keyword.get(opts, :reducer, :majority)
-
-    with :ok <- check_reducer(reducer),
+    with {:ok, opts} <- Input.options(@options, opts, :ensemble, :first),
          {:ok, signature} <- Tune.Program.signature(first),
          :ok <- check_members(members, signature),
-         {:ok, members} <- sample(members, opts) do
-      {:ok, %__MODULE__{members: members, reducer: reducer}}
+         {:ok, members} <- sample(members, opts[:size], opts[:seed]) do
+      {:ok, %__MODULE__{members: members, reducer: opts[:reducer]}}
     end
   end
 
@@ -133,17 +140,6 @@ defmodule Tune.Ensemble do
         value: reason
       )
 
-  defp check_reducer(:majority), do: :ok
-  defp check_reducer(fun) when is_function(fun, 1), do: :ok
-
-  defp check_reducer(other),
-    do:
-      {:error,
-       Error.Invalid.Option.exception(
-         option: :reducer,
-         message: "must be :majority or a 1-arity function, got: #{inspect(other)}"
-       )}
-
   defp check_members(members, signature) do
     Enum.reduce_while(members, :ok, fn member, :ok ->
       case Tune.Program.signature(member) do
@@ -158,35 +154,32 @@ defmodule Tune.Ensemble do
     end)
   end
 
-  defp sample(members, opts) do
-    case Keyword.get(opts, :size) do
-      nil ->
-        {:ok, members}
+  defp sample(members, nil, _seed), do: {:ok, members}
 
-      size when is_integer(size) and size > 0 and size <= length(members) ->
-        state = :rand.seed_s(:exsss, Keyword.get(opts, :seed, 0))
+  defp sample(members, size, seed) when size <= length(members) do
+    state = :rand.seed_s(:exsss, seed)
 
-        {keyed, _state} =
-          Enum.map_reduce(Enum.with_index(members), state, fn {member, index}, state ->
-            {key, state} = :rand.uniform_s(state)
-            {{key, index, member}, state}
-          end)
+    {keyed, _state} =
+      Enum.map_reduce(Enum.with_index(members), state, fn {member, index}, state ->
+        {key, state} = :rand.uniform_s(state)
+        {{key, index, member}, state}
+      end)
 
-        {:ok,
-         keyed
-         |> Enum.sort()
-         |> Enum.take(size)
-         |> Enum.sort_by(&elem(&1, 1))
-         |> Enum.map(&elem(&1, 2))}
-
-      other ->
-        {:error,
-         Error.Invalid.Option.exception(
-           option: :size,
-           message: "must be between 1 and the member count, got: #{inspect(other)}"
-         )}
-    end
+    {:ok,
+     keyed
+     |> Enum.sort()
+     |> Enum.take(size)
+     |> Enum.sort_by(&elem(&1, 1))
+     |> Enum.map(&elem(&1, 2))}
   end
+
+  defp sample(_members, size, _seed),
+    do:
+      {:error,
+       Error.Invalid.Option.exception(
+         option: :size,
+         message: "must be between 1 and the member count, got: #{size}"
+       )}
 
   defp invalid(message), do: {:error, Error.Invalid.Definition.exception(message: message)}
 end

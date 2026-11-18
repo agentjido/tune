@@ -24,27 +24,19 @@ defmodule Tune.Optimizers.COPRO do
   alias Tune.Optimizers.Shared
   alias Tune.Search.Program.Context
 
-  @options [:breadth, :depth, :evidence_examples, :predictors]
+  @options Zoi.keyword(
+             [
+               breadth: Zoi.integer() |> Zoi.positive() |> Zoi.default(4),
+               depth: Zoi.integer() |> Zoi.positive() |> Zoi.default(2),
+               evidence_examples: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(3),
+               predictors:
+                 Zoi.array(Zoi.string()) |> Zoi.min(1) |> Zoi.nullable() |> Zoi.default(nil)
+             ],
+             unrecognized_keys: :error
+           )
 
   @impl true
-  def init(opts) do
-    with {:ok, opts} <-
-           Shared.require_options(opts, @options,
-             breadth: 4,
-             depth: 2,
-             evidence_examples: 3,
-             predictors: nil
-           ),
-         :ok <-
-           Shared.with_checks([
-             fn -> Shared.positive(opts, :breadth) end,
-             fn -> Shared.positive(opts, :depth) end,
-             fn -> Shared.non_negative(opts, :evidence_examples) end,
-             fn -> check_names(opts[:predictors]) end
-           ]) do
-      {:ok, Map.new(opts)}
-    end
-  end
+  def init(opts), do: Shared.options(@options, opts)
 
   @impl true
   def requirements(_config),
@@ -143,15 +135,4 @@ defmodule Tune.Optimizers.COPRO do
       unknown -> Shared.option_error(:predictors, "unknown predictors: #{inspect(unknown)}")
     end
   end
-
-  defp check_names(nil), do: :ok
-
-  defp check_names([_ | _] = names),
-    do:
-      if(Enum.all?(names, &is_binary/1),
-        do: :ok,
-        else: Shared.option_error(:predictors, "must be names")
-      )
-
-  defp check_names(_), do: Shared.option_error(:predictors, "must be a nonempty list of names")
 end

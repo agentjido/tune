@@ -2,13 +2,17 @@ defmodule Tune.Pipeline.Compiler do
   @moduledoc false
 
   alias Tune.Case
+  alias Tune.Comparison
+  alias Tune.Dataset
   alias Tune.Error
+  alias Tune.Evaluator
   alias Tune.ModelConfig
   alias Tune.Predictor
   alias Tune.Program
   alias Tune.Runtime.Target
   alias Tune.Score
   alias Tune.Score.Selector
+  alias Tune.Search.Study
 
   @spec preview(map(), map() | {String.t(), map()}) ::
           {:ok, Tune.Prepared.t()} | {:error, Exception.t()}
@@ -21,10 +25,99 @@ defmodule Tune.Pipeline.Compiler do
 
   @spec evaluate(map(), atom()) :: {:ok, Tune.Evaluation.t()} | {:error, Exception.t()}
   def evaluate(%{} = tune, role) do
-    with {:ok, rows} <- dataset(tune, role),
-         {:ok, selector} <- compiled_selector(tune),
-         {:ok, source, runner} <- evaluation_runner(tune, rows) do
-      {:ok, Tune.Evaluator.evaluate(source, runner, tune.scores, selector, tune.limits)}
+    study = Study.new(limits: Map.delete(run_limits(tune), :evaluations))
+
+    with {:ok, selector} <- evaluation_selector(tune),
+         {:ok, source, runner, extra_limits} <- evaluation_source(tune, role, study) do
+      limits = Map.merge(Study.evaluation_limits(study), extra_limits)
+      {:ok, Evaluator.evaluate(source, runner, tune.scores, selector, limits)}
+    end
+  end
+
+  @spec compare(Tune.t(), term(), atom()) :: {:ok, Comparison.t()} | {:error, Exception.t()}
+  def compare(tune, winner, split) do
+    study = Study.new(limits: Map.drop(run_limits(tune), [:cases, :evaluations]))
+
+    with {:ok, selector} <- evaluation_selector(tune),
+         {:ok, factory} <- data_factory(tune, split) do
+      case comparison_stop(study) do
+        nil ->
+          compare_split(tune, winner, split, factory, selector, study)
+
+        reason ->
+          stopped =
+            Evaluator.stopped([], tune.scores, selector, Study.evaluation_limits(study), reason)
+
+          {:ok, Comparison.build(split, [], tune.scores, stopped, stopped)}
+      end
+    end
+  end
+
+  defp compare_split(tune, winner, split, factory, selector, study) do
+    with {:ok, source} <- read_dataset(factory, split),
+         {:ok, rows, truncated?} <- comparison_cases(tune, split, source),
+         {:ok, baseline} <- compare_target(tune, rows, selector, study, truncated?),
+         study = Study.account_score(study, baseline),
+         {:ok, challenger} <-
+           compare_target(%{tune | target: winner}, rows, selector, study, truncated?) do
+      {:ok, Comparison.build(split, rows, tune.scores, baseline, challenger)}
+    end
+  end
+
+  defp compare_target(tune, rows, selector, study, truncated?) do
+    case comparison_stop(study) do
+      nil ->
+        with {:ok, runner} <- runner(tune) do
+          limits = Map.put(Study.evaluation_limits(study), :source_truncated?, truncated?)
+          {:ok, Evaluator.evaluate(rows, runner, tune.scores, selector, limits)}
+        end
+
+      reason ->
+        {:ok,
+         Evaluator.stopped(rows, tune.scores, selector, Study.evaluation_limits(study), reason)}
+    end
+  end
+
+  defp comparison_stop(study) do
+    case Study.stop_reason(study) || Study.limit_reason(study) do
+      :budget_exhausted -> :model_call_limit
+      reason -> reason
+    end
+  end
+
+  defp comparison_cases(tune, split, source) do
+    {rows, truncated?} = Dataset.select(source, tune.limits[:cases])
+    Dataset.report(tune.limits, split, :source, rows)
+
+    with :ok <- require_comparison_cases(rows, tune.limits[:cases]),
+         {:ok, cases} <- normalize_comparison_cases(tune, rows) do
+      Dataset.report(tune.limits, split, :effective, cases)
+      {:ok, cases, truncated?}
+    end
+  rescue
+    error -> invalid(:data, "could not read comparison data: #{Exception.message(error)}")
+  end
+
+  defp require_comparison_cases([], limit) when limit != 0,
+    do: invalid(:data, "comparison data is empty")
+
+  defp require_comparison_cases(_rows, _limit), do: :ok
+
+  defp normalize_comparison_cases(_tune, []), do: {:ok, []}
+
+  defp normalize_comparison_cases(%{runner: nil, target: target}, rows) do
+    with {:ok, signature} <- Program.signature(target), do: Case.compare_rows(signature, rows)
+  end
+
+  defp normalize_comparison_cases(_tune, rows), do: Case.compare_rows(nil, rows)
+
+  defp evaluation_source(tune, role, study) do
+    case Study.limit_reason(study) do
+      reason when reason in [:cancelled, :deadline] ->
+        {:ok, [], fn _ -> nil end, %{}}
+
+      _ ->
+        with {:ok, rows} <- dataset(tune, role), do: evaluation_runner(tune, role, rows)
     end
   end
 
@@ -32,99 +125,61 @@ defmodule Tune.Pipeline.Compiler do
   def tune(%{runner: nil} = tune) do
     with :ok <- require_program_target(tune),
          {:ok, optimizer} <- optimizer(tune.strategy),
-         {:ok, requirements} <- optimizer_requirements(optimizer),
-         {:ok, datasets} <- optimization_datasets(tune),
-         {:ok, metric, failure_score, selector} <-
-           selected_metric(tune, requirements.metric?),
-         {:ok, opts} <-
-           optimize_options(tune, optimizer, datasets, metric, failure_score, selector),
+         opts = optimize_options(tune, optimizer),
          {:ok, result} <- Tune.Search.Program.run(tune.target, opts) do
       {:ok, put_in(result.metadata[:models], describe_models(tune.models))}
     end
   end
 
+  def tune(%{runner: :replay}), do: invalid(:search, "saved rows support evaluation only")
+
   def tune(%{} = tune) do
-    with {:ok, opts} <- genetic_strategy(tune.strategy),
+    with {:ok, strategy, opts} <- generic_strategy(tune.strategy),
          :ok <- require_score_call_limit(tune),
-         {:ok, spaces} <- compile_spaces(tune.variations),
+         {:ok, spaces} <- compile_spaces(strategy, tune.variations, opts),
          {:ok, data_factory} <- data_factory(tune, :validation),
          {:ok, selector} <- compiled_selector(tune) do
-      Tune.Search.Genetic.run(
+      strategy.run(
         tune.target,
         tune.runner,
         data_factory,
         spaces,
         tune.scores,
         selector,
-        tune.limits,
+        run_limits(tune),
         opts
       )
     end
   end
 
-  defp selected_metric(%{scores: []}),
-    do: invalid(:scores, "at least one score is required")
-
-  defp selected_metric(%{} = tune) do
-    with {:ok, selector} <- Selector.compile(tune.scores, tune.selector) do
-      failure_score = Selector.failure_score(tune.scores, selector)
-
-      metric = fn tune_case, prediction ->
-        values =
-          Map.new(tune.scores, fn declaration ->
-            {declaration.name, score_value(declaration, tune_case, prediction)}
-          end)
-
-        with :ok <- score_errors(values) do
-          normalized = Map.new(values, fn {name, {:ok, value}} -> {name, value} end)
-
-          selected =
-            normalized
-            |> Map.new(fn {name, value} -> {name, value.score} end)
-            |> Selector.select(tune.scores, selector)
-
-          feedback =
-            normalized
-            |> Enum.map_join("; ", fn {name, value} ->
-              "#{name}=#{value.score}" <> if(value.feedback, do: " (#{value.feedback})", else: "")
-            end)
-
-          %{score: selected, feedback: feedback}
-        end
-      end
-
-      {:ok, metric, failure_score, selector}
-    end
-  end
-
-  defp selected_metric(%{scores: []}, false), do: {:ok, nil, nil, nil}
-  defp selected_metric(%{} = tune, _required?), do: selected_metric(tune)
+  defp evaluation_selector(%{scores: [_, _ | _], selector: nil}), do: {:ok, nil}
+  defp evaluation_selector(tune), do: compiled_selector(tune)
 
   defp compiled_selector(%{scores: []}),
     do: invalid(:scores, "at least one score is required")
 
   defp compiled_selector(%{} = tune), do: Selector.compile(tune.scores, tune.selector)
 
-  defp score_value(%Score{} = score, %Case{} = tune_case, prediction) do
-    case Score.execute(score, tune_case, prediction.output, prediction) do
-      {:ok, value, _metadata} -> {:ok, value}
-      {:error, error, _metadata} -> {:error, error}
-    end
+  defp run_limits(%{runner: :replay} = tune) do
+    limits = callback_limits(tune)
+
+    if Enum.any?(tune.scores, &Score.model_calls?/1),
+      do: Map.put(limits, :call_role, :judge),
+      else: Map.drop(limits, [:model_calls, :row_calls])
   end
 
-  defp score_errors(values) do
-    case Enum.find(values, fn {_name, value} -> match?({:error, _}, value) end) do
-      nil -> :ok
-      {_name, {:error, error}} -> {:error, error}
-    end
+  defp run_limits(tune), do: callback_limits(tune)
+
+  defp callback_limits(tune) do
+    Map.merge(tune.limits, %{on_progress: tune.on_progress, cancel: tune.cancel})
   end
 
   defp dataset(tune, role) do
-    case Map.fetch(tune.data, role) do
-      {:ok, source} when is_function(source, 0) -> source.() |> enumerable(role)
-      {:ok, source} -> enumerable(source, role)
-      :error -> invalid(role, "#{role} data is required")
-    end
+    with {:ok, factory} <- data_factory(tune, role), do: read_dataset(factory, role)
+  end
+
+  defp read_dataset(factory, role) do
+    factory.() |> enumerable(role)
   rescue
     error -> invalid(role, "data factory failed: #{Exception.message(error)}")
   end
@@ -145,46 +200,19 @@ defmodule Tune.Pipeline.Compiler do
     Tune.Runtime.normalize_options(opts)
   end
 
-  defp optimize_options(tune, optimizer, datasets, metric, failure_score, selector) do
-    opts =
-      [optimizer: optimizer, seed: Map.get(tune.limits, :seed, 0)]
-      |> put_option(:metric, metric)
-      |> put_option(:failure_score, failure_score)
-      |> put_option(:scores, if(tune.scores == [], do: nil, else: tune.scores))
-      |> put_option(:selector, selector)
-      |> put_datasets(datasets)
-      |> put_model_options(tune.models)
-      |> put_option(:max_model_calls, tune.limits[:model_calls])
-      |> put_option(:max_steps, tune.limits[:steps])
-      |> put_option(:timeout, tune.limits[:deadline])
-      |> put_option(:row_timeout, tune.limits[:row_timeout])
-
-    {:ok, opts}
+  defp optimize_options(tune, optimizer) do
+    [optimizer: optimizer, limits: run_limits(tune), scores: tune.scores, selector: tune.selector]
+    |> put_split(tune, :train, :trainset)
+    |> put_split(tune, :validation, :valset)
+    |> put_model_options(tune.models)
+    |> put_option(:max_steps, tune.limits[:steps])
   end
 
-  defp optimization_datasets(tune) do
-    Enum.reduce_while([:train, :validation], {:ok, %{}}, fn role, {:ok, acc} ->
-      if Map.has_key?(tune.data, role) do
-        case optimization_dataset(tune, role) do
-          {:ok, source} -> {:cont, {:ok, Map.put(acc, role, source)}}
-          error -> {:halt, error}
-        end
-      else
-        {:cont, {:ok, acc}}
-      end
-    end)
-  end
-
-  defp optimization_dataset(tune, :validation), do: data_factory(tune, :validation)
-
-  defp optimization_dataset(tune, :train) do
-    with {:ok, source} <- dataset(tune, :train), do: {:ok, Enum.to_list(source)}
-  end
-
-  defp put_datasets(opts, datasets) do
-    opts
-    |> put_option(:trainset, datasets[:train])
-    |> put_option(:valset, datasets[:validation])
+  defp put_split(opts, tune, role, key) do
+    case data_factory(tune, role) do
+      {:ok, factory} -> Keyword.put(opts, key, factory)
+      {:error, _error} -> opts
+    end
   end
 
   defp optimizer(nil), do: invalid(:search, "Tune.search/3 is required")
@@ -196,23 +224,22 @@ defmodule Tune.Pipeline.Compiler do
     end
   end
 
-  defp optimizer_requirements({module, opts}) do
-    with {:ok, config} <- module.init(opts) do
-      requirements = module.requirements(config)
-      {:ok, Map.put_new(requirements, :metric?, true)}
-    end
-  end
+  defp generic_strategy({:genetic, opts}), do: {:ok, Tune.Search.Genetic, opts}
+  defp generic_strategy({:grid, opts}), do: {:ok, Tune.Search.Grid, opts}
+  defp generic_strategy(nil), do: invalid(:search, "Tune.search/3 is required")
 
-  defp genetic_strategy({:genetic, opts}), do: {:ok, opts}
-  defp genetic_strategy(nil), do: invalid(:search, "Tune.search/3 is required")
-
-  defp genetic_strategy({strategy, _opts}),
+  defp generic_strategy({strategy, _opts}),
     do: invalid(:search, "#{inspect(strategy)} does not support a generic target")
 
-  defp compile_spaces(variations) when map_size(variations) == 0,
-    do: invalid(:vary, "at least one variation is required")
+  defp compile_spaces(Tune.Search.Grid, variations, _opts), do: {:ok, variations}
 
-  defp compile_spaces(variations) do
+  defp compile_spaces(Tune.Search.Genetic, variations, opts) when map_size(variations) == 0 do
+    if Keyword.has_key?(opts, :initial_population),
+      do: {:ok, %{}},
+      else: invalid(:vary, "at least one variation is required")
+  end
+
+  defp compile_spaces(Tune.Search.Genetic, variations, _opts) do
     Enum.reduce_while(variations, {:ok, %{}}, fn {name, descriptor}, {:ok, acc} ->
       case Tune.Space.new(descriptor) do
         {:ok, space} -> {:cont, {:ok, Map.put(acc, name, space)}}
@@ -264,31 +291,48 @@ defmodule Tune.Pipeline.Compiler do
     with {:ok, _parameters} <- Program.parameters(target), do: :ok
   end
 
-  defp evaluation_runner(%{runner: nil} = tune, rows) do
-    with {:ok, run_options} <- runtime_options(tune),
-         {:ok, signature} <- Program.signature(tune.target),
-         {:ok, target} <- Target.new(tune.target, run_options),
-         {:ok, cases} <- Case.normalize_all(signature, Enum.to_list(rows)) do
-      runner = fn tune_case ->
-        Target.run(target, tune_case.input,
-          role: :target,
-          max_model_calls: Map.get(tune_case.metadata, :model_call_allowance)
-        )
-      end
-
-      {:ok, cases, runner}
+  defp evaluation_runner(%{runner: nil} = tune, role, rows) do
+    with {:ok, signature} <- Program.signature(tune.target),
+         {:ok, runner} <- runner(tune),
+         {:ok, cases, truncated?} <- typed_cases(signature, rows, tune.limits, role) do
+      {:ok, cases, runner, %{source_truncated?: truncated?}}
     end
   end
 
-  defp evaluation_runner(%{runner: runner, target: target}, rows) do
-    callback = fn tune_case -> invoke_runner(runner, target, tune_case.input) end
-    {:ok, rows, callback}
+  defp evaluation_runner(tune, role, rows) do
+    with {:ok, runner} <- runner(tune), do: {:ok, rows, runner, %{dataset_split: role}}
   end
 
-  defp invoke_runner(runner, target, input) when is_function(runner, 2),
-    do: runner.(target, input)
+  defp runner(%{runner: nil} = tune) do
+    with {:ok, run_options} <- runtime_options(tune),
+         {:ok, target} <- Target.new(tune.target, run_options) do
+      {:ok,
+       fn tune_case ->
+         Target.run(target, tune_case.input,
+           role: :target,
+           max_model_calls: Map.get(tune_case.metadata, :model_call_allowance)
+         )
+       end}
+    end
+  end
 
-  defp invoke_runner(runner, target, _input) when is_function(runner, 1), do: runner.(target)
+  defp runner(%{runner: :replay}), do: {:ok, &Tune.Replay.output/1}
+
+  defp runner(%{runner: runner, target: target}) do
+    {:ok, fn tune_case -> Tune.Search.Generic.invoke(runner, target, tune_case) end}
+  end
+
+  defp typed_cases(_signature, _rows, %{cases: 0}, _role), do: {:ok, [], true}
+
+  defp typed_cases(signature, rows, limits, role) do
+    {selected, truncated?} = Dataset.select(rows, limits[:cases])
+    Dataset.report(limits, role, :source, selected)
+
+    with {:ok, cases} <- Case.normalize_all(signature, selected) do
+      Dataset.report(limits, role, :effective, cases)
+      {:ok, cases, truncated?}
+    end
+  end
 
   defp put_model_options(opts, models) do
     Enum.reduce(models, opts, fn {key, value}, acc -> Keyword.put(acc, key, value) end)

@@ -41,6 +41,8 @@ defmodule Tune.Space.Text do
   end
 
   @impl true
+  def mutate(%__MODULE__{max_length: 0}, "", state), do: {"", state}
+
   def mutate(space, value, state) do
     graphemes = String.graphemes(value)
     {operation, state} = Space.integer(state, 3)

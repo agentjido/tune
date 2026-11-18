@@ -49,12 +49,12 @@ mix tune.ui --port 4100 --no-open
 | --- | --- |
 | `/` | Show study and run totals. |
 | `/studies` | List studies. |
-| `/studies/new` | Build a structured prompt study. |
+| `/studies/new` | Start a structured prompt study or saved-answer evaluation. |
 | `/studies/:id` | Inspect one study. |
 | `/studies/:id/settings` | Change its prompt, models, adapter, search, and limits. |
 | `/studies/:id/data` | Add training, validation, and test rows. |
 | `/studies/:id/preview` | Inspect the rendered prompt without a model call. |
-| `/studies/:id/run` | Start evaluation or tuning. |
+| `/studies/:id/run` | Start evaluation, search, or a comparison. |
 | `/runs/:id` | Watch a run and inspect its result. |
 | `/artifacts` | List artifacts from completed tuning runs. |
 | `/settings` | Scan ReqLLM configuration and catalog inference availability. |
@@ -64,15 +64,29 @@ The dashboard can load a grounded QA example. It creates a structured prompt
 study with training, validation, and test rows, then opens prompt preview. It
 does not make a model call.
 
-The built-in structured prompt recipe accepts JSON-compatible data. Each row
-must have `inputs` and `labels` maps. The workbench uses the normal Tune
-pipeline and terminal functions. It does not have a second evaluation or
-search engine.
+The structured prompt recipe accepts rows with `inputs` and `labels` maps.
+The saved responses recipe uses the Test rows editor. Paste rows with
+`input`, `output`, and optional `id` and `expected`. For retrieval scores,
+`input` contains `user_input` and `retrieved_contexts`. Choose the judge
+model and a call limit. The workbench shows Faithfulness and Context
+Precision results independently.
+
+Use **Compare with baseline** on a completed search. Choose a dataset split.
+The workbench uses the search's original recipe and configuration and the
+currently selected dataset. The report shows metric changes, paired rows,
+model calls, token use, and incomplete results.
+
+Each run records its split, declared scores, and non-secret model
+configuration. The report shows the count and fingerprint of the selected
+source rows and the effective cases after normalization. For program search,
+the effective training cases have duplicates removed. For streamed evaluation,
+the counts cover the rows read through the stop point. The report also shows
+the models that returned responses. Edits to the study do not change this
+evidence.
 
 The Settings scan uses `ReqLLM.available_models/0`, `ReqLLM.Doctor.run/0`, and
 completed workbench runs. It is read-only. It does not call a model and it
-does not show credential values. A completed run records that a dynamic model
-worked at that time. It does not prove that the provider is reachable now.
+does not show credential values. A successful response records the model that responded at that time. It does not prove that the provider is reachable now.
 Known models appear as suggestions in study model fields.
 
 The data page shows split counts, a small preview, and one split chart. Raw

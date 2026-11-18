@@ -21,16 +21,19 @@ defmodule Tune.Optimizers.BootstrapFewShotWithRandomSearch do
   alias Tune.Optimizers.Shared
   alias Tune.Search.Program.Context
 
+  @fields [
+    num_candidate_programs: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(8)
+  ]
+  @options Zoi.keyword(@fields, unrecognized_keys: :error)
+
   @impl true
   def init(opts) do
-    {own, boot} = Keyword.split(opts, [:num_candidate_programs])
+    {own, boot} = Keyword.split(opts, Keyword.keys(@fields))
 
-    with {:ok, own} <-
-           Shared.require_options(own, [:num_candidate_programs], num_candidate_programs: 8),
-         :ok <- Shared.non_negative(own, :num_candidate_programs),
+    with {:ok, own} <- Shared.options(@options, own),
          {:ok, boot} <- BootstrapFewShot.init(boot),
          :ok <- require_accept(boot) do
-      {:ok, Map.merge(boot, Map.new(own))}
+      {:ok, Map.merge(boot, own)}
     end
   end
 

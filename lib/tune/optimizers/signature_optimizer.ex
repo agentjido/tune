@@ -14,14 +14,14 @@ defmodule Tune.Optimizers.SignatureOptimizer do
   @behaviour Tune.Search.ProgramStrategy
 
   alias Tune.Optimizers.COPRO
-  alias Tune.Optimizers.Shared
+
+  @options Zoi.keyword([predictor: Zoi.string() |> Zoi.required()], unrecognized_keys: :preserve)
 
   @impl true
   def init(opts) do
-    case Keyword.pop(opts, :predictor) do
-      {name, rest} when is_binary(name) -> COPRO.init(Keyword.put(rest, :predictors, [name]))
-      {nil, _rest} -> Shared.option_error(:predictor, "is required")
-      {other, _rest} -> Shared.option_error(:predictor, "must be a name, got: #{inspect(other)}")
+    with {:ok, values} <- Tune.Input.options(@options, opts, :optimizer) do
+      {name, rest} = Keyword.pop(values, :predictor)
+      COPRO.init(Keyword.put(rest, :predictors, [name]))
     end
   end
 

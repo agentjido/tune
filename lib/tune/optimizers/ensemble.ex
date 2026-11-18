@@ -8,27 +8,21 @@ defmodule Tune.Optimizers.Ensemble do
 
   @behaviour Tune.Search.ProgramStrategy
 
-  alias Tune.Error
+  alias Tune.Optimizers.Shared
   alias Tune.Search.Program.Context
 
-  @options [:members, :size, :seed, :reducer]
+  @options Zoi.keyword(
+             [
+               members: Zoi.array(Zoi.any()) |> Zoi.min(1) |> Zoi.required(),
+               size: Zoi.any(),
+               seed: Zoi.any(),
+               reducer: Zoi.any()
+             ],
+             unrecognized_keys: :error
+           )
 
   @impl true
-  def init(opts) do
-    unknown = Keyword.keys(opts) -- @options
-    members = Keyword.get(opts, :members)
-
-    cond do
-      unknown != [] ->
-        invalid(hd(unknown), "unknown ensemble option")
-
-      not is_list(members) or members == [] ->
-        invalid(:members, "must be a nonempty list of compatible programs")
-
-      true ->
-        {:ok, Map.new(opts)}
-    end
-  end
+  def init(opts), do: Shared.options(@options, opts)
 
   @impl true
   def requirements(_config),
@@ -43,7 +37,4 @@ defmodule Tune.Optimizers.Ensemble do
       {:error, error} -> {:error, error, context}
     end
   end
-
-  defp invalid(option, message),
-    do: {:error, Error.Invalid.Option.exception(option: option, message: message)}
 end

@@ -77,14 +77,13 @@ defmodule Tune.Optimizers.ExampleLearningTest do
       assert Enum.map(program.demos, & &1.inputs["ticket"]) == ["ticket 1", "ticket 2"]
     end
 
-    test "rejects test data, validation-free misuse, and unknown options" do
-      assert {:error, %Error.Invalid.Option{option: :testset}} =
-               Tune.TestSupport.Search.run(classifier(),
-                 optimizer: LabeledFewShot,
-                 trainset: tickets(2),
-                 testset: tickets(1),
-                 model: config(:unused)
-               )
+    test "does not read test data and rejects invalid training configuration" do
+      assert {:ok, _result} =
+               classifier()
+               |> Tune.new(model: config(:unused))
+               |> Tune.data(train: tickets(2), test: fn -> raise "read the test data" end)
+               |> Tune.search(LabeledFewShot)
+               |> Tune.tune()
 
       assert {:error, %Error.Invalid.Option{option: :trainset}} =
                Tune.TestSupport.Search.run(classifier(),
@@ -225,7 +224,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
                  [optimizer: {BootstrapFewShot, accept_score: 1.0}, max_model_calls: 5] ++ base
                )
 
-      assert {:error, %Error.Invalid.Option{option: :max_model_calls}} =
+      assert {:error, %Error.Invalid.Option{option: :model_calls}} =
                Tune.TestSupport.Search.run(
                  GroundedQA.new(),
                  [optimizer: {BootstrapFewShot, accept_score: 1.0}, teacher: config(:unused)] ++

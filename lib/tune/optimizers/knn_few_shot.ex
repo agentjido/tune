@@ -22,29 +22,20 @@ defmodule Tune.Optimizers.KNNFewShot do
   alias Tune.Optimizers.Shared
   alias Tune.Search.Program.Context
 
+  @options Zoi.keyword(
+             [
+               k: Zoi.integer() |> Zoi.positive() |> Zoi.default(3),
+               max_bootstrapped_demos: Zoi.integer() |> Zoi.gte(0),
+               max_labeled_demos: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(0),
+               vectorizer: Zoi.function(arity: 1) |> Zoi.nullable() |> Zoi.default(nil)
+             ],
+             unrecognized_keys: :error
+           )
+
   @impl true
   def init(opts) do
-    with {:ok, opts} <-
-           Shared.require_options(
-             opts,
-             [:k, :max_bootstrapped_demos, :max_labeled_demos, :vectorizer],
-             k: 3,
-             max_labeled_demos: 0,
-             vectorizer: nil
-           ),
-         opts = Keyword.put_new(opts, :max_bootstrapped_demos, opts[:k]),
-         :ok <-
-           Shared.with_checks([
-             fn -> Shared.positive(opts, :k) end,
-             fn -> Shared.non_negative(opts, :max_bootstrapped_demos) end,
-             fn -> Shared.non_negative(opts, :max_labeled_demos) end,
-             fn ->
-               if is_nil(opts[:vectorizer]) or is_function(opts[:vectorizer], 1),
-                 do: :ok,
-                 else: Shared.option_error(:vectorizer, "must be a 1-arity function")
-             end
-           ]) do
-      {:ok, Map.new(opts)}
+    with {:ok, config} <- Shared.options(@options, opts) do
+      {:ok, Map.put_new(config, :max_bootstrapped_demos, config.k)}
     end
   end
 

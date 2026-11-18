@@ -90,15 +90,16 @@ the program code.
 ## Data and scores
 
 `Tune.data/2` accepts `:train`, `:validation`, and `:test` data. A value can be
-an Enumerable or a zero-arity function that returns an Enumerable. Use a
-factory when Tune must read a stream for more than one candidate. Give an
-explicit `cases` or `evaluations` limit for an infinite source.
+an Enumerable or a zero-arity function that returns an Enumerable. Tune reads
+each search split once per run. Each candidate uses the same validation cases.
+Set `cases` for an infinite source. An evaluation count limits candidate work
+and does not limit data ingestion.
 
 ```elixir
 pipeline =
   Tune.new(program, model: target)
   |> Tune.data(test: fn -> File.stream!("cases.jsonl") |> Stream.map(&decode/1) end)
-  |> Tune.score(:correct, &correct?/2, failure_score: 0.0)
+  |> Tune.score(:correct, &correct?/2, argument: :output, failure_score: 0.0)
   |> Tune.limit(cases: 1_000, concurrency: 4, row_timeout: 30_000)
 
 {:ok, evaluation} = Tune.evaluate(pipeline)
@@ -108,25 +109,97 @@ A program row is a `%Tune.Case{}` or a map with `:input`, optional
 `:expected`, and optional `:id`. Expected values go only to the score callback.
 
 Each `Tune.score/4` call adds one named score. A score returns a number or a map
-with `:score` and optional `:feedback`. Higher values win by default. Use
-`direction: :minimize` for a loss or cost.
+with `:score` and optional `:feedback`. Use `argument: :output` to give a
+two-argument scorer `(case, output)`. Use `argument: :prediction` to inspect
+program steps or usage. Existing two-argument scorers receive the prediction
+when one is available and the output otherwise. Higher values win by default.
+Use `direction: :minimize` for a loss or cost.
 
 Without `failure_score`, a failed row makes the evaluation ineligible. With a
 failure score, the row error stays in the result and the candidate can remain
 eligible.
 
-When a pipeline has more than one score, it needs an explicit selector:
+Evaluation can report several scores without a selector. Each observation
+retains successful scores and records failures in `score_errors`. Search with
+several scores requires a selector:
 
 ```elixir
 pipeline
-|> Tune.score(:quality, &quality/2, range: {0.0, 1.0})
-|> Tune.score(:cost, &cost/2, direction: :minimize, range: {0.0, 10.0})
+|> Tune.score(:quality, &quality/2, argument: :output, range: {0.0, 1.0})
+|> Tune.score(:cost, &cost/2, argument: :output, direction: :minimize, range: {0.0, 10.0})
 |> Tune.select(weighted: [quality: 0.8, cost: 0.2])
 ```
 
 A weighted selector needs an explicit range for every selected score. Raw
 scores stay unchanged in each `%Tune.Observation{}`. Tune normalizes only the
 selection value.
+
+## Replay saved responses
+
+Use `Tune.replay/1` with an Enumerable or a data factory. Each row has
+`input` and `output`. Add `id` and `expected` when available. JSON string
+keys and Elixir atom keys both work.
+
+```elixir
+study =
+  [%{id: "one", input: %{question: "What is 2 + 2?"}, output: 4, expected: 4}]
+  |> Tune.replay()
+  |> Tune.score(:exact_match, fn row, output ->
+    if row.expected == output, do: 1, else: 0
+  end)
+
+{:ok, evaluation} = Tune.evaluate(study)
+```
+
+A row for a retrieval judge can put `user_input` and `retrieved_contexts`
+inside `input`. Put the saved response in `output` and, if available, the
+reference answer in `expected`. The following example reads that row format
+from JSONL:
+
+```elixir
+rows = fn -> File.stream!("answers.jsonl") |> Stream.map(&JSON.decode!/1) end
+{:ok, faithfulness} = Tune.Scores.Faithfulness.new(model: judge_model)
+{:ok, precision} = Tune.Scores.ContextPrecision.new(model: judge_model)
+
+pipeline =
+  Tune.replay(rows, on_progress: fn event -> send(observer, event) end)
+  |> Tune.score(:faithfulness, faithfulness)
+  |> Tune.score(:context_precision, precision)
+  |> Tune.limit(cases: 500, model_calls: 1_000)
+
+task = Tune.Evaluation.start(my_task_supervisor, pipeline)
+{:ok, evaluation} = Task.await(task, :infinity)
+```
+
+The replay runner uses the saved answer. Only configured judges make model
+calls. Progress events identify each batch's row IDs and statuses. A host can
+write these events and the final evaluation to a report or store. To stop a
+run, pass a zero-arity `cancel` predicate in the same options as
+`on_progress`. Tune checks it while waiting for row workers.
+
+## Compare on a held-out split
+
+```elixir
+{:ok, winner} = Tune.tune(study)
+{:ok, report} = Tune.compare(study, winner, split: :test)
+```
+
+Choose the split explicitly. Tune reads it once and gives both versions the
+same ordered cases. Explicit case IDs must be unique non-empty strings. An
+omitted ID uses the row's zero-based position as a string.
+
+Use `report.metrics` for paired mean changes and outcome counts. Use
+`report.rows[id].metrics` to find regressions, improvements, ties, failed
+scores, and unpaired results. A positive delta means that the winner's
+numeric score increased. The score direction determines whether that is an
+improvement. Means in the comparison use only cases with a score from each
+version. The underlying evaluations keep all observed scores, errors, model
+calls, and token use.
+
+The two evaluations share one model-call budget and deadline. The baseline
+runs first. If a limit stops either pass, the report keeps the available
+evidence and sets `complete?` to false. A case limit defines the size of
+the shared snapshot.
 
 ## Evaluation results
 
@@ -153,6 +226,7 @@ the target and one case input.
 
 ```elixir
 Tune.new(config, run: fn candidate, batch -> MyBenchmark.run(candidate, batch) end)
+|> Tune.score(:quality, fn _case, output -> output.quality end)
 ```
 
 Tune treats runner values as opaque Elixir terms. This permits Nx tensors,

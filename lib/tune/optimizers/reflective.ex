@@ -35,24 +35,18 @@ defmodule Tune.Optimizers.Reflective do
           propose: (Context.t(), String.t(), String.t() -> {String.t() | nil, Context.t()})
         }
 
-  @spec options() :: [atom()]
-  def options, do: [:max_iterations, :minibatch_size, :use_merge, :merge_every]
-
-  @spec defaults() :: keyword()
-  def defaults, do: [max_iterations: 8, minibatch_size: 3, use_merge: true, merge_every: 3]
-
-  @spec check(keyword()) :: :ok | {:error, Exception.t()}
-  def check(opts) do
-    Shared.with_checks([
-      fn -> Shared.positive(opts, :max_iterations) end,
-      fn -> Shared.positive(opts, :minibatch_size) end,
-      fn -> Shared.positive(opts, :merge_every) end,
-      fn ->
-        if is_boolean(opts[:use_merge]),
-          do: :ok,
-          else: Shared.option_error(:use_merge, "must be a boolean")
-      end
-    ])
+  @doc false
+  def options(fields) do
+    Zoi.keyword(
+      fields ++
+        [
+          max_iterations: Zoi.integer() |> Zoi.positive() |> Zoi.default(8),
+          minibatch_size: Zoi.integer() |> Zoi.positive() |> Zoi.default(3),
+          use_merge: Zoi.boolean() |> Zoi.default(true),
+          merge_every: Zoi.integer() |> Zoi.positive() |> Zoi.default(3)
+        ],
+      unrecognized_keys: :error
+    )
   end
 
   @spec run(map(), Tune.t(), [component()], Context.t()) ::
@@ -222,36 +216,38 @@ defmodule Tune.Optimizers.Reflective do
     Enum.reduce(batch, {[], ctx}, fn example, {acc, ctx} ->
       {outcome, ctx} = Context.run(ctx, program, example.input, :target)
 
-      trace =
-        case outcome do
-          {:ok, result} ->
-            case Context.score(ctx, example, result) do
-              {:ok, %{score: score, feedback: feedback}} ->
-                %{example: example, result: result, score: score, feedback: feedback, error: nil}
-
-              {:error, error} ->
-                %{
-                  example: example,
-                  result: result,
-                  score: ctx.failure_score || 0,
-                  feedback: nil,
-                  error: error
-                }
-            end
-
-          {:error, error} ->
-            %{
-              example: example,
-              result: nil,
-              score: ctx.failure_score || 0,
-              feedback: nil,
-              error: error
-            }
-        end
+      {trace, ctx} = trace(ctx, example, outcome)
 
       {[trace | acc], ctx}
     end)
     |> then(fn {traces, ctx} -> {Enum.reverse(traces), ctx} end)
+  end
+
+  defp trace(ctx, example, {:ok, result}) do
+    {outcome, ctx} = Context.score(ctx, example, result)
+
+    trace =
+      case outcome do
+        {:ok, %{score: score, feedback: feedback}} ->
+          %{example: example, result: result, score: score, feedback: feedback, error: nil}
+
+        {:error, error} ->
+          failed_trace(ctx, example, result, error)
+      end
+
+    {trace, ctx}
+  end
+
+  defp trace(ctx, example, {:error, error}), do: {failed_trace(ctx, example, nil, error), ctx}
+
+  defp failed_trace(ctx, example, result, error) do
+    %{
+      example: example,
+      result: result,
+      score: ctx.failure_score || 0,
+      feedback: nil,
+      error: error
+    }
   end
 
   @doc false

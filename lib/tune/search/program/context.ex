@@ -12,17 +12,15 @@ defmodule Tune.Search.Program.Context do
   alias Tune.Program
   alias Tune.Runtime.Target
   alias Tune.Score
+  alias Tune.Score.Selector
   alias Tune.Search.Study
 
   defstruct [
     :optimizer,
-    :metric,
     :failure_score,
     :run_options,
-    :row_timeout,
     :selector,
     :study,
-    :validation_factory,
     trainset: [],
     valset: [],
     scores: []
@@ -32,30 +30,15 @@ defmodule Tune.Search.Program.Context do
 
   @spec new(keyword()) :: t()
   def new(opts) do
-    seed = Keyword.fetch!(opts, :seed)
-    limits = Keyword.get(opts, :limits, %{})
-    metadata = Keyword.get(opts, :metadata, %{})
-
     %__MODULE__{
       optimizer: Keyword.fetch!(opts, :optimizer),
-      metric: Keyword.get(opts, :metric),
       failure_score: Keyword.get(opts, :failure_score),
       run_options: Keyword.fetch!(opts, :run_options),
-      row_timeout: Keyword.get(opts, :row_timeout, 120_000),
       scores: Keyword.get(opts, :scores, []),
       selector: Keyword.get(opts, :selector),
-      validation_factory: Keyword.get(opts, :validation_factory, fn -> [] end),
       trainset: Keyword.get(opts, :trainset, []),
       valset: Keyword.get(opts, :valset, []),
-      study:
-        Study.new(
-          seed: seed,
-          model_calls: Keyword.get(opts, :max_model_calls),
-          deadline: Keyword.get(opts, :deadline),
-          limits: limits,
-          metadata: metadata,
-          notes: Keyword.get(opts, :notes, %{})
-        )
+      study: Keyword.get_lazy(opts, :study, fn -> Study.new(opts) end)
     }
   end
 
@@ -85,27 +68,20 @@ defmodule Tune.Search.Program.Context do
   def run(%__MODULE__{} = ctx, program, input, role) do
     case Study.limit_reason(ctx.study) do
       nil ->
-        allowance = Study.remaining_model_calls(ctx.study)
+        limits = Study.evaluation_limits(ctx.study) |> Map.drop([:cases, :on_progress])
+        limits = Map.merge(limits, %{concurrency: 1, call_role: role})
+        runner = target_runner(program, ctx.run_options, role, limits[:deadline])
+
+        evaluation =
+          Tune.Evaluator.evaluate([%Case{id: "training", input: input}], runner, [], nil, limits)
+
+        study = Study.account_score(ctx.study, evaluation)
 
         outcome =
-          with {:ok, target} <- Target.new(program, ctx.run_options) do
-            case Target.run(target, input, role: role, max_model_calls: allowance) do
-              {:ok, _output, prediction} -> {:ok, prediction}
-              {:error, error, _prediction} -> {:error, error}
-              {:error, error} -> {:error, error}
-            end
-          end
-
-        study = Study.account(ctx.study, prediction_of(outcome))
-
-        study =
-          case outcome do
-            {:error,
-             %Error.Execution.Failed{cause: %Error.Execution.LimitReached{limit: :model_calls}}} ->
-              Study.stop(study, :budget_exhausted)
-
-            _ ->
-              study
+          case evaluation.observations do
+            [%{status: :ok, prediction: %Tune.Prediction{} = prediction}] -> {:ok, prediction}
+            [%{error: error}] when not is_nil(error) -> {:error, error}
+            _ -> {:error, limit_error(evaluation.stop_reason)}
           end
 
         {outcome, %{ctx | study: study}}
@@ -125,51 +101,48 @@ defmodule Tune.Search.Program.Context do
 
   @spec evaluate(t(), Program.t(), [Case.t()]) :: {Evaluation.t(), t()}
   def evaluate(%__MODULE__{} = ctx, program, cases) do
-    budget = if exhausted?(ctx), do: 0, else: Study.remaining_model_calls(ctx.study)
+    limits = Study.evaluation_limits(ctx.study)
+    runner = target_runner(program, ctx.run_options, :target, limits[:deadline])
 
-    runner = fn tune_case ->
-      allowance = Map.get(tune_case.metadata, :model_call_allowance)
+    case Study.limit_reason(ctx.study) do
+      nil ->
+        evaluation = Tune.Evaluator.evaluate(cases, runner, ctx.scores, ctx.selector, limits)
+        {evaluation, %{ctx | study: Study.account_evaluation(ctx.study, evaluation)}}
 
-      with {:ok, target} <- Target.new(program, ctx.run_options) do
+      reason ->
+        {%Evaluation{stop_reason: reason}, stop(ctx, reason)}
+    end
+  end
+
+  defp target_runner(program, run_options, role, deadline) do
+    options = options_with_deadline(run_options, deadline)
+
+    fn tune_case ->
+      with {:ok, target} <- Target.new(program, options) do
         Target.run(target, tune_case.input,
-          role: :target,
-          max_model_calls: allowance
+          role: role,
+          max_model_calls: Map.get(tune_case.metadata, :model_call_allowance)
         )
       end
     end
-
-    {scores, selector} = evaluation_scores(ctx)
-
-    evaluation =
-      Tune.Evaluator.evaluate(cases, runner, scores, selector, %{
-        concurrency: 1,
-        row_timeout: ctx.row_timeout,
-        model_calls: budget,
-        deadline: Study.remaining_deadline(ctx.study)
-      })
-
-    study = Study.account_evaluation(ctx.study, evaluation)
-
-    study =
-      case evaluation.stop_reason do
-        reason when reason in [:completed, :case_limit] -> study
-        :model_call_limit -> Study.stop(study, :budget_exhausted)
-        :lost_accounting -> study |> Study.stop(:lost_accounting) |> exhaust_budget()
-        reason -> Study.stop(study, reason)
-      end
-
-    {evaluation, %{ctx | study: study}}
   end
 
   @spec evaluate_validation(t(), Program.t()) :: {Evaluation.t(), t()}
   def evaluate_validation(%__MODULE__{} = ctx, program) do
-    evaluate(ctx, program, ctx.validation_factory.())
+    evaluate(ctx, program, ctx.valset)
   end
 
   @spec consider(t(), Program.t(), Evaluation.t() | nil, map()) :: {String.t(), t()}
   def consider(%__MODULE__{} = ctx, program, evaluation, metadata \\ %{}) do
     {:ok, parameters} = Program.parameters(program)
     {candidate, study} = Study.record(ctx.study, program, parameters, evaluation, metadata)
+
+    Study.emit(study, %{
+      event: :candidate_evaluated,
+      candidate_id: candidate.id,
+      selected_score: evaluation && evaluation.selected_score
+    })
+
     {candidate.id, %{ctx | study: study}}
   end
 
@@ -226,45 +199,69 @@ defmodule Tune.Search.Program.Context do
   end
 
   @spec limit_error(atom()) :: Exception.t()
-  def limit_error(reason \\ :budget_exhausted),
-    do:
-      Error.Execution.LimitReached.exception(
-        limit: if(reason == :deadline, do: :timeout, else: :model_calls),
-        message:
-          if(reason == :deadline,
-            do: "optimization deadline reached",
-            else: "optimization call limit reached"
-          )
-      )
+  def limit_error(reason \\ :budget_exhausted) do
+    {limit, message} =
+      case reason do
+        :deadline -> {:timeout, "optimization deadline reached"}
+        :cancelled -> {:cancelled, "optimization cancelled"}
+        :evaluation_limit -> {:evaluations, "optimization evaluation limit reached"}
+        _ -> {:model_calls, "optimization call limit reached"}
+      end
+
+    Error.Execution.LimitReached.exception(limit: limit, message: message)
+  end
 
   @spec account_evaluation(t(), Evaluation.t()) :: t()
   def account_evaluation(%__MODULE__{} = ctx, %Evaluation{} = evaluation),
     do: %{ctx | study: Study.account_evaluation(ctx.study, evaluation)}
 
-  @spec metric(t()) :: term()
-  def metric(%__MODULE__{metric: metric}), do: metric
-
   @spec score(t(), Case.t(), Tune.Prediction.t()) ::
-          {:ok, %{score: number(), feedback: String.t() | nil}} | {:error, term()}
-  def score(%__MODULE__{metric: %Score{} = score}, %Case{} = tune_case, prediction) do
-    case Score.execute(score, tune_case, prediction.output, prediction) do
-      {:ok, value, _metadata} -> {:ok, value}
-      {:error, error, _metadata} -> {:error, error}
-    end
+          {{:ok, %{score: number(), feedback: String.t() | nil}} | {:error, term()}, t()}
+  def score(%__MODULE__{} = ctx, %Case{} = tune_case, prediction) do
+    limits = Study.evaluation_limits(ctx.study) |> Map.drop([:cases, :on_progress])
+    available = limits[:model_calls]
+    row_calls = limits[:row_calls]
+    row_left = if row_calls, do: max(row_calls - Tune.Prediction.total_calls(prediction), 0)
+    allowance = min(available || :infinity, row_left || :infinity)
+
+    budget =
+      if Enum.any?(ctx.scores, &Score.model_calls?/1) and allowance != :infinity,
+        do: allowance
+
+    limits = Map.merge(limits, %{model_calls: budget, concurrency: 1, call_role: :judge})
+    runner = fn _case -> {:score_prediction, prediction} end
+    evaluation = Tune.Evaluator.evaluate([tune_case], runner, ctx.scores, ctx.selector, limits)
+    study = Study.account_score(ctx.study, evaluation)
+
+    outcome =
+      case evaluation.observations do
+        [%{scores: values, feedback: feedback, error: error}] ->
+          if Enum.all?(Selector.names(ctx.selector), &Map.has_key?(values, &1)) do
+            score = Selector.select(values, ctx.scores, ctx.selector)
+            feedback = score_feedback(values, feedback)
+            {:ok, %{score: score, feedback: feedback}}
+          else
+            {:error, error || limit_error(evaluation.stop_reason)}
+          end
+
+        [] ->
+          {:error, limit_error(evaluation.stop_reason)}
+      end
+
+    {outcome, %{ctx | study: study}}
   end
 
-  defp evaluation_scores(%__MODULE__{scores: []} = ctx) do
-    {[ctx.metric], {:score, :objective}}
+  defp score_feedback(values, feedback) when map_size(values) == 1,
+    do: feedback |> Map.values() |> List.first()
+
+  defp score_feedback(values, feedback) do
+    Enum.map_join(values, "; ", fn {name, value} ->
+      "#{name}=#{value}" <> if(feedback[name], do: " (#{feedback[name]})", else: "")
+    end)
   end
 
-  defp evaluation_scores(%__MODULE__{} = ctx), do: {ctx.scores, ctx.selector}
+  defp options_with_deadline(options, nil), do: options
 
-  defp prediction_of({:ok, %Tune.Prediction{} = prediction}), do: prediction
-
-  defp prediction_of({:error, %Error.Execution.Failed{result: %Tune.Prediction{} = prediction}}),
-    do: prediction
-
-  defp prediction_of(_outcome), do: %Tune.Prediction{}
-
-  defp exhaust_budget(%Study{} = study), do: %{study | budget: if(study.budget, do: 0)}
+  defp options_with_deadline(options, timeout),
+    do: Keyword.update!(options, :timeout, &min(&1, timeout))
 end

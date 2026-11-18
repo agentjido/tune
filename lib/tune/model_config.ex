@@ -20,6 +20,7 @@ defmodule Tune.ModelConfig do
   """
 
   alias Tune.Error
+  alias Tune.Input
 
   @forbidden_request_options [
     :output,
@@ -31,6 +32,18 @@ defmodule Tune.ModelConfig do
     :stream,
     :object_schema
   ]
+
+  @keyword_values Input.keyword_values()
+  @options Zoi.keyword(
+             [
+               model: Zoi.any() |> Zoi.required(),
+               adapter: Zoi.atom() |> Zoi.required(),
+               adapter_options: @keyword_values |> Zoi.default([]),
+               request_options: @keyword_values |> Zoi.default([])
+             ],
+             unrecognized_keys: :error
+           )
+  @timeout Zoi.union([Zoi.integer() |> Zoi.positive(), Zoi.literal(:infinity), Zoi.null()])
 
   @enforce_keys [:model, :model_id, :adapter, :adapter_options, :request_options]
   defstruct @enforce_keys
@@ -57,7 +70,7 @@ defmodule Tune.ModelConfig do
   def new(%__MODULE__{} = config), do: {:ok, config}
 
   def new(opts) when is_list(opts) do
-    with :ok <- check_keys(opts),
+    with {:ok, opts} <- Input.options(@options, opts, :model, :first),
          {:ok, model, model_id} <- model(opts),
          {:ok, adapter} <- adapter(opts),
          {:ok, adapter_options} <- adapter_options(adapter, opts),
@@ -121,42 +134,24 @@ defmodule Tune.ModelConfig do
     end
   end
 
-  defp check_keys(opts) do
-    case Keyword.keys(opts) -- [:model, :adapter, :adapter_options, :request_options] do
-      [] -> :ok
-      [key | _] -> option_error(key, "unknown model configuration option")
-    end
-  end
-
   defp model(opts) do
-    case Keyword.fetch(opts, :model) do
-      {:ok, model} ->
-        case ReqLLM.model(model) do
-          {:ok, %LLMDB.Model{provider: provider, id: id}} ->
-            {:ok, model, "#{provider}:#{id}"}
+    model = Keyword.fetch!(opts, :model)
 
-          {:error, cause} ->
-            {:error, Error.Invalid.Definition.exception(message: "invalid model", details: cause)}
-        end
+    case ReqLLM.model(model) do
+      {:ok, %LLMDB.Model{provider: provider, id: id}} ->
+        {:ok, model, "#{provider}:#{id}"}
 
-      :error ->
-        option_error(:model, "is required")
+      {:error, cause} ->
+        {:error, Error.Invalid.Definition.exception(message: "invalid model", details: cause)}
     end
   end
 
   defp adapter(opts) do
-    case Keyword.fetch(opts, :adapter) do
-      {:ok, adapter} when is_atom(adapter) ->
-        if adapter?(adapter),
-          do: {:ok, adapter},
-          else: option_error(:adapter, "#{inspect(adapter)} is not a Tune.Adapter")
+    adapter = Keyword.fetch!(opts, :adapter)
 
-      {:ok, other} ->
-        option_error(:adapter, "expected an adapter module, got: #{inspect(other)}")
-
-      :error ->
-        option_error(:adapter, "is required")
-    end
+    if adapter?(adapter),
+      do: {:ok, adapter},
+      else: option_error(:adapter, "#{inspect(adapter)} is not a Tune.Adapter")
   end
 
   defp adapter?(module) do
@@ -164,42 +159,25 @@ defmodule Tune.ModelConfig do
       function_exported?(module, :parse, 3) and function_exported?(module, :normalize_options, 1)
   end
 
-  defp adapter_options(adapter, opts) do
-    case Keyword.get(opts, :adapter_options, []) do
-      options when is_list(options) ->
-        if Keyword.keyword?(options),
-          do: adapter.normalize_options(options),
-          else: option_error(:adapter_options, "must be a keyword list")
-
-      _ ->
-        option_error(:adapter_options, "must be a keyword list")
-    end
-  end
+  defp adapter_options(adapter, opts), do: adapter.normalize_options(opts[:adapter_options])
 
   defp request_options(opts) do
-    options = Keyword.get(opts, :request_options, [])
+    options = opts[:request_options]
 
     cond do
-      not (is_list(options) and Keyword.keyword?(options)) ->
-        option_error(:request_options, "must be a keyword list")
-
       key = Enum.find(Keyword.keys(options), &(&1 in @forbidden_request_options)) ->
         option_error(key, "is controlled by the prompt adapter and cannot be set")
 
       Keyword.get(options, :json_repair, false) != false ->
         option_error(:json_repair, "managed requests never repair output")
 
-      not valid_timeout?(Keyword.get(options, :total_timeout)) ->
+      not match?({:ok, _}, Zoi.parse(@timeout, options[:total_timeout])) ->
         option_error(:total_timeout, "must be a positive integer or :infinity")
 
       true ->
         {:ok, Keyword.delete(options, :json_repair)}
     end
   end
-
-  defp valid_timeout?(nil), do: true
-  defp valid_timeout?(:infinity), do: true
-  defp valid_timeout?(value), do: is_integer(value) and value > 0
 
   defp option_error(option, message),
     do: {:error, Error.Invalid.Option.exception(option: option, message: message)}

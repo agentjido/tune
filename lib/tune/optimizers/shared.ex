@@ -128,58 +128,14 @@ defmodule Tune.Optimizers.Shared do
       "\noutputs: " <> Tune.CanonicalJSON.encode!(step.outputs)
   end
 
-  @spec require_options(keyword(), [atom()], keyword()) ::
-          {:ok, keyword()} | {:error, Exception.t()}
-  def require_options(opts, allowed, defaults) do
-    case Keyword.keys(opts) -- allowed do
-      [] ->
-        {:ok, Keyword.merge(defaults, opts)}
-
-      [key | _] ->
-        {:error,
-         Tune.Error.Invalid.Option.exception(
-           option: key,
-           message: "unknown optimizer option"
-         )}
-    end
-  end
-
-  @spec positive(keyword(), atom()) :: :ok | {:error, Exception.t()}
-  def positive(opts, key) do
-    case Keyword.get(opts, key) do
-      value when is_integer(value) and value > 0 -> :ok
-      other -> option_error(key, "must be a positive integer, got: #{inspect(other)}")
-    end
-  end
-
-  @spec non_negative(keyword(), atom()) :: :ok | {:error, Exception.t()}
-  def non_negative(opts, key) do
-    case Keyword.get(opts, key) do
-      value when is_integer(value) and value >= 0 -> :ok
-      other -> option_error(key, "must be a nonnegative integer, got: #{inspect(other)}")
-    end
-  end
-
-  @spec number_or_nil(keyword(), atom()) :: :ok | {:error, Exception.t()}
-  def number_or_nil(opts, key) do
-    case Keyword.get(opts, key) do
-      nil -> :ok
-      value when is_number(value) -> :ok
-      other -> option_error(key, "must be a number, got: #{inspect(other)}")
+  @doc false
+  def options(schema, opts) do
+    with {:ok, parsed} <- Tune.Input.options(schema, opts, :optimizer) do
+      {:ok, Map.new(parsed)}
     end
   end
 
   @spec option_error(atom(), String.t()) :: {:error, Exception.t()}
   def option_error(key, message),
     do: {:error, Tune.Error.Invalid.Option.exception(option: key, message: message)}
-
-  @spec with_checks([(-> :ok | {:error, Exception.t()})]) :: :ok | {:error, Exception.t()}
-  def with_checks(checks) do
-    Enum.reduce_while(checks, :ok, fn check, :ok ->
-      case check.() do
-        :ok -> {:cont, :ok}
-        error -> {:halt, error}
-      end
-    end)
-  end
 end

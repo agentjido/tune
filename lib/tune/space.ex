@@ -34,7 +34,7 @@ defmodule Tune.Space do
 
   def new({:float, min, max}), do: Float.new(min, max, false)
   def new({:log_float, min, max}), do: Float.new(min, max, true)
-  def new({:subset, values}), do: Subset.new(values, 0, length(values))
+  def new({:subset, values}), do: Subset.new(values)
   def new({:subset, values, min, max}), do: Subset.new(values, min, max)
   def new({:text, opts}) when is_list(opts), do: Text.new(opts)
   def new(values) when is_list(values), do: Choice.new(values)

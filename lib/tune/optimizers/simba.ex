@@ -42,38 +42,24 @@ defmodule Tune.Optimizers.SIMBA do
   alias Tune.Optimizers.Shared
   alias Tune.Search.Program.Context
 
-  @options [:bsz, :num_candidates, :max_steps, :max_demos, :temperature, :num_final, :strategies]
+  @options Zoi.keyword(
+             [
+               bsz: Zoi.integer() |> Zoi.positive() |> Zoi.default(4),
+               num_candidates: Zoi.integer() |> Zoi.positive() |> Zoi.default(4),
+               max_steps: Zoi.integer() |> Zoi.positive() |> Zoi.default(4),
+               max_demos: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(4),
+               temperature: Zoi.number() |> Zoi.positive() |> Zoi.default(0.2),
+               num_final: Zoi.integer() |> Zoi.positive() |> Zoi.default(3),
+               strategies:
+                 Zoi.array(Zoi.enum([:append_a_demo, :append_a_rule]))
+                 |> Zoi.min(1)
+                 |> Zoi.default([:append_a_demo, :append_a_rule])
+             ],
+             unrecognized_keys: :error
+           )
 
   @impl true
-  def init(opts) do
-    defaults = [
-      bsz: 4,
-      num_candidates: 4,
-      max_steps: 4,
-      max_demos: 4,
-      temperature: 0.2,
-      num_final: 3,
-      strategies: [:append_a_demo, :append_a_rule]
-    ]
-
-    with {:ok, opts} <- Shared.require_options(opts, @options, defaults),
-         :ok <-
-           Shared.with_checks([
-             fn -> Shared.positive(opts, :bsz) end,
-             fn -> Shared.positive(opts, :num_candidates) end,
-             fn -> Shared.positive(opts, :max_steps) end,
-             fn -> Shared.non_negative(opts, :max_demos) end,
-             fn -> Shared.positive(opts, :num_final) end,
-             fn ->
-               if is_number(opts[:temperature]) and opts[:temperature] > 0,
-                 do: :ok,
-                 else: Shared.option_error(:temperature, "must be a positive number")
-             end,
-             fn -> check_strategies(opts[:strategies]) end
-           ]) do
-      {:ok, Map.new(opts)}
-    end
-  end
+  def init(opts), do: Shared.options(@options, opts)
 
   @impl true
   def requirements(_config),
@@ -147,7 +133,8 @@ defmodule Tune.Optimizers.SIMBA do
           else
             {entry, ctx} = sample_program(config, state.pool, ctx)
             {outcome, ctx} = Context.run(ctx, entry.program, example.input, :target)
-            {[%{entry: entry, outcome: outcome, score: score(ctx, example, outcome)} | runs], ctx}
+            {value, ctx} = score(ctx, example, outcome)
+            {[%{entry: entry, outcome: outcome, score: value} | runs], ctx}
           end
         end)
 
@@ -174,13 +161,15 @@ defmodule Tune.Optimizers.SIMBA do
   end
 
   defp score(ctx, example, {:ok, result}) do
-    case Context.score(ctx, example, result) do
-      {:ok, %{score: score}} -> score
-      {:error, _} -> ctx.failure_score || 0
+    {outcome, ctx} = Context.score(ctx, example, result)
+
+    case outcome do
+      {:ok, %{score: score}} -> {score, ctx}
+      {:error, _} -> {ctx.failure_score || 0, ctx}
     end
   end
 
-  defp score(ctx, _example, {:error, _}), do: ctx.failure_score || 0
+  defp score(ctx, _example, {:error, _}), do: {ctx.failure_score || 0, ctx}
 
   defp mutate(config, buckets, all_buckets, state, ctx) do
     Enum.reduce(buckets, {[], state, ctx}, fn bucket, {created, state, ctx} ->
@@ -373,12 +362,4 @@ defmodule Tune.Optimizers.SIMBA do
   end
 
   defp mean(values), do: Enum.sum(values) / length(values)
-
-  defp check_strategies(strategies) when is_list(strategies) and strategies != [] do
-    if Enum.all?(strategies, &(&1 in [:append_a_demo, :append_a_rule])),
-      do: :ok,
-      else: Shared.option_error(:strategies, "must be :append_a_demo and/or :append_a_rule")
-  end
-
-  defp check_strategies(_), do: Shared.option_error(:strategies, "must be a nonempty list")
 end

@@ -1,6 +1,6 @@
 defmodule Tune.Search.Study do
   @moduledoc """
-  Shared state for program and genetic search runs.
+  Shared limits and accounting for Tune runs.
 
   A Study owns limits, accounting, candidate identity, history, the incumbent,
   local random state, stop state, and result construction. It does not know a
@@ -15,14 +15,14 @@ defmodule Tune.Search.Study do
   defstruct [
     :budget,
     :max_model_calls,
-    :deadline,
-    :started_at,
+    :expires_at,
     :stop_reason,
     :rand,
     :seed,
     limits: %{},
     calls: %{},
     usage: %{input: 0, output: 0, total: 0},
+    successful_models: MapSet.new(),
     evaluations: 0,
     candidates: [],
     best: nil,
@@ -39,12 +39,12 @@ defmodule Tune.Search.Study do
     limits = Keyword.get(opts, :limits, %{})
 
     max_model_calls = Keyword.get(opts, :model_calls, Map.get(limits, :model_calls))
+    deadline = Keyword.get(opts, :deadline, Map.get(limits, :deadline))
 
     %__MODULE__{
       budget: max_model_calls,
       max_model_calls: max_model_calls,
-      deadline: Keyword.get(opts, :deadline, Map.get(limits, :deadline)),
-      started_at: System.monotonic_time(:millisecond),
+      expires_at: if(is_integer(deadline), do: now() + deadline),
       rand: :rand.seed_s(:exsss, seed),
       seed: seed,
       limits: limits,
@@ -59,7 +59,10 @@ defmodule Tune.Search.Study do
   @spec limit_reason(t()) :: atom() | nil
   def limit_reason(%__MODULE__{} = study) do
     cond do
-      deadline?(study) ->
+      study.limits[:cancel] && study.limits.cancel.() ->
+        :cancelled
+
+      remaining_deadline(study) == 0 ->
         :deadline
 
       study.budget == 0 ->
@@ -68,7 +71,14 @@ defmodule Tune.Search.Study do
       evaluation_limit?(study) ->
         :evaluation_limit
 
-      study.stop_reason in [:budget_exhausted, :model_call_limit, :lost_accounting, :deadline] ->
+      study.stop_reason in [
+        :budget_exhausted,
+        :model_call_limit,
+        :lost_accounting,
+        :deadline,
+        :cancelled,
+        :evaluation_limit
+      ] ->
         study.stop_reason
 
       true ->
@@ -88,12 +98,9 @@ defmodule Tune.Search.Study do
   end
 
   @spec remaining_deadline(t()) :: non_neg_integer() | nil
-  def remaining_deadline(%__MODULE__{deadline: nil}), do: nil
-  def remaining_deadline(%__MODULE__{deadline: :infinity}), do: nil
+  def remaining_deadline(%__MODULE__{expires_at: nil}), do: nil
 
-  def remaining_deadline(%__MODULE__{deadline: deadline, started_at: started_at}) do
-    max(deadline - (System.monotonic_time(:millisecond) - started_at), 0)
-  end
+  def remaining_deadline(%__MODULE__{expires_at: expires_at}), do: max(expires_at - now(), 0)
 
   @spec account(t(), Prediction.t()) :: t()
   def account(%__MODULE__{} = study, %Prediction{} = prediction) do
@@ -104,21 +111,52 @@ defmodule Tune.Search.Study do
       study
       | calls: merge_counts(study.calls, prediction.calls),
         budget: subtract(study.budget, used),
-        usage: add_usage(study.usage, tokens)
+        usage: add_usage(study.usage, tokens),
+        successful_models: merge_models(study, Prediction.successful_models(prediction))
     }
+  end
+
+  @spec evaluation_limits(t()) :: map()
+  def evaluation_limits(%__MODULE__{} = study) do
+    study.limits
+    |> Map.drop([:evaluations, :seed, :steps])
+    |> Map.merge(%{
+      model_calls: remaining_model_calls(study),
+      deadline: remaining_deadline(study),
+      expires_at: study.expires_at
+    })
   end
 
   @spec account_evaluation(t(), Evaluation.t()) :: t()
   def account_evaluation(%__MODULE__{} = study, %Evaluation{} = evaluation) do
+    study = account_score(study, evaluation)
+    %{study | evaluations: study.evaluations + 1}
+  end
+
+  @spec account_score(t(), Evaluation.t()) :: t()
+  def account_score(%__MODULE__{} = study, %Evaluation{} = evaluation) do
     used = evaluation.calls |> Map.values() |> Enum.sum()
 
-    %{
+    study = %{
       study
       | calls: merge_counts(study.calls, evaluation.calls),
         budget: subtract(study.budget, used),
         usage: add_usage(study.usage, evaluation.usage),
-        evaluations: study.evaluations + 1
+        successful_models:
+          merge_models(study, Map.get(evaluation.metadata, :successful_models, []))
     }
+
+    case evaluation.stop_reason do
+      reason when reason in [:completed, :case_limit] -> study
+      :model_call_limit -> stop(study, :budget_exhausted)
+      reason -> stop(study, reason)
+    end
+  end
+
+  @spec emit(t(), map()) :: :ok
+  def emit(%__MODULE__{} = study, event) do
+    if callback = study.limits[:on_progress], do: callback.(event)
+    :ok
   end
 
   @spec record(t(), term(), map(), Evaluation.t() | nil, map()) :: {Candidate.t(), t()}
@@ -170,15 +208,22 @@ defmodule Tune.Search.Study do
       stop_reason: Keyword.get(opts, :stop_reason, study.stop_reason || :completed),
       calls: study.calls,
       usage: study.usage,
-      metadata: Map.merge(study.metadata, Keyword.get(opts, :metadata, %{}))
+      metadata:
+        study.metadata
+        |> Map.merge(Keyword.get(opts, :metadata, %{}))
+        |> Map.put(:successful_models, Enum.sort(study.successful_models))
     }
   end
 
   @spec stop(t(), atom()) :: t()
   def stop(%__MODULE__{stop_reason: nil} = study, :budget_exhausted) do
-    if deadline?(study),
-      do: %{study | stop_reason: :deadline},
-      else: %{study | stop_reason: :budget_exhausted}
+    reason =
+      case limit_reason(study) do
+        other when other in [:deadline, :cancelled, :evaluation_limit] -> other
+        _ -> :budget_exhausted
+      end
+
+    %{study | stop_reason: reason}
   end
 
   def stop(%__MODULE__{stop_reason: nil} = study, reason), do: %{study | stop_reason: reason}
@@ -237,12 +282,7 @@ defmodule Tune.Search.Study do
   defp better?(candidate, best),
     do: candidate.evaluation.selected_score > best.evaluation.selected_score
 
-  defp deadline?(%__MODULE__{deadline: nil}), do: false
-  defp deadline?(%__MODULE__{deadline: :infinity}), do: false
-
-  defp deadline?(%__MODULE__{deadline: deadline, started_at: started_at})
-       when is_integer(deadline),
-       do: System.monotonic_time(:millisecond) - started_at >= deadline
+  defp now, do: System.monotonic_time(:millisecond)
 
   defp evaluation_limit?(%__MODULE__{limits: limits, evaluations: evaluations}) do
     case Map.get(limits, :evaluations) do
@@ -253,6 +293,8 @@ defmodule Tune.Search.Study do
 
   defp subtract(nil, _used), do: nil
   defp subtract(budget, used), do: max(budget - used, 0)
+
+  defp merge_models(study, models), do: Enum.into(models, study.successful_models)
 
   defp merge_counts(left, right),
     do: Map.merge(left, right, fn _role, left_count, right_count -> left_count + right_count end)

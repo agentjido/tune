@@ -21,14 +21,21 @@ MIX_ENV=test mix run examples/lazy_structured_prompt.exs
 This example uses a two-step grounded QA program. The `extract` step selects
 facts. The `answer` step uses the facts and cites their source identifiers.
 
-The pipeline has separate training and validation data. It has an answer score
-and a citation score. An explicit weighted selector combines the scores. A
-bootstrap search learns one demonstration with a separate teacher model.
+A bootstrap search learns one demonstration from training data with a
+separate teacher model. The example compares the original and the winner on a
+different test split. The test has two improvements and one regression. It
+prints those counts, the call totals, and the optimized answer prompt.
 
 Every model reply comes from a local `Req.Test` handler. No provider is called.
-The target handler returns a correct citation but an incorrect baseline answer.
-The selected score changes from `0.2` to `1.0`. The script then prints the
-optimized answer prompt and its learned demonstration.
+
+## Search a finite grid
+
+```sh
+mix run examples/generic_grid.exs
+```
+
+Tune evaluates each of 16 batch sizes once. It selects batch size 7, then
+compares it with the original on two test workloads.
 
 ## Tune a plain Elixir value
 

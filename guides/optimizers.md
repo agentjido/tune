@@ -90,10 +90,71 @@ choices, bounded subsets, and text choices. The strategy supports population
 size, generations, mutation rate, crossover rate, elitism, tournament size,
 deadline, and a cancellation callback.
 
-A generic search needs an explicit positive evaluation limit. Candidate
-evaluation is sequential. Row evaluation can use bounded concurrency. This
-keeps effect accounting deterministic and simple.
+Genetic search needs an explicit positive evaluation limit. Tune reads the
+validation data once per study. Row concurrency is available for each
+candidate. Use `candidate_concurrency` to evaluate independent candidates in
+parallel in a study without managed model calls.
 
-Tune can count calls that go through Tune programs and judge scores. An opaque
-application runner owns any hidden external calls that it makes. The
-application must enforce and report those limits.
+## Search a finite grid
+
+Use `:grid` for integer ranges and explicit choices. It visits each
+combination once, in alphabetical field order. A range follows its declared
+direction. Choices follow list order, with duplicates removed. Use an
+evaluation limit to stop after the first N configurations.
+
+```elixir
+study =
+  Tune.new(%{batch_size: 1}, run: &MyBenchmark.run/2)
+  |> Tune.data(validation: validation, test: test)
+  |> Tune.vary(batch_size: 1..16)
+  |> Tune.score(:quality, fn _case, output -> output.quality end)
+  |> Tune.search(:grid)
+
+{:ok, winner} = Tune.tune(study)
+{:ok, comparison} = Tune.compare(study, winner, split: :test)
+```
+
+Run `mix run examples/generic_grid.exs` for a complete example.
+
+## Evolve a seeded population
+
+Pass `initial_population` to use your exact seed values in order. With named
+variations, seeds must agree outside those fields. To vary arbitrary Elixir
+values, omit named variations and supply whole-genome callbacks:
+
+```elixir
+pipeline =
+  Tune.new(hd(seeds), run: &MyBenchmark.run/2, on_progress: &MyReport.record/1)
+  |> Tune.data(validation: cases)
+  |> Tune.score(:fitness, &MyBenchmark.score/2)
+  |> Tune.search(:genetic,
+    initial_population: seeds,
+    mutate: &MyGenome.mutate/2,
+    crossover: &MyGenome.crossover/3,
+    valid?: &MyGenome.valid?/1,
+    generations: 12,
+    target_score: 0.9,
+    patience: 4
+  )
+  |> Tune.limit(evaluations: length(seeds) * 13, seed: 42)
+
+{:ok, result} = Tune.tune(pipeline)
+```
+
+Mutation and crossover receive the current random state as their last argument
+and return `{genome, random_state}`. The optional `select_parent` callback
+receives eligible candidates and that state. It returns
+`{candidate_id, random_state}`. With a single score, the target threshold
+uses the score's original direction and scale. With weighted selection, the
+threshold uses the combined selection value.
+
+The progress callback receives `:candidate_evaluated` and
+`:generation_evaluated` events. A generation event includes its number,
+ordered population, best candidate, and whether it completed. The seed
+population is generation zero. A host can persist these snapshots without
+waiting for the final result.
+
+Tune counts managed model calls, including failed attempts. ReqLLM owns
+transport retries within a call. An opaque runner owns external calls and
+detached resources. Keep data factories and variation callbacks bounded so the
+study can reach its worker deadline and cancellation checks.

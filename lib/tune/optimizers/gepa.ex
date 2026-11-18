@@ -26,18 +26,10 @@ defmodule Tune.Optimizers.GEPA do
   alias Tune.Optimizers.Shared
   alias Tune.Search.Program.Context
 
+  @fields [predictors: Zoi.array(Zoi.string()) |> Zoi.nullable() |> Zoi.default(nil)]
+
   @impl true
-  def init(opts) do
-    with {:ok, opts} <-
-           Shared.require_options(
-             opts,
-             [:predictors | Reflective.options()],
-             [predictors: nil] ++ Reflective.defaults()
-           ),
-         :ok <- Reflective.check(opts) do
-      {:ok, Map.new(opts)}
-    end
-  end
+  def init(opts), do: Shared.options(Reflective.options(@fields), opts)
 
   @impl true
   def requirements(_config),

@@ -30,23 +30,21 @@ defmodule Tune.Optimizers.BootstrapFewShotWithOptuna do
   alias Tune.Optimizers.TPE
   alias Tune.Search.Program.Context
 
-  @own [:num_demo_sets, :num_trials, :n_startup]
+  @fields [
+    num_demo_sets: Zoi.integer() |> Zoi.positive() |> Zoi.default(4),
+    num_trials: Zoi.integer() |> Zoi.positive() |> Zoi.default(16),
+    n_startup: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(4)
+  ]
+  @options Zoi.keyword(@fields, unrecognized_keys: :error)
 
   @impl true
   def init(opts) do
-    {own, boot} = Keyword.split(opts, @own)
+    {own, boot} = Keyword.split(opts, Keyword.keys(@fields))
 
-    with {:ok, own} <-
-           Shared.require_options(own, @own, num_demo_sets: 4, num_trials: 16, n_startup: 4),
-         :ok <-
-           Shared.with_checks([
-             fn -> Shared.positive(own, :num_demo_sets) end,
-             fn -> Shared.positive(own, :num_trials) end,
-             fn -> Shared.non_negative(own, :n_startup) end
-           ]),
+    with {:ok, own} <- Shared.options(@options, own),
          {:ok, boot} <- BootstrapFewShot.init(boot),
          :ok <- BootstrapFewShotWithRandomSearch.require_accept(boot) do
-      {:ok, Map.merge(boot, Map.new(own))}
+      {:ok, Map.merge(boot, own)}
     end
   end
 

@@ -2,117 +2,202 @@ defmodule Tune.Search.Genetic do
   @moduledoc false
 
   alias Tune.Error
-  alias Tune.Evaluator
+  alias Tune.Evaluation
+  alias Tune.Input
+  alias Tune.Observation
   alias Tune.Result
+  alias Tune.Score
+  alias Tune.Search.Generic
   alias Tune.Search.Study
   alias Tune.Space
 
-  @options [
-    :population_size,
-    :generations,
-    :mutation_rate,
-    :crossover_rate,
-    :elitism,
-    :tournament_size,
-    :cancel
-  ]
-
-  @defaults %{
-    population_size: 20,
-    generations: 20,
-    mutation_rate: 0.1,
-    crossover_rate: 0.8,
-    elitism: 1,
-    tournament_size: 3,
-    cancel: nil
-  }
+  @rate Zoi.number() |> Zoi.gte(0) |> Zoi.lte(1)
+  @options Zoi.keyword(
+             [
+               population_size: Zoi.integer() |> Zoi.positive(),
+               generations: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(20),
+               mutation_rate: @rate |> Zoi.default(0.1),
+               crossover_rate: @rate |> Zoi.default(0.8),
+               elitism: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(1),
+               tournament_size: Zoi.integer() |> Zoi.positive() |> Zoi.default(3),
+               cancel: Zoi.function(arity: 0) |> Zoi.nullable() |> Zoi.default(nil),
+               initial_population:
+                 Zoi.array(Zoi.any()) |> Zoi.min(1) |> Zoi.nullable() |> Zoi.default(nil),
+               mutate: Zoi.function(arity: 2) |> Zoi.nullable() |> Zoi.default(nil),
+               crossover: Zoi.function(arity: 3) |> Zoi.nullable() |> Zoi.default(nil),
+               valid?: Zoi.function(arity: 1) |> Zoi.nullable() |> Zoi.default(nil),
+               select_parent: Zoi.function(arity: 2) |> Zoi.nullable() |> Zoi.default(nil),
+               target_score: Zoi.number() |> Zoi.nullable() |> Zoi.default(nil),
+               patience: Zoi.integer() |> Zoi.positive() |> Zoi.nullable() |> Zoi.default(nil),
+               candidate_concurrency: Zoi.integer() |> Zoi.positive() |> Zoi.default(1)
+             ],
+             unrecognized_keys: :error
+           )
 
   @spec run(term(), function(), (-> Enumerable.t()), map(), list(), term(), map(), keyword()) ::
           {:ok, Result.t()} | {:error, Exception.t()}
   def run(target, runner, data_factory, spaces, scores, selector, limits, opts) do
     with {:ok, config} <- config(opts),
          :ok <- evaluation_limit(limits),
-         :ok <- validate_target(target, spaces) do
+         :ok <- check_candidate_concurrency(config, limits, scores),
+         :ok <- validate_operators(spaces, config),
+         :ok <- validate_population(target, spaces, config, limits) do
+      limits = Map.put(limits, :cancel, config.cancel || limits[:cancel])
+
       study =
         Study.new(
           seed: Map.get(limits, :seed, 0),
           limits: limits,
-          model_calls: Map.get(limits, :model_calls),
-          deadline: Map.get(limits, :deadline),
           metadata: %{strategy: :genetic}
         )
 
-      state = %{
-        study: study,
-        config: config,
-        target: target,
-        runner: runner,
-        data_factory: data_factory,
-        spaces: spaces,
-        scores: scores,
-        selector: selector,
-        baseline: nil
-      }
+      with {:ok, cases} <- Generic.snapshot(data_factory, study, :genetic) do
+        state = %{
+          study: study,
+          config: config,
+          target: target,
+          runner: runner,
+          cases: cases,
+          spaces: spaces,
+          scores: scores,
+          selector: selector,
+          baseline: nil,
+          last_improvement: 0,
+          generation: 0
+        }
 
-      state = search(state)
-      if Study.incumbent(state.study), do: {:ok, result(state)}, else: no_candidate(state)
+        state = search(state)
+        result(state)
+      end
     end
   end
 
   defp search(state) do
-    count = min(state.config.population_size, Study.remaining_evaluations(state.study))
-    {population, state} = initial_population(state, count)
-    state = %{state | baseline: population |> List.first() |> then(&(&1 && &1.evaluation))}
+    case Study.limit_reason(state.study) do
+      nil ->
+        {requests, state} = initial_population(state)
+        {population, state} = evaluate_population(requests, state)
 
-    if Study.stop_reason(state.study) do
-      state
-    else
-      generations(state, population, 1)
+        baseline =
+          if state.config.initial_population == nil and population != [],
+            do: hd(population).evaluation
+
+        finish_generation(%{state | baseline: baseline}, population, length(requests), nil)
+
+      reason ->
+        stop(state, reason)
     end
   end
 
-  defp initial_population(state, count) do
-    params = parameters(state.target, state.spaces)
-    {baseline, state} = evaluate(params, %{kind: :baseline}, state)
+  defp initial_population(%{config: %{initial_population: seeds}} = state) when is_list(seeds) do
+    requests =
+      Enum.map(seeds, fn value ->
+        {parameters(value, state.spaces), %{kind: :initial, generation: 0}}
+      end)
 
-    Enum.map_reduce(2..count//1, state, fn _, state ->
-      {params, state} = sample_parameters(state)
-      evaluate(params, %{kind: :initial}, state)
-    end)
-    |> then(fn {sampled, state} -> {[baseline | sampled], state} end)
+    {requests, state}
   end
 
-  defp generations(state, _population, generation)
-       when generation > state.config.generations,
-       do: stop(state, :completed)
+  defp initial_population(state) do
+    count = min(state.config.population_size, Study.remaining_evaluations(state.study))
+    baseline = {parameters(state.target, state.spaces), %{kind: :baseline, generation: 0}}
 
-  defp generations(state, population, generation) do
+    {sampled, state} =
+      Enum.map_reduce(2..count//1, state, fn _, state ->
+        {params, state} = sample_parameters(state)
+        {{params, %{kind: :initial, generation: 0}}, state}
+      end)
+
+    {[baseline | sampled], state}
+  end
+
+  defp finish_generation(state, population, count, previous_best) do
+    best = Study.incumbent(state.study)
+    improved? = best && (previous_best == nil or best.id != previous_best.id)
+    state = if improved?, do: %{state | last_improvement: state.generation}, else: state
+    complete? = length(population) == count and Study.stop_reason(state.study) == nil
+
+    Study.emit(state.study, %{
+      event: :generation_evaluated,
+      generation: state.generation,
+      population: population,
+      complete?: complete?,
+      best: best
+    })
+
     cond do
-      cancelled?(state) ->
-        stop(state, :cancelled)
+      Study.stop_reason(state.study) ->
+        state
 
-      Study.limit_reason(state.study) == :deadline ->
-        stop(state, :deadline)
+      best && reached_target?(state, best) ->
+        stop(state, :target_score)
 
-      Study.limit_reason(state.study) == :model_call_limit ->
-        stop(state, :model_call_limit)
+      state.config.patience && state.generation - state.last_improvement >= state.config.patience ->
+        stop(state, :patience)
 
-      remaining_evaluations(state) < state.config.population_size ->
+      state.generation >= state.config.generations ->
+        stop(state, :completed)
+
+      Study.remaining_evaluations(state.study) < state.config.population_size ->
         stop(state, :evaluation_limit)
 
       Enum.all?(population, &(not &1.evaluation.eligible?)) ->
         stop(state, :no_eligible_parent)
 
       true ->
+        generation = state.generation + 1
         {requests, state} = next_generation(population, generation, state)
-
-        {population, state} =
-          Enum.map_reduce(requests, state, fn {params, lineage}, state ->
-            evaluate(params, lineage, state)
-          end)
-
-        generations(state, population, generation + 1)
+        {population, state} = evaluate_population(requests, %{state | generation: generation})
+        finish_generation(state, population, length(requests), best)
     end
+  end
+
+  defp evaluate_population(requests, state) do
+    requests
+    |> Stream.chunk_every(state.config.candidate_concurrency)
+    |> Enum.reduce_while({[], state}, fn batch, {acc, state} ->
+      case Study.limit_reason(state.study) do
+        nil ->
+          {candidates, state} = evaluate_batch(batch, state)
+
+          if Study.stop_reason(state.study),
+            do: {:halt, {Enum.reverse(candidates, acc), state}},
+            else: {:cont, {Enum.reverse(candidates, acc), state}}
+
+        reason ->
+          {:halt, {acc, stop(state, reason)}}
+      end
+    end)
+    |> then(fn {population, state} -> {Enum.reverse(population), state} end)
+  end
+
+  defp evaluate_batch([request], state) do
+    {candidate, state} = record(evaluate(request, state), state)
+    {[candidate], state}
+  end
+
+  defp evaluate_batch(requests, state) do
+    requests
+    |> Task.async_stream(&evaluate(&1, state),
+      max_concurrency: length(requests),
+      timeout: :infinity
+    )
+    |> Enum.map_reduce(state, fn {:ok, evaluation}, state -> record(evaluation, state) end)
+  end
+
+  defp reached_target?(%{config: %{target_score: nil}}, _best), do: false
+
+  defp reached_target?(%{config: config, selector: selector, scores: scores}, best) do
+    threshold =
+      case selector do
+        {:score, name} ->
+          Tune.Score.Selector.select(%{name => config.target_score}, scores, selector)
+
+        {:weighted, _} ->
+          config.target_score
+      end
+
+    best.evaluation.selected_score >= threshold
   end
 
   defp next_generation(population, generation, state) do
@@ -134,6 +219,24 @@ defmodule Tune.Search.Genetic do
       {{params, %{kind: :offspring, generation: generation, parents: [left.id, right.id]}}, state}
     end)
     |> then(fn {children, state} -> {elites ++ children, state} end)
+  end
+
+  defp reproduce(%{genome: left}, %{genome: right}, %{spaces: spaces} = state)
+       when map_size(spaces) == 0 do
+    {cross, state} = random(state, &Space.uniform/1)
+    {mutate, state} = random(state, &Space.uniform/1)
+
+    {value, state} =
+      if state.config.crossover && cross < state.config.crossover_rate,
+        do: random(state, &state.config.crossover.(left, right, &1)),
+        else: {left, state}
+
+    {value, state} =
+      if state.config.mutate && mutate < state.config.mutation_rate,
+        do: random(state, &state.config.mutate.(value, &1)),
+        else: {value, state}
+
+    {%{genome: value}, state}
   end
 
   defp reproduce(left, right, state) do
@@ -160,6 +263,22 @@ defmodule Tune.Search.Genetic do
     end)
   end
 
+  defp tournament(population, %{config: %{select_parent: select}} = state)
+       when is_function(select) do
+    {selected_id, state} = random(state, &select.(population, &1))
+
+    case Enum.find(population, &(&1.id == selected_id)) do
+      nil ->
+        raise Error.Invalid.Option.exception(
+                option: :select_parent,
+                message: "select_parent must return an eligible candidate ID"
+              )
+
+      candidate ->
+        {candidate, state}
+    end
+  end
+
   defp tournament(population, state) do
     count = min(state.config.tournament_size, length(population))
 
@@ -179,123 +298,150 @@ defmodule Tune.Search.Genetic do
     end)
   end
 
-  defp evaluate(params, lineage, state) do
-    value = apply_parameters(state.target, params)
-
-    callback = fn tune_case -> invoke(state.runner, value, tune_case.input) end
+  defp evaluate({params, lineage}, state) do
+    value = apply_parameters(state.target, params, state.spaces)
+    limits = Study.evaluation_limits(state.study)
 
     limits =
-      Map.put(state.study.limits, :model_calls, Study.remaining_model_calls(state.study))
+      if state.config.candidate_concurrency > 1,
+        do: Map.delete(limits, :on_progress),
+        else: limits
 
     evaluation =
-      Evaluator.evaluate(
-        state.data_factory.(),
-        callback,
-        state.scores,
-        state.selector,
-        Map.delete(limits, :evaluations)
-      )
+      if valid_candidate?(value, state.spaces, state.config) do
+        Generic.evaluate(state.cases, state.runner, value, state.scores, state.selector, limits)
+      else
+        error =
+          Error.Invalid.Option.exception(
+            option: :genetic,
+            message: "variation produced an invalid candidate"
+          )
 
-    study = Study.account_evaluation(state.study, evaluation)
+        %Evaluation{
+          complete?: true,
+          observations: [%Observation{status: :error, eligible?: false, error: error}]
+        }
+      end
 
-    {candidate, study} =
-      Study.record(study, value, params, evaluation, %{lineage: lineage, metadata: %{}})
-
-    state = %{state | study: study}
-
-    {candidate, state}
+    {value, params, lineage, evaluation}
   end
 
-  defp invoke(runner, target, input) when is_function(runner, 2), do: runner.(target, input)
-  defp invoke(runner, target, _input) when is_function(runner, 1), do: runner.(target)
+  defp record({value, params, lineage, evaluation}, state) do
+    {candidate, study} = Generic.record(state.study, value, params, evaluation, lineage)
+    {candidate, %{state | study: study}}
+  end
 
   defp result(state) do
-    best = Study.incumbent(state.study)
     reason = Study.stop_reason(state.study) || :completed
+    best = Study.incumbent(state.study)
 
-    Study.result(state.study, best.value, best.parameters,
+    Generic.result(state.study,
       baseline: state.baseline,
       stop_reason: reason,
-      complete?: reason == :completed,
-      metadata: %{
-        strategy: :genetic,
-        evaluations: state.study.evaluations,
-        settings: Map.delete(state.config, :cancel)
-      }
+      complete?: reason in [:completed, :target_score, :patience],
+      metadata:
+        if(best,
+          do: %{
+            settings: settings(state.config),
+            genome?: state.spaces == %{},
+            seed: state.study.seed
+          },
+          else: %{settings: settings(state.config)}
+        )
     )
   end
 
-  defp no_candidate(state) do
-    report =
-      Study.result(state.study, nil, %{},
-        baseline: state.baseline,
-        stop_reason: Study.stop_reason(state.study) || :no_eligible_candidate,
-        complete?: false,
-        metadata: %{
-          strategy: :genetic,
-          evaluations: state.study.evaluations,
-          settings: Map.delete(state.config, :cancel)
-        }
-      )
-
-    {:error,
-     Error.Optimization.Failed.exception(
-       message: "no candidate completed an eligible evaluation",
-       report: report
-     )}
-  end
+  defp parameters(target, spaces) when map_size(spaces) == 0, do: %{genome: target}
 
   defp parameters(target, spaces),
     do: Map.new(spaces, fn {name, _} -> {name, Map.fetch!(target, name)} end)
 
-  defp apply_parameters(target, params),
-    do: Enum.reduce(params, target, fn {k, v}, acc -> Map.put(acc, k, v) end)
+  defp apply_parameters(_target, %{genome: value}, spaces) when map_size(spaces) == 0, do: value
 
-  defp validate_target(target, spaces) when is_map(target) do
-    Enum.reduce_while(spaces, :ok, fn {name, space}, :ok ->
+  defp apply_parameters(target, params, _spaces),
+    do: Generic.apply_parameters(target, params)
+
+  defp validate_population(target, spaces, config, limits) do
+    seeds = config.initial_population || [target]
+
+    cond do
+      config.initial_population && config.population_size > limits.evaluations ->
+        invalid("the evaluation limit must cover the initial population")
+
+      config.initial_population && spaces != %{} &&
+          Enum.any?(seeds, &(fixed_fields(&1, spaces) != fixed_fields(target, spaces))) ->
+        invalid("seed candidates must match the target outside declared variations")
+
+      Enum.all?(seeds, &valid_candidate?(&1, spaces, config)) ->
+        :ok
+
+      true ->
+        invalid(
+          "the initial population contains a value outside the declared spaces or validity contract"
+        )
+    end
+  end
+
+  defp fixed_fields(value, spaces) when is_map(value), do: Map.drop(value, Map.keys(spaces))
+  defp fixed_fields(value, _spaces), do: value
+
+  defp valid_candidate?(target, spaces, config) when map_size(spaces) == 0,
+    do: config.valid? == nil or config.valid?.(target)
+
+  defp valid_candidate?(target, spaces, _config) when is_map(target) do
+    Enum.all?(spaces, fn {name, space} ->
       case Map.fetch(target, name) do
-        {:ok, value} ->
-          if Space.valid?(space, value),
-            do: {:cont, :ok},
-            else: {:halt, invalid("initial value #{inspect(name)} is outside its space")}
-
-        :error ->
-          {:halt, invalid("target has no value named #{inspect(name)}")}
+        {:ok, value} -> Space.valid?(space, value)
+        :error -> false
       end
     end)
   end
 
-  defp validate_target(_target, _spaces),
-    do: invalid("genetic search requires a map or struct target")
+  defp valid_candidate?(_target, _spaces, _config), do: false
+
+  defp validate_operators(spaces, config) do
+    if spaces != %{} and (config.mutate || config.crossover || config.valid?),
+      do: invalid("genome operators require an initial population without named variations"),
+      else: :ok
+  end
+
+  defp check_candidate_concurrency(config, limits, scores) do
+    if config.candidate_concurrency > 1 and
+         (limits[:model_calls] != nil or Enum.any?(scores, &Score.model_calls?/1)),
+       do: invalid("parallel candidate evaluation requires a study without managed model calls"),
+       else: :ok
+  end
+
+  defp settings(config),
+    do:
+      Map.drop(config, [
+        :cancel,
+        :initial_population,
+        :mutate,
+        :crossover,
+        :valid?,
+        :select_parent
+      ])
 
   defp config(opts) do
-    unknown = Keyword.keys(opts) -- @options
-    config = Map.merge(@defaults, Map.new(opts))
+    case Input.options(@options, opts, :genetic) do
+      {:ok, parsed} ->
+        size = if parsed[:initial_population], do: length(parsed[:initial_population]), else: 20
+        config = parsed |> Map.new() |> Map.put_new(:population_size, size)
+        validate_config(config)
 
+      {:error, error} ->
+        invalid(Exception.message(error))
+    end
+  end
+
+  defp validate_config(config) do
     cond do
-      unknown != [] ->
-        invalid("unknown genetic option #{inspect(hd(unknown))}")
-
-      not positive?(config.population_size) ->
-        invalid("population_size must be positive")
-
-      not non_negative?(config.generations) ->
-        invalid("generations must be nonnegative")
-
-      not rate?(config.mutation_rate) ->
-        invalid("mutation_rate must be between 0 and 1")
-
-      not rate?(config.crossover_rate) ->
-        invalid("crossover_rate must be between 0 and 1")
-
-      not non_negative?(config.elitism) or config.elitism > config.population_size ->
+      config.elitism > config.population_size ->
         invalid("elitism must be between zero and population_size")
 
-      not positive?(config.tournament_size) ->
-        invalid("tournament_size must be positive")
-
-      config.cancel != nil and not is_function(config.cancel, 0) ->
-        invalid("cancel must be a zero-arity function")
+      config.initial_population && length(config.initial_population) != config.population_size ->
+        invalid("initial_population must contain exactly population_size candidates")
 
       true ->
         {:ok, config}
@@ -309,21 +455,12 @@ defmodule Tune.Search.Genetic do
     end
   end
 
-  defp cancelled?(%{config: %{cancel: nil}}), do: false
-  defp cancelled?(%{config: %{cancel: cancel}}), do: cancel.()
-
-  defp remaining_evaluations(state), do: Study.remaining_evaluations(state.study)
-
   defp random(state, operation) do
     {value, study} = Study.random(state.study, operation)
     {value, %{state | study: study}}
   end
 
   defp stop(state, reason), do: %{state | study: Study.stop(state.study, reason)}
-
-  defp positive?(value), do: is_integer(value) and value > 0
-  defp non_negative?(value), do: is_integer(value) and value >= 0
-  defp rate?(value), do: is_number(value) and value >= 0 and value <= 1
 
   defp invalid(message),
     do: {:error, Error.Invalid.Option.exception(option: :genetic, message: message)}

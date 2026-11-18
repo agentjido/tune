@@ -31,31 +31,20 @@ defmodule Tune.Optimizers.BootstrapFewShot do
 
   alias Tune.Optimizers.LabeledFewShot
   alias Tune.Optimizers.Shared
-  alias Tune.Score
   alias Tune.Search.Program.Context
 
-  @options [:accept_score, :max_bootstrapped_demos, :max_labeled_demos, :max_rounds]
+  @options Zoi.keyword(
+             [
+               max_bootstrapped_demos: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(4),
+               max_labeled_demos: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(16),
+               max_rounds: Zoi.integer() |> Zoi.positive() |> Zoi.default(1),
+               accept_score: Zoi.number() |> Zoi.nullable() |> Zoi.default(nil)
+             ],
+             unrecognized_keys: :error
+           )
 
   @impl true
-  def init(opts) do
-    defaults = [
-      max_bootstrapped_demos: 4,
-      max_labeled_demos: 16,
-      max_rounds: 1,
-      accept_score: nil
-    ]
-
-    with {:ok, opts} <- Shared.require_options(opts, @options, defaults),
-         :ok <-
-           Shared.with_checks([
-             fn -> Shared.non_negative(opts, :max_bootstrapped_demos) end,
-             fn -> Shared.non_negative(opts, :max_labeled_demos) end,
-             fn -> Shared.positive(opts, :max_rounds) end,
-             fn -> Shared.number_or_nil(opts, :accept_score) end
-           ]) do
-      {:ok, Map.new(opts)}
-    end
-  end
+  def init(opts), do: Shared.options(@options, opts)
 
   @impl true
   def requirements(_config),
@@ -155,7 +144,9 @@ defmodule Tune.Optimizers.BootstrapFewShot do
 
           state = %{state | attempts: state.attempts + 1}
 
-          case accept(outcome, example, config, ctx) do
+          {acceptance, ctx} = accept(outcome, example, config, ctx)
+
+          case acceptance do
             {:ok, result} ->
               demos = Shared.trajectory_demos(result, names)
 
@@ -181,20 +172,19 @@ defmodule Tune.Optimizers.BootstrapFewShot do
     end)
   end
 
-  defp accept({:ok, result}, example, config, ctx) do
-    case Context.metric(ctx) do
-      nil ->
-        {:ok, result}
+  defp accept({:ok, result}, _example, _config, %Context{scores: []} = ctx),
+    do: {{:ok, result}, ctx}
 
-      %Score{} ->
-        case Context.score(ctx, example, result) do
-          {:ok, %{score: score}} when score >= config.accept_score -> {:ok, result}
-          _ -> :rejected
-        end
+  defp accept({:ok, result}, example, config, ctx) do
+    {outcome, ctx} = Context.score(ctx, example, result)
+
+    case outcome do
+      {:ok, %{score: score}} when score >= config.accept_score -> {{:ok, result}, ctx}
+      _ -> {:rejected, ctx}
     end
   end
 
-  defp accept({:error, _error}, _example, _config, _ctx), do: :rejected
+  defp accept({:error, _error}, _example, _config, ctx), do: {:rejected, ctx}
 
   defp full?(state, config) do
     Enum.all?(state.bootstrapped, fn {_name, demos} ->
@@ -207,7 +197,7 @@ defmodule Tune.Optimizers.BootstrapFewShot do
     LabeledFewShot.build(%{k: config.max_labeled_demos, sample: true}, program, remaining, ctx)
   end
 
-  defp check_accept_score(%{accept_score: nil}, %Context{metric: %Score{}}),
+  defp check_accept_score(%{accept_score: nil}, %Context{scores: [_ | _]}),
     do: Shared.option_error(:accept_score, "is required when a metric is given")
 
   defp check_accept_score(_config, _ctx), do: :ok

@@ -30,6 +30,7 @@ defmodule Tune.Execution do
             deadline: nil,
             scope: [],
             steps: [],
+            responses: [],
             failures: []
 
   @type role :: :target | :teacher | :proposal
@@ -45,6 +46,7 @@ defmodule Tune.Execution do
           deadline: integer() | nil,
           scope: [String.t()],
           steps: [Tune.Step.t()],
+          responses: [map()],
           failures: [Prediction.failure()]
         }
 
@@ -81,15 +83,31 @@ defmodule Tune.Execution do
          {:ok, prepared} <- Predictor.prepare(predictor, inputs, config) do
       execution = count_call(execution)
 
-      with {:ok, response} <- Predictor.execute(prepared, config, remaining_ms(execution)),
-           {:ok, step} <- Predictor.finish(prepared, response) do
-        step = %{step | name: qualified(execution, name), role: execution.role}
-        {:ok, step.outputs, %{execution | steps: [step | execution.steps]}}
-      else
+      case Predictor.execute(prepared, config, remaining_ms(execution)) do
+        {:ok, response} -> finish_step(execution, name, prepared, response, config.model_id)
         {:error, error} -> {:error, error, record_failure(execution, name, error)}
       end
     else
       {:error, error} -> {:error, error, record_failure(execution, name, error)}
+    end
+  end
+
+  defp finish_step(execution, name, prepared, response, model_id) do
+    evidence = %{
+      role: execution.role,
+      model: Prediction.response_model(response, model_id),
+      usage: ReqLLM.Response.usage(response)
+    }
+
+    execution = %{execution | responses: [evidence | execution.responses]}
+
+    case Predictor.finish(prepared, response) do
+      {:ok, step} ->
+        step = %{step | name: qualified(execution, name), role: execution.role}
+        {:ok, step.outputs, %{execution | steps: [step | execution.steps]}}
+
+      {:error, error} ->
+        {:error, error, record_failure(execution, name, error)}
     end
   end
 
@@ -162,7 +180,8 @@ defmodule Tune.Execution do
       output: output,
       steps: Enum.reverse(execution.steps),
       failures: Enum.reverse(execution.failures),
-      calls: execution.calls
+      calls: execution.calls,
+      metadata: %{responses: Enum.reverse(execution.responses)}
     }
   end
 

@@ -3,18 +3,22 @@ defmodule Tune do
   Lazy evaluation and search pipelines for Elixir values and LLM programs.
 
   Start with `new/2`, add declarations, and end with `preview/2`, `evaluate/2`,
-  or `tune/1`. Builder calls only return a new `%Tune{}` value.
+  `tune/1`, or `compare/3`. Builder calls only return a new `%Tune{}` value.
   """
 
   alias Tune.Artifact
+  alias Tune.Comparison
+  alias Tune.Input
+  alias Tune.Limits
   alias Tune.Pipeline.Compiler
-  alias Tune.Program
   alias Tune.Result
   alias Tune.Score
 
   @enforce_keys [:target]
   defstruct target: nil,
             runner: nil,
+            on_progress: nil,
+            cancel: nil,
             data: %{},
             variations: %{},
             scores: [],
@@ -26,7 +30,9 @@ defmodule Tune do
 
   @type t :: %__MODULE__{
           target: term(),
-          runner: function() | nil,
+          runner: function() | :replay | nil,
+          on_progress: (map() -> term()) | nil,
+          cancel: (-> boolean()) | nil,
           data: map(),
           variations: map(),
           scores: [map()],
@@ -37,44 +43,39 @@ defmodule Tune do
           metadata: map()
         }
 
-  @new_options [:run, :model, :teacher, :proposal, :metadata]
+  @options Zoi.keyword(
+             [
+               run: Zoi.function() |> Zoi.nullable(),
+               on_progress: Zoi.function(arity: 1) |> Zoi.nullable(),
+               cancel: Zoi.function(arity: 0) |> Zoi.nullable(),
+               metadata: Zoi.map() |> Zoi.default(%{}),
+               model: Zoi.any(),
+               teacher: Zoi.any(),
+               proposal: Zoi.any()
+             ],
+             unrecognized_keys: :error
+           )
   @data_roles [:train, :validation, :test]
-  @limit_options [
-    :model_calls,
-    :evaluations,
-    :cases,
-    :concurrency,
-    :row_timeout,
-    :row_calls,
-    :deadline,
-    :steps,
-    :seed
-  ]
 
   @doc "Creates a lazy Tune pipeline."
   @spec new(term(), keyword()) :: t()
   def new(target, opts \\ []) when is_list(opts) do
-    ensure_keys!(opts, @new_options, "new")
-    runner = Keyword.get(opts, :run)
-
-    if runner != nil and not is_function(runner) do
-      raise ArgumentError, "the :run option must be a function"
-    end
-
-    metadata = Keyword.get(opts, :metadata, %{})
-
-    if not is_map(metadata) do
-      raise ArgumentError, "the :metadata option must be a map"
-    end
+    parsed =
+      case Input.options(@options, opts, :new, :first) do
+        {:ok, values} -> values
+        {:error, error} -> raise ArgumentError, Exception.message(error)
+      end
 
     %__MODULE__{
       target: target,
-      runner: runner,
+      runner: parsed[:run],
+      on_progress: parsed[:on_progress],
+      cancel: parsed[:cancel],
       models:
         opts
         |> Keyword.take([:model, :teacher, :proposal])
         |> Map.new(),
-      metadata: metadata
+      metadata: parsed[:metadata]
     }
   end
 
@@ -86,6 +87,15 @@ defmodule Tune do
     Enum.each(data, fn {role, source} -> validate_source!(role, source) end)
     %{tune | data: Map.merge(tune.data, data)}
   end
+
+  @doc """
+  Builds an evaluation study from saved rows with `input` and `output` fields.
+
+  Rows may also provide `id` and `expected`. Pass an Enumerable or a zero-arity
+  factory. Score saved output with a function that takes `(case, output)`.
+  """
+  @spec replay(Enumerable.t() | (-> Enumerable.t()), keyword()) :: t()
+  def replay(rows, opts \\ []), do: Tune.Replay.study(rows, opts)
 
   @doc "Declares named values that a search strategy can change."
   @spec vary(t(), keyword() | map()) :: t()
@@ -99,8 +109,15 @@ defmodule Tune do
     %{tune | variations: Map.merge(tune.variations, variations)}
   end
 
-  @doc "Adds one uniquely named score."
-  @spec score(t(), atom(), function() | module(), keyword()) :: t()
+  @doc """
+  Adds one uniquely named score.
+
+  Use `argument: :output` with a two-argument scorer for `(case, output)`.
+  Use `argument: :prediction` for `(case, prediction)` on program runs.
+  The default preserves the existing behavior: a two-argument function or
+  module receives the prediction when available and the output otherwise.
+  """
+  @spec score(t(), atom(), function() | module() | struct(), keyword()) :: t()
   def score(%__MODULE__{} = tune, name, metric, opts \\ [])
       when is_atom(name) and is_list(opts) do
     if Enum.any?(tune.scores, &(&1.name == name)) do
@@ -130,16 +147,19 @@ defmodule Tune do
   @spec search(t(), atom() | module(), keyword()) :: t()
   def search(%__MODULE__{} = tune, strategy, opts \\ [])
       when is_atom(strategy) and is_list(opts) do
+    unless Keyword.keyword?(opts),
+      do: raise(ArgumentError, "search options must be a keyword list")
+
     %{tune | strategy: {strategy, opts}}
   end
 
   @doc "Adds explicit work limits."
   @spec limit(t(), keyword() | map()) :: t()
   def limit(%__MODULE__{} = tune, limits) when is_list(limits) or is_map(limits) do
-    limits = Map.new(limits)
-    ensure_map_keys!(limits, @limit_options, "limit")
-    Enum.each(limits, &validate_limit!/1)
-    %{tune | limits: Map.merge(tune.limits, limits)}
+    case Limits.cast(Map.new(limits)) do
+      {:ok, limits} -> %{tune | limits: Map.merge(tune.limits, limits)}
+      {:error, errors} -> raise ArgumentError, Input.format(errors)
+    end
   end
 
   @doc "Prepares one inspectable prompt without making a model call."
@@ -159,12 +179,24 @@ defmodule Tune do
   @spec tune(t()) :: {:ok, Result.t()} | {:error, Exception.t()}
   def tune(%__MODULE__{} = tune), do: Compiler.tune(tune)
 
+  @doc "Compares the original target and the search winner on an explicit split."
+  @spec compare(t(), Result.t(), keyword()) :: {:ok, Comparison.t()} | {:error, Exception.t()}
+  def compare(%__MODULE__{} = tune, %Result{} = winner, opts) do
+    case opts do
+      [split: split] when split in @data_roles ->
+        Compiler.compare(tune, winner.value, split)
+
+      _ ->
+        {:error, Tune.Error.Invalid.Option.exception(option: :split, message: "choose a split")}
+    end
+  end
+
   @doc "Builds a versioned artifact from a completed tuning result."
   @spec dump(Result.t()) :: {:ok, Artifact.t()} | {:error, Exception.t()}
   def dump(%Result{} = result), do: Artifact.from_result(result)
 
   @doc "Validates an artifact and applies it to fresh application code."
-  @spec load(Artifact.t(), Program.t()) :: {:ok, Program.t()} | {:error, Exception.t()}
+  @spec load(Artifact.t(), term()) :: {:ok, term()} | {:error, Exception.t()}
   def load(%Artifact{} = artifact, fresh_target), do: Artifact.apply(artifact, fresh_target)
 
   defp validate_source!(_role, source) when is_function(source, 0), do: :ok
@@ -174,26 +206,6 @@ defmodule Tune do
       raise ArgumentError, "#{role} data must implement Enumerable or be a zero-arity function"
     end
   end
-
-  defp validate_limit!({key, value}) when key in [:model_calls, :evaluations, :cases, :steps] do
-    if not (is_integer(value) and value >= 0) do
-      raise ArgumentError, "#{key} must be a nonnegative integer"
-    end
-  end
-
-  defp validate_limit!({key, value}) when key in [:concurrency, :row_timeout, :row_calls] do
-    if not (is_integer(value) and value > 0) do
-      raise ArgumentError, "#{key} must be a positive integer"
-    end
-  end
-
-  defp validate_limit!({:deadline, :infinity}), do: :ok
-
-  defp validate_limit!({:deadline, value}) when is_integer(value) and value >= 0, do: :ok
-  defp validate_limit!({:seed, value}) when is_integer(value), do: :ok
-  defp validate_limit!({key, _value}), do: raise(ArgumentError, "invalid #{key} limit")
-
-  defp ensure_keys!(opts, allowed, name), do: ensure_map_keys!(Map.new(opts), allowed, name)
 
   defp ensure_map_keys!(map, allowed, name) do
     case Map.keys(map) -- allowed do

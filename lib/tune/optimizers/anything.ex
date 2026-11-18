@@ -30,28 +30,13 @@ defmodule Tune.Optimizers.Anything do
   alias Tune.Parameter
   alias Tune.Search.Program.Context
 
+  @fields [
+    parameter: Zoi.string() |> Zoi.required(),
+    objective: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil)
+  ]
+
   @impl true
-  def init(opts) do
-    with {:ok, opts} <-
-           Shared.require_options(
-             opts,
-             [:parameter, :objective | Reflective.options()],
-             [parameter: nil, objective: nil] ++ Reflective.defaults()
-           ),
-         :ok <-
-           if(is_binary(opts[:parameter]),
-             do: :ok,
-             else: Shared.option_error(:parameter, "is required")
-           ),
-         :ok <-
-           if(is_nil(opts[:objective]) or is_binary(opts[:objective]),
-             do: :ok,
-             else: Shared.option_error(:objective, "must be text")
-           ),
-         :ok <- Reflective.check(opts) do
-      {:ok, Map.new(opts)}
-    end
-  end
+  def init(opts), do: Shared.options(Reflective.options(@fields), opts)
 
   @impl true
   def requirements(_config),

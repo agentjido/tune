@@ -1,14 +1,14 @@
 defmodule Tune.UI.Registry do
   @moduledoc "Resolves workbench recipe IDs to trusted application modules."
 
-  @built_in Tune.UI.Recipes.StructuredPrompt
+  @built_in [Tune.UI.Recipes.StructuredPrompt, Tune.UI.Recipes.SavedResponses]
 
   @doc "Lists the configured recipe modules."
   @spec all() :: [module()]
   def all do
     configured = Application.get_env(:tune, Tune.UI, []) |> Keyword.get(:recipes, [])
 
-    [@built_in | configured]
+    (@built_in ++ configured)
     |> Enum.uniq()
     |> Enum.filter(&valid?/1)
   end

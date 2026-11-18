@@ -19,18 +19,16 @@ defmodule Tune.Optimizers.LabeledFewShot do
   alias Tune.Optimizers.Shared
   alias Tune.Search.Program.Context
 
+  @options Zoi.keyword(
+             [
+               k: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(16),
+               sample: Zoi.boolean() |> Zoi.default(true)
+             ],
+             unrecognized_keys: :error
+           )
+
   @impl true
-  def init(opts) do
-    with {:ok, opts} <- Shared.require_options(opts, [:k, :sample], k: 16, sample: true),
-         :ok <- Shared.non_negative(opts, :k),
-         :ok <-
-           if(is_boolean(opts[:sample]),
-             do: :ok,
-             else: Shared.option_error(:sample, "must be a boolean")
-           ) do
-      {:ok, Map.new(opts)}
-    end
-  end
+  def init(opts), do: Shared.options(@options, opts)
 
   @impl true
   def requirements(_config),

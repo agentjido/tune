@@ -89,6 +89,22 @@ defmodule Tune.Contracts.ArtifactTest do
     assert first == second
   end
 
+  test "loads a version 1 generic artifact with existing wire keys and values" do
+    json = ~S"""
+    {
+      "version": 1,
+      "target_fingerprint": "6996dda8394e7c86f4d4ea07fbd53ef52c839a20eb413907f99d3b416988769c",
+      "parameters": {"batch_size": 8},
+      "provenance": {"kind": "generic"}
+    }
+    """
+
+    assert {:ok, artifact} = Artifact.decode(json)
+    assert {:ok, %{batch_size: 8}} = Tune.load(artifact, %{batch_size: 1})
+    assert {:ok, encoded} = Artifact.encode(artifact)
+    assert JSON.decode!(json) == JSON.decode!(encoded)
+  end
+
   describe "fingerprints" do
     setup do
       {:ok, base} =

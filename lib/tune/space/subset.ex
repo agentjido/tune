@@ -9,6 +9,14 @@ defmodule Tune.Space.Subset do
 
   @type t :: %__MODULE__{values: [term()], min: non_neg_integer(), max: non_neg_integer()}
 
+  @doc false
+  def new(values) when is_list(values) do
+    values = Enum.uniq(values)
+    {:ok, %__MODULE__{values: values, min: 0, max: length(values)}}
+  end
+
+  def new(_values), do: invalid("subset values must be a list")
+
   @spec new(list(), non_neg_integer(), non_neg_integer()) ::
           {:ok, t()} | {:error, Exception.t()}
   def new(values, min, max)
@@ -29,6 +37,18 @@ defmodule Tune.Space.Subset do
   end
 
   @impl true
+  def mutate(%__MODULE__{min: size, max: size} = space, value, state) do
+    case {value, space.values -- value} do
+      {[_ | _], [_ | _] = available} ->
+        {position, state} = Space.integer(state, length(value))
+        {index, state} = Space.integer(state, length(available))
+        {List.replace_at(value, position, Enum.at(available, index)), state}
+
+      _ ->
+        {value, state}
+    end
+  end
+
   def mutate(space, value, state) do
     missing = Enum.reject(space.values, &(&1 in value))
 

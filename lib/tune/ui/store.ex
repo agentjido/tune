@@ -26,8 +26,9 @@ defmodule Tune.UI.Store do
   @spec get_run(String.t()) :: Run.t() | nil
   def get_run(id), do: GenServer.call(__MODULE__, {:get_run, id})
 
-  @spec create_run(String.t(), :evaluate | :tune) :: {:ok, Run.t()}
-  def create_run(study_id, mode), do: GenServer.call(__MODULE__, {:create_run, study_id, mode})
+  @spec create_run(String.t(), :evaluate | :tune | :compare, map()) :: {:ok, Run.t()}
+  def create_run(study_id, mode, attrs),
+    do: GenServer.call(__MODULE__, {:create_run, study_id, mode, attrs})
 
   @spec update_run(String.t(), map()) :: :ok
   def update_run(id, attrs), do: GenServer.call(__MODULE__, {:update_run, id, attrs})
@@ -74,7 +75,7 @@ defmodule Tune.UI.Store do
   def handle_call({:get_run, id}, _from, state),
     do: {:reply, Map.get(state.runs, id), state}
 
-  def handle_call({:create_run, study_id, mode}, _from, state) do
+  def handle_call({:create_run, study_id, mode, attrs}, _from, state) do
     now = DateTime.utc_now()
 
     run = %Run{
@@ -82,7 +83,9 @@ defmodule Tune.UI.Store do
       study_id: study_id,
       mode: mode,
       status: :queued,
-      inserted_at: now
+      inserted_at: now,
+      source_run_id: attrs[:source_run_id],
+      study_snapshot: attrs[:study_snapshot]
     }
 
     {:reply, {:ok, run}, put_in(state.runs[run.id], run)}

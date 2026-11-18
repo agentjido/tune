@@ -3,67 +3,59 @@ defmodule Tune.Search.Program do
 
   alias Tune
   alias Tune.Case
+  alias Tune.Dataset
   alias Tune.Error
   alias Tune.Result
-  alias Tune.Score
+  alias Tune.Score.Selector
   alias Tune.Search.Program.Context
+  alias Tune.Search.Study
 
   @options [
     :optimizer,
     :trainset,
     :valset,
-    :metric,
-    :failure_score,
     :scores,
     :selector,
     :model,
     :teacher,
     :proposal,
-    :max_model_calls,
-    :seed,
     :max_steps,
-    :timeout,
-    :row_timeout
+    :limits
   ]
 
   @spec run(Tune.Program.t(), keyword()) :: {:ok, Result.t()} | {:error, Exception.t()}
   def run(program, opts) do
-    with :ok <- reject_testset(opts),
-         :ok <- check_keys(opts),
+    limits = Keyword.fetch!(opts, :limits)
+    study = Study.new(limits: limits, seed: Map.get(limits, :seed, 0))
+
+    with :ok <- check_keys(opts),
          {:ok, module, config} <- optimizer(opts),
          requirements = module.requirements(config),
+         scores = Keyword.fetch!(opts, :scores),
+         {:ok, selector} <- selector(scores, opts[:selector], requirements),
+         :ok <- max_calls(limits, requirements, scores),
          {:ok, run_options} <- run_options(opts, requirements),
          {:ok, signature} <- Tune.Program.signature(program),
          {:ok, _parameters} <- Tune.Program.parameters(program),
-         {:ok, metric} <- metric(opts, requirements),
-         {:ok, failure_score} <- failure_score(opts),
-         {:ok, max_calls} <- max_calls(opts, requirements),
-         {:ok, seed} <- seed(opts),
-         {:ok, trainset, duplicates} <- trainset(signature, opts, requirements),
-         {:ok, valset, validation_factory} <- valset(signature, opts, requirements),
+         :ok <- check_start(study),
+         {:ok, trainset, duplicates} <- trainset(signature, opts, requirements, limits),
+         :ok <- check_start(study),
+         {:ok, valset} <- valset(signature, opts, requirements, limits),
+         :ok <- check_start(study),
          :ok <- check_overlap(trainset, valset) do
-      metric =
-        if metric,
-          do: Score.new!(:objective, metric, failure_score: failure_score),
-          else: nil
-
       ctx =
         Context.new(
           optimizer: module,
-          metric: metric,
-          failure_score: failure_score,
-          scores: Keyword.get(opts, :scores, []),
-          selector: Keyword.get(opts, :selector),
+          failure_score: if(selector, do: Selector.failure_score(scores, selector)),
+          scores: scores,
+          selector: selector,
           run_options: run_options,
-          max_model_calls: max_calls,
-          seed: seed,
-          row_timeout: Keyword.get(opts, :row_timeout, 120_000),
-          deadline: Keyword.get(opts, :timeout),
+          study: study,
           trainset: trainset,
-          valset: valset,
-          validation_factory: validation_factory,
-          notes: %{train_duplicates_removed: duplicates, settings: settings(config)}
+          valset: valset
         )
+        |> Context.note(:train_duplicates_removed, duplicates)
+        |> Context.note(:settings, settings(config))
 
       case module.compile(config, program, ctx) do
         {:ok, optimized, ctx} ->
@@ -80,6 +72,24 @@ defmodule Tune.Search.Program do
              report: result(ctx, nil, false)
            )}
       end
+    else
+      {:stopped, reason} ->
+        {:error,
+         Error.Optimization.Failed.exception(
+           message: "optimization stopped before search",
+           cause: Context.limit_error(reason),
+           report: Study.result(Study.stop(study, reason), nil, %{})
+         )}
+
+      {:error, _error} = error ->
+        error
+    end
+  end
+
+  defp check_start(study) do
+    case Study.limit_reason(study) do
+      reason when reason in [:deadline, :cancelled] -> {:stopped, reason}
+      _ -> :ok
     end
   end
 
@@ -139,12 +149,6 @@ defmodule Tune.Search.Program do
     |> Base.encode16(case: :lower)
   end
 
-  defp reject_testset(opts) do
-    if Keyword.has_key?(opts, :testset),
-      do: option_error(:testset, "test data is only accepted by Tune.evaluate/3"),
-      else: :ok
-  end
-
   defp check_keys(opts) do
     case Keyword.keys(opts) -- @options do
       [] -> :ok
@@ -174,7 +178,7 @@ defmodule Tune.Search.Program do
   end
 
   defp run_options(opts, requirements) do
-    run_keys = [:model, :teacher, :proposal, :max_steps, :timeout]
+    run_keys = [:model, :teacher, :proposal, :max_steps]
 
     with {:ok, options} <- Tune.Runtime.normalize_options(Keyword.take(opts, run_keys)) do
       models = Keyword.fetch!(options, :models)
@@ -189,90 +193,60 @@ defmodule Tune.Search.Program do
     end
   end
 
-  defp metric(opts, requirements) do
-    case Keyword.fetch(opts, :metric) do
-      {:ok, metric} when is_function(metric, 2) ->
-        {:ok, metric}
+  defp selector([], _selector, %{metric?: false}), do: {:ok, nil}
+  defp selector(scores, selector, _requirements), do: Selector.compile(scores, selector)
 
-      {:ok, metric} ->
-        option_error(:metric, "must be a 2-arity function, got: #{inspect(metric)}")
-
-      :error ->
-        if Map.get(requirements, :metric?, true),
-          do: option_error(:metric, "is required"),
-          else: {:ok, nil}
-    end
+  defp max_calls(limits, requirements, scores) do
+    if (requirements.model_calls? or Enum.any?(scores, &Tune.Score.model_calls?/1)) and
+         is_nil(limits[:model_calls]),
+       do:
+         option_error(:model_calls, "a model call limit is required for search with model calls"),
+       else: :ok
   end
 
-  defp failure_score(opts) do
-    case Keyword.get(opts, :failure_score) do
-      nil -> {:ok, nil}
-      score when is_number(score) -> {:ok, score}
-      _ -> option_error(:failure_score, "must be a number")
-    end
-  end
-
-  defp max_calls(opts, requirements) do
-    case {Keyword.get(opts, :max_model_calls), requirements.model_calls?} do
-      {nil, true} ->
-        option_error(:max_model_calls, "is required for an optimizer that calls models")
-
-      {nil, false} ->
-        {:ok, nil}
-
-      {value, _} when is_integer(value) and value >= 0 ->
-        {:ok, value}
-
-      _ ->
-        option_error(:max_model_calls, "must be a nonnegative integer")
-    end
-  end
-
-  defp seed(opts) do
-    case Keyword.get(opts, :seed, 0) do
-      seed when is_integer(seed) -> {:ok, seed}
-      _ -> option_error(:seed, "must be an integer")
-    end
-  end
-
-  defp trainset(signature, opts, requirements) do
+  defp trainset(signature, opts, requirements, limits) do
     case Keyword.get(opts, :trainset) do
       nil ->
         if :train in requirements.datasets,
           do: option_error(:trainset, "is required"),
           else: {:ok, [], 0}
 
-      rows ->
-        with {:ok, examples} <- Case.normalize_all(signature, rows) do
+      factory ->
+        with {:ok, examples} <- snapshot(signature, factory, limits, :train) do
           unique =
             Enum.uniq_by(examples, &{Case.input_key(&1), Tune.CanonicalJSON.encode!(&1.expected)})
 
+          Dataset.report(limits, :train, :effective, unique)
           {:ok, unique, length(examples) - length(unique)}
         end
     end
   end
 
-  defp valset(signature, opts, requirements) do
-    case Keyword.get(opts, :valset) do
-      nil ->
+  defp valset(signature, opts, requirements, limits) do
+    case Keyword.fetch(opts, :valset) do
+      :error ->
         if :val in requirements.datasets,
           do: option_error(:valset, "is required; there is no automatic split"),
-          else: {:ok, [], fn -> [] end}
+          else: {:ok, []}
 
-      rows ->
-        factory = if is_function(rows, 0), do: rows, else: fn -> rows end
-
-        with {:ok, examples} <- Case.normalize_all(signature, factory.()) do
-          validation_factory = fn ->
-            case Case.normalize_all(signature, factory.()) do
-              {:ok, cases} -> cases
-              {:error, error} -> raise error
-            end
-          end
-
-          {:ok, examples, validation_factory}
+      {:ok, factory} ->
+        with {:ok, cases} <- snapshot(signature, factory, limits, :validation) do
+          Dataset.report(limits, :validation, :effective, cases)
+          {:ok, cases}
         end
     end
+  end
+
+  defp snapshot(_signature, _factory, %{cases: 0} = limits, role) do
+    Dataset.report(limits, role, :source, [])
+    {:ok, []}
+  end
+
+  defp snapshot(signature, factory, limits, role) do
+    rows = factory.() |> Dataset.prefix(limits[:cases]) |> Dataset.capture_source(limits, role)
+    Case.normalize_all(signature, rows)
+  rescue
+    error -> option_error(:data, "could not read data: #{Exception.message(error)}")
   end
 
   defp check_overlap(trainset, valset) do

@@ -35,6 +35,36 @@ defmodule Tune.Prediction do
   def step_usage(%__MODULE__{steps: steps}),
     do: Enum.map(steps, &ReqLLM.Response.usage(&1.response))
 
+  @doc false
+  def successful_models(%__MODULE__{metadata: %{responses: responses}}) do
+    for %{model: model, role: role} <- responses,
+        is_binary(model),
+        do: %{role: role, model: model}
+  end
+
+  def successful_models(%__MODULE__{steps: steps}) do
+    for step <- steps,
+        model = response_model(step.response, nil),
+        not is_nil(model),
+        do: %{role: step.role || :target, model: model}
+  end
+
+  def successful_models(nil), do: []
+
+  @doc false
+  def response_model(%ReqLLM.Response{error: nil, model: model}, configured)
+      when is_binary(model) and model != "" do
+    with id when is_binary(id) <- configured,
+         [provider, _id] <- String.split(id, ":", parts: 2),
+         false <- String.starts_with?(model, provider <> ":") do
+      provider <> ":" <> model
+    else
+      _ -> model
+    end
+  end
+
+  def response_model(_response, _configured), do: nil
+
   @doc "Sums provider-reported token use across all steps."
   @spec token_totals(t()) :: %{
           input: non_neg_integer(),
@@ -42,16 +72,31 @@ defmodule Tune.Prediction do
           total: non_neg_integer()
         }
   def token_totals(%__MODULE__{} = prediction) do
-    prediction
-    |> step_usage()
-    |> Enum.reduce(%{input: 0, output: 0, total: 0}, fn usage, acc ->
-      usage = usage || %{}
+    {tokens, _cost} = prediction |> call_usage() |> usage_totals()
+    tokens
+  end
 
-      %{
-        input: acc.input + token(usage, :input_tokens),
-        output: acc.output + token(usage, :output_tokens),
-        total: acc.total + token(usage, :total_tokens)
+  @doc false
+  def call_usage(%__MODULE__{metadata: %{responses: responses}}),
+    do: Enum.map(responses, & &1.usage)
+
+  def call_usage(%__MODULE__{} = prediction), do: step_usage(prediction)
+  def call_usage(nil), do: []
+
+  @doc false
+  def usage_totals(usages) do
+    Enum.reduce(usages, {%{input: 0, output: 0, total: 0}, nil}, fn usage, {tokens, cost} ->
+      usage = usage || %{}
+      amount = Map.get(usage, :total_cost) || Map.get(usage, "total_cost")
+
+      tokens = %{
+        input: tokens.input + token(usage, :input_tokens),
+        output: tokens.output + token(usage, :output_tokens),
+        total: tokens.total + token(usage, :total_tokens)
       }
+
+      cost = if is_number(amount), do: (cost || 0) + amount, else: cost
+      {tokens, cost}
     end)
   end
 

@@ -25,22 +25,29 @@ defmodule Tune.Examples.LazyStructuredPrompt do
     validation =
       QAWorld.rows([{"Which gas do plants absorb?", "plants", "carbon dioxide"}])
 
+    test =
+      QAWorld.rows([
+        {"What is the largest ocean?", "ocean", "Pacific"},
+        {"What is the capital of Japan?", "japan", "Tokyo"},
+        {"What is the closest star?", "star", "Sun"}
+      ])
+
     {:ok, target} = target_model()
     {:ok, teacher} = teacher_model()
 
-    answer_score = fn example, result ->
-      if result.output["answer"] == example.expected["answer"], do: 1.0, else: 0.0
+    answer_score = fn example, output ->
+      if output["answer"] == example.expected["answer"], do: 1.0, else: 0.0
     end
 
-    citation_score = fn example, result ->
-      if result.output["sources"] == example.expected["sources"], do: 1.0, else: 0.0
+    citation_score = fn example, output ->
+      if output["sources"] == example.expected["sources"], do: 1.0, else: 0.0
     end
 
     pipeline =
       Tune.new(GroundedQA.new(), model: target, teacher: teacher)
-      |> Tune.data(train: train, validation: validation)
-      |> Tune.score(:answer, answer_score, range: {0.0, 1.0})
-      |> Tune.score(:citations, citation_score, range: {0.0, 1.0})
+      |> Tune.data(train: train, validation: validation, test: test)
+      |> Tune.score(:answer, answer_score, argument: :output, range: {0.0, 1.0})
+      |> Tune.score(:citations, citation_score, argument: :output, range: {0.0, 1.0})
       |> Tune.select(weighted: [answer: 0.8, citations: 0.2])
       |> Tune.search(:bootstrap_few_shot_random_search,
         accept_score: 1.0,
@@ -50,41 +57,28 @@ defmodule Tune.Examples.LazyStructuredPrompt do
       )
       |> Tune.limit(model_calls: 64)
 
-    {:ok, baseline} =
-      GroundedQA.new()
-      |> evaluation_pipeline(target, validation, answer_score, citation_score)
-      |> Tune.evaluate()
+    {:ok, winner} = Tune.tune(pipeline)
+    {:ok, comparison} = Tune.compare(pipeline, winner, split: :test)
+    answer = comparison.metrics.answer
 
-    {:ok, result} = Tune.tune(pipeline)
-    optimized = result.value
+    IO.puts("Test answer accuracy: #{answer.baseline_mean} -> #{answer.challenger_mean}")
 
-    {:ok, evaluated} =
-      optimized
-      |> evaluation_pipeline(target, validation, answer_score, citation_score)
-      |> Tune.evaluate()
+    IO.puts(
+      "Answer rows: #{answer.counts.improved} improved, #{answer.counts.regressed} regressed"
+    )
 
-    IO.puts("Configured scores: answer, citations")
-    IO.puts("Validation score: #{baseline.selected_score} -> #{evaluated.selected_score}")
-    IO.puts("Learned answer demonstrations: #{length(optimized.answer.demos)}")
+    IO.puts(
+      "Model calls: #{comparison.baseline.calls.target} -> #{comparison.challenger.calls.target}"
+    )
 
-    print_answer_prompt(optimized, evaluated, target)
-  end
-
-  defp evaluation_pipeline(program, target, validation, answer_score, citation_score) do
-    program
-    |> Tune.new(model: target)
-    |> Tune.data(test: validation)
-    |> Tune.score(:answer, answer_score, range: {0.0, 1.0})
-    |> Tune.score(:citations, citation_score, range: {0.0, 1.0})
-    |> Tune.select(weighted: [answer: 0.8, citations: 0.2])
-    |> Tune.limit(model_calls: 4)
+    print_answer_prompt(winner.value, comparison.challenger, target)
   end
 
   defp target_model do
     stub =
       QAWorld.stub(
         quality: fn _prompt, answer, body ->
-          if QAWorld.demos?(body), do: answer, else: "unsure"
+          if QAWorld.demos?(body) != (answer == "Sun"), do: answer, else: "unsure"
         end
       )
 
@@ -104,7 +98,7 @@ defmodule Tune.Examples.LazyStructuredPrompt do
   end
 
   defp print_answer_prompt(optimized, evaluated, target) do
-    [observation] = evaluated.observations
+    [observation | _] = evaluated.observations
     answer_step = Enum.find(observation.prediction.steps, &(&1.name == "answer"))
     {:ok, prepared} = Predictor.prepare(optimized.answer, answer_step.inputs, target)
 

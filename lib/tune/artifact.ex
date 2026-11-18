@@ -5,6 +5,7 @@ defmodule Tune.Artifact do
   alias Tune.Artifact.Program
   alias Tune.CanonicalJSON
   alias Tune.Error
+  alias Tune.Input
   alias Tune.ModelConfig
   alias Tune.Result
 
@@ -29,6 +30,11 @@ defmodule Tune.Artifact do
   @keys ["version", "target_fingerprint", "parameters", "provenance"]
   @max_bytes 5_000_000
   @max_entries 1_000
+  @decode_limit Zoi.union([Zoi.integer() |> Zoi.gte(0), Zoi.literal(:infinity)])
+  @decode_options Zoi.keyword(
+                    max_bytes: @decode_limit |> Zoi.default(@max_bytes),
+                    max_entries: @decode_limit |> Zoi.default(@max_entries)
+                  )
   @provenance_keys [
     "kind",
     "source",
@@ -46,20 +52,23 @@ defmodule Tune.Artifact do
 
   @doc "Builds and validates an artifact from data."
   @spec new(map()) :: {:ok, t()} | {:error, Exception.t()}
-  def new(attrs) when is_map(attrs) do
-    value = struct(__MODULE__, attrs)
-
-    with {:ok, artifact} <- parse(value),
-         :ok <- validate_version(artifact),
-         :ok <- validate_provenance(artifact.provenance),
-         :ok <- validate_parameters(artifact) do
-      {:ok, artifact}
-    end
-  end
+  def new(attrs) when is_map(attrs), do: validate_artifact(struct(__MODULE__, attrs))
 
   @doc "Builds one artifact from a completed tuning result."
   @spec from_result(Result.t()) :: {:ok, t()} | {:error, Exception.t()}
-  def from_result(%Result{metadata: %{strategy: :genetic}} = result) do
+  def from_result(%Result{metadata: %{strategy: :genetic, genome?: true}} = result) do
+    with {:ok, parameters} <- Generic.project(result.parameters) do
+      new(%{
+        version: @version,
+        target_fingerprint: Generic.genome_fingerprint(result.value),
+        parameters: parameters,
+        provenance: provenance(source: "Tune.tune/1", report: result, kind: "genome")
+      })
+    end
+  end
+
+  def from_result(%Result{metadata: %{strategy: strategy}} = result)
+      when strategy in [:genetic, :grid] do
     with {:ok, parameters} <- Generic.project(result.parameters) do
       new(%{
         version: @version,
@@ -113,11 +122,7 @@ defmodule Tune.Artifact do
   @doc "Validates an artifact."
   @spec validate(t()) :: :ok | {:error, Exception.t()}
   def validate(%__MODULE__{} = artifact) do
-    with {:ok, _artifact} <- parse(artifact),
-         :ok <- validate_version(artifact),
-         :ok <- validate_provenance(artifact.provenance) do
-      validate_parameters(artifact)
-    end
+    with {:ok, _artifact} <- validate_artifact(artifact), do: :ok
   end
 
   @doc "Encodes a validated artifact as canonical JSON."
@@ -131,34 +136,31 @@ defmodule Tune.Artifact do
   @doc "Decodes and validates a JSON artifact."
   @spec decode(String.t(), keyword()) :: {:ok, t()} | {:error, Exception.t()}
   def decode(json, opts \\ []) when is_binary(json) do
-    max_bytes = Keyword.get(opts, :max_bytes, @max_bytes)
-    max_entries = Keyword.get(opts, :max_entries, @max_entries)
-
-    with :ok <- check(byte_size(json) <= max_bytes, "artifact is larger than #{max_bytes} bytes"),
+    with {:ok, opts} <- Input.options(@decode_options, opts, :artifact, :first),
+         :ok <- check_size(json, opts[:max_bytes]),
          {:ok, data} <- json(json),
          :ok <- validate_keys(data),
-         :ok <-
-           check(
-             is_map(data["parameters"]) and map_size(data["parameters"]) <= max_entries,
-             "artifact has more than #{max_entries} parameters"
-           ) do
-      new(%{
-        version: data["version"],
-        target_fingerprint: data["target_fingerprint"],
-        parameters: data["parameters"],
-        provenance: data["provenance"]
-      })
+         :ok <- check_entries(data["parameters"], opts[:max_entries]) do
+      new(Input.fields(data, [:version, :target_fingerprint, :parameters, :provenance]))
     end
   end
 
   @doc "Validates and applies an artifact to fresh application code."
   @spec apply(t(), term()) :: {:ok, term()} | {:error, Exception.t()}
   def apply(%__MODULE__{} = artifact, fresh_target) do
-    with :ok <- validate(artifact) do
+    with {:ok, artifact} <- validate_artifact(artifact) do
       case artifact.provenance["kind"] do
-        "program" -> apply_program(artifact, fresh_target)
-        "generic" -> Generic.apply(fresh_target, artifact.parameters, artifact.target_fingerprint)
-        _ -> invalid("artifact provenance needs a known kind")
+        "program" ->
+          apply_program(artifact, fresh_target)
+
+        "generic" ->
+          Generic.apply(fresh_target, artifact.parameters, artifact.target_fingerprint)
+
+        "genome" ->
+          Generic.apply_genome(fresh_target, artifact.parameters, artifact.target_fingerprint)
+
+        _ ->
+          invalid("artifact provenance needs a known kind")
       end
     end
   end
@@ -184,7 +186,7 @@ defmodule Tune.Artifact do
   defp apply_program(artifact, fresh_target) do
     with {:ok, fingerprint} <- Program.target_fingerprint(fresh_target),
          true <- fingerprint == artifact.target_fingerprint,
-         {:ok, updated} <- Program.apply(fresh_target, artifact.parameters) do
+         {:ok, updated} <- Program.apply_validated(fresh_target, artifact.parameters) do
       {:ok, updated}
     else
       false -> invalid("artifact was learned for a different program contract")
@@ -192,10 +194,27 @@ defmodule Tune.Artifact do
     end
   end
 
+  defp validate_artifact(value) do
+    with {:ok, artifact} <- Input.definition(@schema, value, "invalid Tune artifact"),
+         :ok <- validate_version(artifact),
+         :ok <- validate_provenance(artifact.provenance),
+         :ok <- validate_parameters(artifact) do
+      {:ok, artifact}
+    end
+  end
+
   defp validate_parameters(%__MODULE__{provenance: %{"kind" => "program"}, parameters: entries}),
     do: Program.validate_entries(entries)
 
   defp validate_parameters(%__MODULE__{provenance: %{"kind" => "generic"}}), do: :ok
+
+  defp validate_parameters(%__MODULE__{provenance: %{"kind" => "genome"}, parameters: parameters}) do
+    check(
+      match?(%{"genome" => _}, parameters) and map_size(parameters) == 1,
+      "a genome artifact requires one genome value"
+    )
+  end
+
   defp validate_parameters(_artifact), do: invalid("artifact provenance needs a known kind")
 
   defp validate_version(%__MODULE__{version: @version}), do: :ok
@@ -203,30 +222,10 @@ defmodule Tune.Artifact do
   defp validate_version(%__MODULE__{version: version}),
     do: invalid("unsupported version #{inspect(version)}")
 
-  defp validate_provenance(provenance) when is_map(provenance) do
-    keys = Map.keys(provenance)
-
-    cond do
-      Enum.any?(keys, &(not is_binary(&1))) ->
-        invalid("artifact provenance keys must be strings")
-
-      keys -- @provenance_keys != [] ->
-        invalid("unknown provenance fields: #{inspect(keys -- @provenance_keys)}")
-
-      not json_safe?(provenance) ->
-        invalid("provenance must contain only JSON data")
-
-      true ->
-        :ok
-    end
-  end
-
-  defp validate_provenance(_provenance), do: invalid("artifact provenance must be an object")
-
-  defp parse(value) do
-    case Zoi.parse(@schema, value) do
-      {:ok, artifact} -> {:ok, artifact}
-      {:error, errors} -> invalid("invalid Tune artifact", errors)
+  defp validate_provenance(provenance) do
+    case Map.keys(provenance) -- @provenance_keys do
+      [] -> :ok
+      unknown -> invalid("unknown provenance fields: #{inspect(unknown)}")
     end
   end
 
@@ -252,6 +251,14 @@ defmodule Tune.Artifact do
       do: :ok,
       else: invalid("artifact has unknown or missing fields", Map.keys(data))
   end
+
+  defp check_size(json, limit),
+    do: check(byte_size(json) <= limit, "artifact is larger than #{limit} bytes")
+
+  defp check_entries(entries, limit) when is_map(entries),
+    do: check(map_size(entries) <= limit, "artifact has more than #{limit} parameters")
+
+  defp check_entries(_entries, _limit), do: :ok
 
   defp describe_models(models) do
     Map.new(models, fn
@@ -288,17 +295,6 @@ defmodule Tune.Artifact do
       "usage" => Map.new(result.usage, fn {key, value} -> {to_string(key), value} end)
     }
   end
-
-  defp json_safe?(value) when is_map(value) and not is_struct(value),
-    do: Enum.all?(value, fn {key, item} -> is_binary(key) and json_safe?(item) end)
-
-  defp json_safe?(value) when is_list(value), do: Enum.all?(value, &json_safe?/1)
-
-  defp json_safe?(value)
-       when is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value),
-       do: true
-
-  defp json_safe?(_value), do: false
 
   defp check(true, _message), do: :ok
   defp check(false, message), do: invalid(message)

@@ -1,0 +1,2 @@
+{"id":"paris","user_input":"Where is Paris?","response":"Paris is in France.","retrieved_contexts":["Paris is the capital of France."],"reference":"France"}
+{"id":"rome","user_input":"Where is Rome?","response":"Rome is in Italy.","retrieved_contexts":["Rome is the capital of Italy."],"reference":"Italy"}

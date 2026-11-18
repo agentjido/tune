@@ -2,6 +2,8 @@ defmodule Tune.UI.Recipes.StructuredPrompt do
   @moduledoc "A UI-authored single-predictor Tune recipe."
   @behaviour Tune.UI.Recipe
 
+  alias Tune.Input
+  alias Tune.Limits
   alias Tune.UI.Study
 
   @strategies %{
@@ -27,6 +29,25 @@ defmodule Tune.UI.Recipes.StructuredPrompt do
     "json" => Tune.Adapter.JSON,
     "xml" => Tune.Adapter.XML
   }
+
+  @config_schema Zoi.map(%{
+                   "instructions" => Zoi.string() |> Zoi.nullable(),
+                   "input_name" => Input.nonblank_string(),
+                   "output_name" => Input.nonblank_string(),
+                   "output_type" => Zoi.enum(~w(string integer float boolean)),
+                   "model" => Zoi.string(),
+                   "teacher_model" => Zoi.string() |> Zoi.nullable(),
+                   "proposal_model" => Zoi.string() |> Zoi.nullable(),
+                   "adapter" => Zoi.enum(Map.keys(@adapters)),
+                   "strategy" => Zoi.enum(Map.keys(@strategies)),
+                   "strategy_options" => Zoi.map() |> Zoi.nullable(),
+                   "limits" => Zoi.map() |> Zoi.nullable()
+                 })
+  @row_schema Zoi.map(%{
+                inputs: Zoi.map(),
+                labels: Zoi.map() |> Zoi.nullable() |> Zoi.optional(),
+                id: Zoi.string() |> Zoi.nullable() |> Zoi.optional()
+              })
 
   @impl true
   def id, do: "structured_prompt"
@@ -55,15 +76,43 @@ defmodule Tune.UI.Recipes.StructuredPrompt do
   end
 
   @impl true
-  def build(%Study{} = study) do
-    config = Map.merge(default_config(), study.config)
+  def normalize_config(config) do
+    with {:ok, config} <-
+           Input.definition(
+             @config_schema,
+             Map.merge(default_config(), config),
+             "prompt settings"
+           ),
+         {:ok, limits} <- Limits.workbench(config["limits"] || %{}),
+         {:ok, options} <- strategy_options(config["strategy_options"] || %{}) do
+      {:ok,
+       config
+       |> Map.update!("input_name", &String.trim/1)
+       |> Map.update!("output_name", &String.trim/1)
+       |> Map.put("strategy_options", options)
+       |> Map.put("limits", limits)}
+    end
+  end
 
-    with {:ok, input_name} <- field_name(config["input_name"], "input"),
-         {:ok, output_name} <- field_name(config["output_name"], "output"),
-         {:ok, schema} <- output_schema(config["output_type"]),
-         {:ok, adapter} <- adapter(config["adapter"]),
-         {:ok, strategy} <- strategy(config["strategy"]),
-         {:ok, predictor} <-
+  @impl true
+  def normalize_data(data) do
+    Enum.reduce_while(data, {:ok, %{}}, fn {split, rows}, {:ok, acc} ->
+      case Tune.UI.RecipeInput.rows(rows, split, &normalize_row/1) do
+        {:ok, values} -> {:cont, {:ok, Map.put(acc, split, values)}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  @impl true
+  def build(%Study{config: config} = study) do
+    input_name = config["input_name"]
+    output_name = config["output_name"]
+    schema = output_schema(config["output_type"])
+    adapter = Map.fetch!(@adapters, config["adapter"])
+    strategy = Map.fetch!(@strategies, config["strategy"])
+
+    with {:ok, predictor} <-
            Tune.Predictor.new(
              signature: [
                instructions: config["instructions"],
@@ -75,15 +124,21 @@ defmodule Tune.UI.Recipes.StructuredPrompt do
         predictor
         |> Tune.new(model_options(config, adapter))
         |> put_data(study.data)
-        |> Tune.score(:exact_match, score(output_name), range: {0.0, 1.0})
-        |> Tune.search(strategy, option_list(config["strategy_options"]))
-        |> Tune.limit(limit_map(config["limits"]))
+        |> Tune.score(:exact_match, score(output_name), argument: :output, range: {0.0, 1.0})
+        |> Tune.search(strategy, Map.to_list(config["strategy_options"]))
 
-      {:ok, pipeline}
+      {:ok, %{pipeline | limits: config["limits"]}}
     end
   rescue
     error -> {:error, error}
   end
+
+  defp normalize_row(%{} = row) do
+    row = Input.fields(row, [:inputs, :labels, :id])
+    Input.definition(@row_schema, row, "prompt row")
+  end
+
+  defp normalize_row(row), do: Input.definition(@row_schema, row, "prompt row")
 
   @impl true
   def preview_input(%Study{} = study) do
@@ -92,8 +147,7 @@ defmodule Tune.UI.Recipes.StructuredPrompt do
     |> Enum.find(&(&1 != []))
     |> case do
       [row | _] ->
-        inputs = Map.get(row, "inputs", Map.get(row, :inputs))
-        if is_map(inputs), do: {:ok, inputs}, else: invalid("preview row has no inputs map")
+        {:ok, row.inputs}
 
       nil ->
         invalid("add at least one data row before preview")
@@ -105,6 +159,9 @@ defmodule Tune.UI.Recipes.StructuredPrompt do
     |> put_model(:teacher, config["teacher_model"], adapter)
     |> put_model(:proposal, config["proposal_model"], adapter)
   end
+
+  defp model(id, Tune.Adapter.JSON),
+    do: [model: id, adapter: Tune.Adapter.JSON, adapter_options: [mode: :text]]
 
   defp model(id, adapter), do: [model: id, adapter: adapter]
 
@@ -131,52 +188,25 @@ defmodule Tune.UI.Recipes.StructuredPrompt do
   end
 
   defp score(output_name) do
-    fn example, prediction ->
-      if prediction.output[output_name] == example.expected[output_name], do: 1.0, else: 0.0
+    fn example, output ->
+      if output[output_name] == example.expected[output_name], do: 1.0, else: 0.0
     end
   end
 
-  defp field_name(value, label) when is_binary(value) do
-    value = String.trim(value)
-    if value == "", do: invalid("#{label} field name is required"), else: {:ok, value}
+  defp output_schema("string"), do: Zoi.string()
+  defp output_schema("integer"), do: Zoi.integer()
+  defp output_schema("float"), do: Zoi.float()
+  defp output_schema("boolean"), do: Zoi.boolean()
+
+  defp strategy_options(options) do
+    {:ok, Map.new(options, fn {key, value} -> {existing_atom(key), value} end)}
+  rescue
+    ArgumentError -> invalid("unknown strategy option")
   end
-
-  defp field_name(_value, label), do: invalid("#{label} field name must be text")
-
-  defp output_schema("string"), do: {:ok, Zoi.string()}
-  defp output_schema("integer"), do: {:ok, Zoi.integer()}
-  defp output_schema("float"), do: {:ok, Zoi.float()}
-  defp output_schema("boolean"), do: {:ok, Zoi.boolean()}
-  defp output_schema(value), do: invalid("unknown output type #{inspect(value)}")
-
-  defp adapter(value) do
-    case Map.fetch(@adapters, value) do
-      {:ok, module} -> {:ok, module}
-      :error -> invalid("unknown adapter #{inspect(value)}")
-    end
-  end
-
-  defp strategy(value) do
-    case Map.fetch(@strategies, value) do
-      {:ok, name} -> {:ok, name}
-      :error -> invalid("unknown search strategy #{inspect(value)}")
-    end
-  end
-
-  defp option_list(options) when is_map(options) do
-    Enum.map(options, fn {key, value} -> {existing_atom(key), value} end)
-  end
-
-  defp option_list(_options), do: []
-
-  defp limit_map(limits) when is_map(limits) do
-    Map.new(limits, fn {key, value} -> {existing_atom(key), value} end)
-  end
-
-  defp limit_map(_limits), do: %{}
 
   defp existing_atom(value) when is_atom(value), do: value
   defp existing_atom(value) when is_binary(value), do: String.to_existing_atom(value)
+  defp existing_atom(_value), do: raise(ArgumentError)
 
   defp rows_in_order(data),
     do: Enum.map([:test, :validation, :train], &Map.get(data, &1, []))

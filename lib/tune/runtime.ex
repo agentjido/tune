@@ -3,12 +3,26 @@ defmodule Tune.Runtime do
 
   alias Tune.Error
   alias Tune.Execution
+  alias Tune.Input
   alias Tune.ModelConfig
   alias Tune.Prediction
   alias Tune.Program
   alias Tune.Signature
 
-  @run_options [:model, :teacher, :proposal, :role, :max_model_calls, :max_steps, :timeout]
+  @run_options Zoi.keyword(
+                 [
+                   model: Zoi.any() |> Zoi.required(),
+                   teacher: Zoi.any() |> Zoi.optional(),
+                   proposal: Zoi.any() |> Zoi.optional(),
+                   role: Zoi.enum(Execution.roles()) |> Zoi.default(:target),
+                   max_model_calls: Zoi.integer() |> Zoi.gte(0) |> Zoi.nullable(),
+                   max_steps: Zoi.integer() |> Zoi.positive() |> Zoi.nullable(),
+                   timeout:
+                     Zoi.union([Zoi.integer() |> Zoi.gte(0), Zoi.literal(:infinity)])
+                     |> Zoi.default(60_000)
+                 ],
+                 unrecognized_keys: :error
+               )
 
   @spec run(Program.t(), map(), keyword()) ::
           {:ok, Prediction.t()} | {:error, Exception.t()}
@@ -49,19 +63,16 @@ defmodule Tune.Runtime do
 
   @spec normalize_options(keyword()) :: {:ok, keyword()} | {:error, Exception.t()}
   def normalize_options(opts) do
-    with :ok <- check_keys(opts),
+    with {:ok, opts} <- Input.options(@run_options, opts, :run, :first),
          {:ok, models} <- models(opts),
-         {:ok, role} <- role(opts, models),
-         {:ok, max_calls} <- optional_count(opts, :max_model_calls, 0),
-         {:ok, max_steps} <- optional_count(opts, :max_steps, 1),
-         {:ok, timeout} <- timeout(opts) do
+         :ok <- check_role(opts[:role], models) do
       {:ok,
        [
          models: models,
-         role: role,
-         max_model_calls: max_calls,
-         max_steps: max_steps || 32,
-         timeout: timeout
+         role: opts[:role],
+         max_model_calls: opts[:max_model_calls],
+         max_steps: opts[:max_steps] || 32,
+         timeout: opts[:timeout]
        ]}
     end
   end
@@ -88,13 +99,6 @@ defmodule Tune.Runtime do
     end
   end
 
-  defp check_keys(opts) do
-    case Keyword.keys(opts) -- @run_options do
-      [] -> :ok
-      [key | _] -> option_error(key, "unknown run option")
-    end
-  end
-
   defp models(opts) do
     Enum.reduce_while(Execution.roles(), {:ok, %{}}, fn role, {:ok, acc} ->
       key = if role == :target, do: :model, else: role
@@ -110,43 +114,12 @@ defmodule Tune.Runtime do
           {:cont, {:ok, acc}}
       end
     end)
-    |> then(fn
-      {:ok, models} when is_map_key(models, :target) -> {:ok, models}
-      {:ok, _} -> option_error(:model, "is required")
-      error -> error
-    end)
   end
 
-  defp role(opts, models) do
-    role = Keyword.get(opts, :role, :target)
+  defp check_role(role, models) when is_map_key(models, role), do: :ok
 
-    cond do
-      role not in Execution.roles() ->
-        option_error(:role, "must be one of #{inspect(Execution.roles())}")
-
-      not Map.has_key?(models, role) ->
-        option_error(:role, "no model configuration for #{inspect(role)}")
-
-      true ->
-        {:ok, role}
-    end
-  end
-
-  defp optional_count(opts, key, min) do
-    case Keyword.get(opts, key) do
-      nil -> {:ok, nil}
-      value when is_integer(value) and value >= min -> {:ok, value}
-      _ -> option_error(key, "must be an integer >= #{min}")
-    end
-  end
-
-  defp timeout(opts) do
-    case Keyword.get(opts, :timeout, 60_000) do
-      :infinity -> {:ok, :infinity}
-      value when is_integer(value) and value >= 0 -> {:ok, value}
-      _ -> option_error(:timeout, "must be a nonnegative integer or :infinity")
-    end
-  end
+  defp check_role(role, _models),
+    do: option_error(:role, "no model configuration for #{inspect(role)}")
 
   defp option_error(option, message),
     do: {:error, Error.Invalid.Option.exception(option: option, message: message)}

@@ -38,41 +38,24 @@ defmodule Tune.Optimizers.MIPROv2 do
   alias Tune.Optimizers.TPE
   alias Tune.Search.Program.Context
 
-  @own [
-    :num_candidates,
-    :num_trials,
-    :minibatch_size,
-    :minibatch_full_eval_steps,
-    :n_startup,
-    :evidence_examples
+  @fields [
+    num_candidates: Zoi.integer() |> Zoi.positive() |> Zoi.default(4),
+    num_trials: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(12),
+    minibatch_size: Zoi.integer() |> Zoi.positive() |> Zoi.default(4),
+    minibatch_full_eval_steps: Zoi.integer() |> Zoi.positive() |> Zoi.default(4),
+    n_startup: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(4),
+    evidence_examples: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(3)
   ]
+  @options Zoi.keyword(@fields, unrecognized_keys: :error)
 
   @impl true
   def init(opts) do
-    {own, boot} = Keyword.split(opts, @own)
+    {own, boot} = Keyword.split(opts, Keyword.keys(@fields))
 
-    defaults = [
-      num_candidates: 4,
-      num_trials: 12,
-      minibatch_size: 4,
-      minibatch_full_eval_steps: 4,
-      n_startup: 4,
-      evidence_examples: 3
-    ]
-
-    with {:ok, own} <- Shared.require_options(own, @own, defaults),
-         :ok <-
-           Shared.with_checks([
-             fn -> Shared.positive(own, :num_candidates) end,
-             fn -> Shared.non_negative(own, :num_trials) end,
-             fn -> Shared.positive(own, :minibatch_size) end,
-             fn -> Shared.positive(own, :minibatch_full_eval_steps) end,
-             fn -> Shared.non_negative(own, :n_startup) end,
-             fn -> Shared.non_negative(own, :evidence_examples) end
-           ]),
+    with {:ok, own} <- Shared.options(@options, own),
          {:ok, boot} <- BootstrapFewShot.init(boot),
          :ok <- BootstrapFewShotWithRandomSearch.require_accept(boot) do
-      {:ok, Map.merge(boot, Map.new(own))}
+      {:ok, Map.merge(boot, own)}
     end
   end
 

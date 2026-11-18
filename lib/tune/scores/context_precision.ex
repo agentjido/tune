@@ -21,12 +21,8 @@ defmodule Tune.Scores.ContextPrecision do
 
   @spec new(keyword()) :: {:ok, t()} | {:error, Exception.t()}
   def new(opts) do
-    {score_opts, judge_opts} = Keyword.split(opts, [:timeout, :concurrency])
-
-    with {:ok, judge} <- Judge.new(judge_opts),
-         {:ok, timeout} <- positive(score_opts, :timeout, 30_000),
-         {:ok, concurrency} <- positive(score_opts, :concurrency, 3) do
-      {:ok, %__MODULE__{judge: judge, timeout: timeout, concurrency: concurrency}}
+    with {:ok, fields} <- Judge.configure(opts) do
+      {:ok, struct!(__MODULE__, fields)}
     end
   end
 
@@ -44,6 +40,9 @@ defmodule Tune.Scores.ContextPrecision do
         judge_calls: calls,
         calls: %{judge: length(calls)}
       }
+    else
+      {:error, error, calls} -> {:error, error, Judge.evidence(calls)}
+      {:error, error} -> {:error, error}
     end
   end
 
@@ -51,29 +50,12 @@ defmodule Tune.Scores.ContextPrecision do
   def model_calls?(%__MODULE__{}), do: true
 
   defp judge_contexts(score, question, contexts, reference) do
-    contexts
-    |> Enum.with_index()
-    |> Task.async_stream(
+    Judge.collect(
+      Enum.with_index(contexts),
       fn {context, index} -> judge_context(score, question, context, reference, index) end,
-      ordered: true,
-      max_concurrency: score.concurrency,
-      timeout: score.timeout,
-      on_timeout: :kill_task
+      score.concurrency,
+      score.timeout
     )
-    |> Enum.reduce_while({:ok, [], []}, fn
-      {:ok, {:ok, result, call}}, {:ok, results, calls} ->
-        {:cont, {:ok, [result | results], [call | calls]}}
-
-      {:ok, {:error, error}}, _acc ->
-        {:halt, {:error, error}}
-
-      {:exit, reason}, _acc ->
-        {:halt, {:error, {:judge_timeout, reason}}}
-    end)
-    |> then(fn
-      {:ok, results, calls} -> {:ok, Enum.reverse(results), Enum.reverse(calls)}
-      error -> error
-    end)
   end
 
   defp judge_context(score, question, context, reference, index) do
@@ -132,13 +114,6 @@ defmodule Tune.Scores.ContextPrecision do
       end)
 
     if values == [], do: 0.0, else: Enum.sum(values) / length(values)
-  end
-
-  defp positive(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_integer(value) and value > 0 -> {:ok, value}
-      _ -> invalid("#{key} must be a positive integer")
-    end
   end
 
   defp require_calls(%Case{metadata: metadata}, required) do

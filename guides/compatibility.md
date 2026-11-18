@@ -42,38 +42,25 @@ models, package options, tracking services, or exact random sequences.
 
 ## Selected evaluation behavior
 
-Tune includes the useful evaluation cases that guided `jido_eval`:
+Tune replays saved answers from an Enumerable and records independent metric
+results, coverage, judge evidence, and failed attempts. Use
+`Tune.Evaluation.start/3` with your Task supervisor for asynchronous runs.
+The progress callback lets an application publish events, write reports, or
+store results. Parse JSONL or CSV with an application stream. See
+[Programs and evaluation](programs.md#replay-saved-responses).
 
-- enumerable data;
-- retained row results and errors;
-- named numeric scores and text feedback;
-- count, mean, minimum, maximum, and coverage;
-- structured faithfulness and context-precision judges;
-- bounded row concurrency, row timeout, deadline, and call accounting.
-
-Tune does not include the `jido_eval` dataset protocol, component registry,
-async run registry, permanent supervisor, cache service, retry wrapper,
-middleware, reporters, stores, broadcasters, processors, CSV adapter, or JSONL
-adapter. Applications can use normal Elixir streams, Tasks, supervisors, files,
-and storage libraries.
-
-ReqLLM owns provider transport and transport retries. Tune does not add another
-retry policy.
+ReqLLM owns provider transport and retries. Tune counts logical inference
+attempts and records the usage that ReqLLM returns.
 
 ## Selected evolutionary behavior
 
-Tune includes the useful generic-search cases that guided `jido_evolve`:
-
-- deterministic local random state;
-- bounded populations and generations;
-- tournament selection and elitism;
-- mutation and crossover;
-- evaluation limits, deadline, cancellation, and retained failed candidates.
-
-Tune does not include old entity, evolvable, mutation, or crossover protocol
-families. It does not include an install task, a second configuration layer, or
-an `evolve` stream facade. Variation behavior belongs to small `Tune.Space`
-implementations. The public workflow stays in the Tune pipeline.
+Tune evaluates an application-supplied population, or samples named spaces
+around an initial value. It supports whole-genome variation, custom parent
+selection, deterministic random state, tournament selection, elitism, and
+generation snapshots. A search can stop on a target score, lack of improvement,
+evaluation limits, deadline, or cancellation. The progress callback delivers
+generation snapshots during execution. See
+[Search strategies](optimizers.md#evolve-a-seeded-population).
 
 ## Nx and Axon
 
@@ -91,6 +78,15 @@ reject tensors, Axon models, functions, processes, ports, and references.
 
 ## Fixed boundaries
 
+- Zoi checks Tune-owned input fields when they enter a workflow. Saved replay
+  rows are checked as the evaluator reads them. The workbench uses the same row
+  schema when it saves a study.
+- Paired comparison requires nonblank UTF-8 case IDs and checks the selected
+  cases for duplicates before target work starts. Ordinary evaluation keeps
+  its existing ID rules.
+- Tune checks rules that depend on multiple fields or records, such as score
+  range order, artifact versions, and matching program fingerprints. Adapters
+  check their own options. ReqLLM resolves models and checks provider options.
 - ReqLLM owns model transport, responses, structured output, and retries.
 - Tune owns programs, prompts, scores, evaluation, selection, search, and
   learned-value artifacts.

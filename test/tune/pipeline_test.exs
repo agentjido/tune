@@ -36,14 +36,15 @@ defmodule Tune.PipelineTest do
 
     @impl true
     def compile(_opts, program, ctx) do
-      {_first, ctx} = Context.evaluate_validation(ctx, program)
+      {first, ctx} = Context.evaluate_validation(ctx, program)
+      {_id, ctx} = Context.consider(ctx, program, first)
       {second, ctx} = Context.evaluate_validation(ctx, program)
       {_id, ctx} = Context.consider(ctx, program, second)
       Context.best(ctx)
     end
   end
 
-  test "program search requests fresh validation data for each candidate" do
+  test "program search snapshots validation data once for all candidates" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 
     validation = fn ->
@@ -64,7 +65,7 @@ defmodule Tune.PipelineTest do
              |> Tune.limit(model_calls: 2)
              |> Tune.tune()
 
-    assert Agent.get(counter, & &1) == 3
+    assert Agent.get(counter, & &1) == 1
   end
 
   test "the facade contains only the selected workflow names" do
@@ -159,15 +160,57 @@ defmodule Tune.PipelineTest do
     assert {:error, %Tune.Error.Invalid.Definition{}} = Artifact.decode(json)
   end
 
-  test "multiple scores require an explicit selector" do
+  test "multiple scores only require a selector for search" do
     pipeline =
-      predictor()
-      |> Tune.new(model: model(:unused))
-      |> Tune.data(test: [%{input: %{text: "a"}, expected: %{label: "A"}}])
-      |> Tune.score(:first, fn _example, _prediction -> 1.0 end)
-      |> Tune.score(:second, fn _example, _prediction -> 1.0 end)
+      Tune.new(%{value: 1}, run: fn target, _input -> target.value end)
+      |> Tune.data(test: [:row], validation: [:row])
+      |> Tune.score(:first, & &1)
+      |> Tune.score(:second, & &1)
+      |> Tune.vary(value: 1..2)
+      |> Tune.search(:genetic)
+      |> Tune.limit(evaluations: 1)
 
-    assert {:error, %Tune.Error.Invalid.Option{option: :selector}} = Tune.evaluate(pipeline)
+    assert {:ok, evaluation} = Tune.evaluate(pipeline)
+    assert evaluation.selected_score == nil
+    assert evaluation.summaries.first.mean == 1
+    assert evaluation.summaries.second.mean == 1
+    assert {:error, %Tune.Error.Invalid.Option{option: :selector}} = Tune.tune(pipeline)
+  end
+
+  test "typed evaluation only reads its bounded prefix from an infinite stream" do
+    rows =
+      Stream.map(Stream.iterate(1, &(&1 + 1)), fn index -> %{input: %{text: to_string(index)}} end)
+
+    stub = Transport.script([Transport.chat(label: "A")])
+
+    assert {:ok, evaluation} =
+             predictor()
+             |> Tune.new(model: model(stub))
+             |> Tune.data(test: rows)
+             |> Tune.score(:correct, fn _, _ -> 1 end)
+             |> Tune.limit(cases: 1)
+             |> Tune.evaluate()
+
+    assert evaluation.stop_reason == :case_limit
+    assert length(evaluation.observations) == 1
+    assert length(Transport.requests(stub)) == 1
+  end
+
+  test "program search does not run evaluations beyond the study limit" do
+    stub = Transport.script([Transport.chat(label: "A")])
+
+    assert {:ok, result} =
+             predictor()
+             |> Tune.new(model: model(stub))
+             |> Tune.data(validation: [%{input: %{text: "a"}}])
+             |> Tune.score(:correct, fn _, _ -> 1 end)
+             |> Tune.search(RepeatValidation)
+             |> Tune.limit(evaluations: 1, model_calls: 4)
+             |> Tune.tune()
+
+    assert result.stop_reason == :evaluation_limit
+    assert result.best.evaluation.selected_score == 1
+    assert length(Transport.requests(stub)) == 1
   end
 
   test "weighted selection requires explicit ranges" do
