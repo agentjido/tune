@@ -2,9 +2,9 @@ defmodule Tune.Contracts.SavedEvaluationTest do
   use ExUnit.Case, async: true
 
   alias Tune.Evaluation
+  alias Tune.Examples.Support.Transport
   alias Tune.Scores.ContextPrecision
   alias Tune.Scores.Faithfulness
-  alias Tune.TestSupport.Transport
 
   @fixture Path.expand("../fixtures/evaluation/saved_responses.jsonl", __DIR__)
 
@@ -23,7 +23,7 @@ defmodule Tune.Contracts.SavedEvaluationTest do
 
     task =
       fn -> File.stream!(@fixture) |> Stream.map(&JSON.decode!/1) end
-      |> Evaluation.replay(on_progress: &send(owner, &1))
+      |> Tune.replay(on_progress: &send(owner, &1))
       |> Tune.score(:faithfulness, faithfulness)
       |> Tune.score(:precision, precision)
       |> Tune.limit(model_calls: 3)
@@ -103,9 +103,18 @@ defmodule Tune.Contracts.SavedEvaluationTest do
     assert {:ok, result} = Tune.tune(pipeline)
     refute_received :read_test_split
     assert {:ok, artifact} = Tune.dump(result)
-    assert {:ok, comparison} = Evaluation.compare(pipeline, artifact)
+
+    assert {:error, %Tune.Error.Invalid.Option{option: :split}} =
+             Tune.compare(pipeline, artifact, [])
+
+    refute_received :read_test_split
+
+    assert {:ok, %Tune.Comparison{split: :test} = comparison} =
+             Tune.compare(pipeline, artifact, split: :test)
+
     assert comparison.baseline.selected_score == 0
     assert comparison.challenger.selected_score == 15
+    assert comparison.metrics.value.counts == %{improved: 2}
     assert_received :read_test_split
     refute_received :read_test_split
   end
@@ -174,6 +183,18 @@ defmodule Tune.Contracts.SavedEvaluationTest do
     assert message =~ "id"
     assert report.summaries.preserved.count == 2
     assert report.calls == %{}
+  end
+
+  test "returns a setup error when a replay factory fails or returns invalid data" do
+    sources = [fn -> raise "saved file is unavailable" end, fn -> :unavailable end]
+
+    for source <- sources do
+      assert {:error, %Tune.Error.Invalid.Option{option: :test}} =
+               source
+               |> Tune.replay()
+               |> Tune.score(:value, fn _row, _output -> flunk("scored invalid data") end)
+               |> Tune.evaluate()
+    end
   end
 
   defp judge_options(stub) do

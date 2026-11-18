@@ -3,41 +3,22 @@ defmodule Tune.TestSupport.Search do
 
   def run(program, opts) do
     {module, strategy_options} =
-      case Keyword.fetch!(opts, :optimizer) do
+      case Keyword.fetch!(opts, :search) do
         {module, config} -> {module, config}
         module -> {module, []}
       end
 
-    limits =
-      for {old, new} <- [
-            max_model_calls: :model_calls,
-            max_steps: :steps,
-            timeout: :deadline,
-            row_timeout: :row_timeout,
-            seed: :seed
-          ],
-          Keyword.has_key?(opts, old),
-          do: {new, Keyword.fetch!(opts, old)}
-
     pipeline =
       program
       |> Tune.new(Keyword.take(opts, [:model, :teacher, :proposal]))
-      |> put_split(opts, :trainset, :train)
-      |> put_split(opts, :valset, :validation)
+      |> Tune.data(Keyword.take(opts, [:train, :validation]))
       |> put_score(opts)
       |> Tune.search(module, strategy_options)
-      |> Tune.limit(limits)
+      |> Tune.limit(Keyword.take(opts, [:model_calls, :steps, :deadline, :row_timeout, :seed]))
 
     case Tune.tune(pipeline) do
       {:ok, result} -> {:ok, result.value, result}
       error -> error
-    end
-  end
-
-  defp put_split(pipeline, opts, key, split) do
-    case Keyword.fetch(opts, key) do
-      {:ok, data} -> Tune.data(pipeline, [{split, data}])
-      :error -> pipeline
     end
   end
 

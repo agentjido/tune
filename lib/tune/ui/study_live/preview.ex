@@ -13,7 +13,7 @@ if Code.ensure_loaded?(PhoenixPlayground) do
     def render(assigns) do
       ~H"""
       <.shell title={"#{@study.name}: preview"} active="studies">
-        <.study_steps study={@study} />
+        <.study_steps study={@study} current={:preview} />
         <div :if={@error} class="alert alert-error mb-6">{error_message(@error)}</div>
         <section :if={@prepared} class="card mb-6 border border-base-300 bg-base-100 shadow-sm">
           <div class="card-body gap-5">

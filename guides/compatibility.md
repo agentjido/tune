@@ -93,3 +93,31 @@ reject tensors, Axon models, functions, processes, ports, and references.
 - The application owns tools, agent loops, side effects, credentials,
   persistence, training, and deployment.
 - Jido can consume Tune, but Tune does not depend on Jido.
+
+## Workflow comparisons
+
+- **DSPy.** Tune uses Zoi-typed Elixir programs, explicit data splits, and
+  separate target, teacher, and proposal roles. The
+  [DSPy workflow lessons](../examples/01_dspy/README.md) test the optimizer
+  contracts and candidate evidence with deterministic transport.
+- **Imp.** Imp exposes module macros, agent loops, and supervised agents.
+  Tune uses ordinary Elixir functions for program composition and leaves
+  agent state, tools, and supervision with the host.
+- **Jido Evolve.** Jido Evolve ships operator modules for binary, text,
+  permutation, and parameter genomes. Tune supports named variation spaces
+  and application-owned genome callbacks. Its generation snapshots report
+  complete and interrupted populations. See the
+  [evolution lessons](../examples/03_evolution/README.md).
+- **Jido Eval.** Jido Eval exposes its own dataset types and metric harness.
+  Tune replays saved `input` and `output` rows from an Elixir Enumerable. It
+  reports independent metrics and judge calls. The host owns parsing,
+  transcript rules, report delivery, and persistence. See the
+  [evaluation lessons](../examples/04_eval/README.md).
+
+### Automatic feedback-driven mutation
+
+Jido Evolve passes fitness feedback to operators that declare
+`mutate_with_feedback/3`. Tune's generic mutation callback receives the genome
+and random state. Tune reports score feedback as evidence, and GEPA uses
+feedback during proposal generation. Automatic transfer of evaluation feedback
+to a generic genetic operator is a separate compatibility item.

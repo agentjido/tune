@@ -318,7 +318,7 @@ owned by Mike outside this plan.
 - [Current Tune evaluation](../../lib/tune/evaluation.ex)
 - [Current Tune optimizer context](../../lib/tune/optimizer/context.ex)
 - [Current Tune first-release plan](2026-11-14-0936-core-plan.md)
-- [Lazy structured-prompt spike](../../examples/lazy_structured_prompt.exs)
+- [Structured-prompt comparison example](../../examples/01_dspy/01_03_bootstrap_qa/comparison.ex)
 - [`jido_eval` facade](../../../../Jido/jido_intelligence/jido_eval/lib/jido_eval.ex)
 - [`jido_eval` metric contract](../../../../Jido/jido_intelligence/jido_eval/lib/jido_eval/metric.ex)
 - [`jido_eval` dataset contract](../../../../Jido/jido_intelligence/jido_eval/lib/jido_eval/dataset.ex)

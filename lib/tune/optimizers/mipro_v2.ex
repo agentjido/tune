@@ -61,7 +61,7 @@ defmodule Tune.Optimizers.MIPROv2 do
 
   @impl true
   def requirements(_config),
-    do: %{datasets: [:train, :val], roles: [:teacher, :proposal], model_calls?: true}
+    do: %{datasets: [:train, :validation], roles: [:teacher, :proposal], model_calls?: true}
 
   @impl true
   def compile(config, program, %Context{} = ctx) do
@@ -136,7 +136,7 @@ defmodule Tune.Optimizers.MIPROv2 do
       end)
 
     Enum.join(
-      Enum.reject([Proposals.evidence(ctx.trainset, config.evidence_examples), demo], &is_nil/1),
+      Enum.reject([Proposals.evidence(ctx.train, config.evidence_examples), demo], &is_nil/1),
       "\n\n"
     )
   end
@@ -162,7 +162,7 @@ defmodule Tune.Optimizers.MIPROv2 do
       {state, ctx}
     else
       {choice, ctx} = TPE.suggest(tpe, Enum.reverse(state.observations), ctx)
-      {batch, ctx} = Context.sample(ctx, ctx.trainset, config.minibatch_size)
+      {batch, ctx} = Context.sample(ctx, ctx.train, config.minibatch_size)
       {evaluation, ctx} = Context.evaluate(ctx, build.(choice), batch)
 
       if evaluation.complete? do

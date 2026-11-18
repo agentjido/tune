@@ -32,17 +32,25 @@ defmodule Tune.Pipeline.Compiler do
       limits = Map.merge(Study.evaluation_limits(study), extra_limits)
       {:ok, Evaluator.evaluate(source, runner, tune.scores, selector, limits)}
     end
+  rescue
+    error in Error.Invalid.Dataset -> {:error, error}
   end
 
-  @spec compare(Tune.t(), term(), atom()) :: {:ok, Comparison.t()} | {:error, Exception.t()}
-  def compare(tune, winner, split) do
+  @spec compare(Tune.t(), Tune.Result.t() | Tune.Artifact.t(), atom()) ::
+          {:ok, Comparison.t()} | {:error, Exception.t()}
+  def compare(%{runner: :replay}, _winner, _split),
+    do: invalid(:compare, "saved rows support evaluation only. Use Tune.evaluate/1")
+
+  def compare(tune, candidate, split) do
     study = Study.new(limits: Map.drop(run_limits(tune), [:cases, :evaluations]))
 
     with {:ok, selector} <- evaluation_selector(tune),
          {:ok, factory} <- data_factory(tune, split) do
       case comparison_stop(study) do
         nil ->
-          compare_split(tune, winner, split, factory, selector, study)
+          with {:ok, winner} <- comparison_target(candidate, tune.target) do
+            compare_split(tune, winner, split, factory, selector, study)
+          end
 
         reason ->
           stopped =
@@ -52,6 +60,9 @@ defmodule Tune.Pipeline.Compiler do
       end
     end
   end
+
+  defp comparison_target(%Tune.Result{value: value}, _target), do: {:ok, value}
+  defp comparison_target(%Tune.Artifact{} = artifact, target), do: Tune.load(artifact, target)
 
   defp compare_split(tune, winner, split, factory, selector, study) do
     with {:ok, source} <- read_dataset(factory, split),
@@ -124,10 +135,8 @@ defmodule Tune.Pipeline.Compiler do
   @spec tune(map()) :: {:ok, Tune.Result.t()} | {:error, Exception.t()}
   def tune(%{runner: nil} = tune) do
     with :ok <- require_program_target(tune),
-         {:ok, optimizer} <- optimizer(tune.strategy),
-         opts = optimize_options(tune, optimizer),
-         {:ok, result} <- Tune.Search.Program.run(tune.target, opts) do
-      {:ok, put_in(result.metadata[:models], describe_models(tune.models))}
+         {:ok, optimizer} <- optimizer(tune.strategy) do
+      Tune.Search.Program.run(tune, optimizer, run_limits(tune))
     end
   end
 
@@ -200,21 +209,6 @@ defmodule Tune.Pipeline.Compiler do
     Tune.Runtime.normalize_options(opts)
   end
 
-  defp optimize_options(tune, optimizer) do
-    [optimizer: optimizer, limits: run_limits(tune), scores: tune.scores, selector: tune.selector]
-    |> put_split(tune, :train, :trainset)
-    |> put_split(tune, :validation, :valset)
-    |> put_model_options(tune.models)
-    |> put_option(:max_steps, tune.limits[:steps])
-  end
-
-  defp put_split(opts, tune, role, key) do
-    case data_factory(tune, role) do
-      {:ok, factory} -> Keyword.put(opts, key, factory)
-      {:error, _error} -> opts
-    end
-  end
-
   defp optimizer(nil), do: invalid(:search, "Tune.search/3 is required")
 
   defp optimizer({strategy, opts}) do
@@ -248,20 +242,7 @@ defmodule Tune.Pipeline.Compiler do
     end)
   end
 
-  defp data_factory(tune, role) do
-    case Map.fetch(tune.data, role) do
-      {:ok, factory} when is_function(factory, 0) -> {:ok, factory}
-      {:ok, source} -> {:ok, fn -> source end}
-      :error -> invalid(role, "#{role} data is required")
-    end
-  end
-
-  defp describe_models(models) do
-    Map.new(models, fn {role, config} ->
-      {:ok, config} = ModelConfig.new(config)
-      {to_string(role), ModelConfig.describe(config)}
-    end)
-  end
+  defp data_factory(tune, role), do: Dataset.factory(tune.data, role)
 
   defp target_model(tune) do
     case Map.fetch(tune.models, :model) do
@@ -325,7 +306,7 @@ defmodule Tune.Pipeline.Compiler do
   defp typed_cases(_signature, _rows, %{cases: 0}, _role), do: {:ok, [], true}
 
   defp typed_cases(signature, rows, limits, role) do
-    {selected, truncated?} = Dataset.select(rows, limits[:cases])
+    {selected, truncated?} = Dataset.read(role, fn -> Dataset.select(rows, limits[:cases]) end)
     Dataset.report(limits, role, :source, selected)
 
     with {:ok, cases} <- Case.normalize_all(signature, selected) do

@@ -31,6 +31,10 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         :root {
           scrollbar-color: color-mix(in oklab, var(--color-base-content) 25%, transparent) transparent;
         }
+        #tune-drawer:focus-visible + .drawer-content label[for="tune-drawer"] {
+          outline: 2px solid var(--color-primary);
+          outline-offset: 3px;
+        }
         ::selection {
           background: color-mix(in oklab, var(--color-primary) 32%, transparent);
           color: var(--color-base-content);
@@ -124,7 +128,7 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         }
       </script>
       <div class="drawer min-h-screen bg-base-200 lg:drawer-open">
-        <input id="tune-drawer" type="checkbox" class="drawer-toggle" />
+        <input id="tune-drawer" type="checkbox" class="drawer-toggle lg:hidden" aria-label="Toggle main navigation" aria-controls="tune-main-nav" />
         <div class="drawer-content flex min-h-screen flex-col">
           <div class="navbar border-b border-base-300 bg-base-100 lg:hidden">
             <label for="tune-drawer" class="btn btn-square btn-ghost" aria-label="Open navigation">
@@ -136,9 +140,6 @@ if Code.ensure_loaded?(PhoenixPlayground) do
             <div class="mx-auto max-w-6xl">
               <header class="mb-6">
                 <h1 class="text-3xl font-bold tracking-tight">{@title}</h1>
-                <p class="mt-1 text-sm text-base-content/60">
-                  Local state only. Credentials stay in application configuration.
-                </p>
               </header>
               {render_slot(@inner_block)}
             </div>
@@ -151,6 +152,7 @@ if Code.ensure_loaded?(PhoenixPlayground) do
               <div class="text-2xl font-bold">Tune</div>
               <div class="text-xs uppercase tracking-widest text-base-content/50">Workbench</div>
             </a>
+            <nav id="tune-main-nav" aria-label="Main navigation">
             <ul class="menu w-full gap-1 text-base">
               <li><a class={@active == "dashboard" && "menu-active"} aria-current={if(@active == "dashboard", do: "page")} href="/">Dashboard</a></li>
               <li><a class={@active == "studies" && "menu-active"} aria-current={if(@active == "studies", do: "page")} href="/studies">Studies</a></li>
@@ -158,6 +160,8 @@ if Code.ensure_loaded?(PhoenixPlayground) do
               <li><a class={@active == "artifacts" && "menu-active"} aria-current={if(@active == "artifacts", do: "page")} href="/artifacts">Artifacts</a></li>
               <li><a class={@active == "settings" && "menu-active"} aria-current={if(@active == "settings", do: "page")} href="/settings">Settings</a></li>
             </ul>
+            </nav>
+            <p class="mt-auto px-3 pt-6 text-sm text-base-content/80">Studies and runs stay in memory until Tune stops.</p>
           </aside>
         </div>
       </div>
@@ -165,15 +169,23 @@ if Code.ensure_loaded?(PhoenixPlayground) do
     end
 
     attr(:study, :map, required: true)
+    attr(:current, :atom, required: true)
 
     def study_steps(assigns) do
       ~H"""
-      <nav class="tabs tabs-box mb-6 w-fit max-w-full overflow-x-auto bg-base-100">
-        <a class="tab" href={"/studies/#{@study.id}"}>Overview</a>
-        <a class="tab" href={"/studies/#{@study.id}/settings"}>Settings</a>
-        <a class="tab" href={"/studies/#{@study.id}/data"}>Data</a>
-        <a class="tab" href={"/studies/#{@study.id}/preview"}>Preview</a>
-        <a class="tab" href={"/studies/#{@study.id}/run"}>Run</a>
+      <nav aria-label="Study navigation" class="tabs tabs-box mb-6 w-fit max-w-full flex-wrap bg-base-100">
+        <a
+          :for={{page, label, suffix} <- [
+            {:overview, "Overview", ""},
+            {:settings, "Settings", "/settings"},
+            {:data, "Data", "/data"},
+            {:preview, "Preview", "/preview"},
+            {:run, "Run", "/run"}
+          ]}
+          class={["tab", @current == page && "tab-active font-semibold"]}
+          aria-current={if(@current == page, do: "page")}
+          href={"/studies/#{@study.id}#{suffix}"}
+        >{label}</a>
       </nav>
       """
     end

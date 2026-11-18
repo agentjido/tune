@@ -42,6 +42,10 @@ if Code.ensure_loaded?(PhoenixPlayground) do
     def render(assigns) do
       ~H"""
       <.shell title={"Run #{@run.id}"} active="studies">
+        <div class="mb-4 flex flex-wrap gap-2">
+          <a class="btn btn-ghost btn-sm" href={"/studies/#{@run.study_id}"}>Study overview</a>
+          <a class="btn btn-outline btn-sm" href={"/studies/#{@run.study_id}/run"}>Run setup</a>
+        </div>
         <div class="stats stats-vertical mb-6 w-full border border-base-300 bg-base-100 shadow-sm md:stats-horizontal">
           <div class="stat"><div class="stat-title">Status</div><div class="stat-value text-2xl">{@run.status}</div></div>
           <div class="stat"><div class="stat-title">Mode</div><div class="stat-value text-2xl">{@run.mode}</div></div>
@@ -58,7 +62,6 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         <div :if={@run.error} class="alert alert-error mb-6">{error_message(@run.error)}</div>
         <div :if={@comparison_error} class="alert alert-error mb-6">{error_message(@comparison_error)}</div>
         <.compare_form :if={@compare_splits} splits={@compare_splits} />
-        <.run_evidence :if={@run.evidence} run={@run} />
         <.comparison_report :if={@run.mode == :compare && @run.result} report={@run.result} />
         <section :if={@view} class="card mb-6 border border-base-300 bg-base-100 shadow-sm">
           <div class="card-body gap-6">
@@ -76,6 +79,22 @@ if Code.ensure_loaded?(PhoenixPlayground) do
                 <tbody>
                   <tr :for={metric <- @view.metrics}>
                     <td>{metric.name}</td><td>{format_number(metric.mean)}</td><td>{format_number(metric.coverage)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p :if={@view.improvement}>Selected score change: {format_number(@view.improvement)}</p>
+            <div :if={@view.rows != []} class="overflow-x-auto">
+              <h3 class="mb-2 font-semibold">Row results</h3>
+              <table class="table table-sm">
+                <thead><tr><th>Row</th><th>Status</th><th>Score</th><th>Expected</th><th>Output</th></tr></thead>
+                <tbody>
+                  <tr :for={row <- @view.rows}>
+                    <td>{row.id}</td>
+                    <td><span class={["badge", row_badge_class(row.status)]}>{row.status}</span></td>
+                    <td>{format_number(row.score)}</td>
+                    <td><code class="text-xs">{inspect(row.expected, limit: 8)}</code></td>
+                    <td><code class="text-xs">{inspect(row.output, limit: 8)}</code></td>
                   </tr>
                 </tbody>
               </table>
@@ -104,21 +123,6 @@ if Code.ensure_loaded?(PhoenixPlayground) do
                 />
               </div>
             </div>
-            <p :if={@view.improvement}>Selected score change: {format_number(@view.improvement)}</p>
-            <div :if={@view.rows != []} class="overflow-x-auto">
-              <table class="table table-sm">
-                <thead><tr><th>Row</th><th>Status</th><th>Score</th><th>Expected</th><th>Output</th></tr></thead>
-                <tbody>
-                  <tr :for={row <- @view.rows}>
-                    <td>{row.id}</td>
-                    <td><span class={["badge", row_badge_class(row.status)]}>{row.status}</span></td>
-                    <td>{format_number(row.score)}</td>
-                    <td><code class="text-xs">{inspect(row.expected, limit: 8)}</code></td>
-                    <td><code class="text-xs">{inspect(row.output, limit: 8)}</code></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
             <details class="collapse collapse-arrow border border-base-300 bg-base-200">
               <summary class="collapse-title font-medium">Raw result</summary>
               <div class="collapse-content">
@@ -127,6 +131,7 @@ if Code.ensure_loaded?(PhoenixPlayground) do
             </details>
           </div>
         </section>
+        <.run_evidence :if={@run.evidence} run={@run} />
         <section :if={@run.artifact} class="card border border-base-300 bg-base-100 shadow-sm">
           <div class="card-body">
           <h2 class="card-title">Artifact</h2>
@@ -203,13 +208,14 @@ if Code.ensure_loaded?(PhoenixPlayground) do
           <div class="overflow-x-auto">
             <table class="table table-sm">
               <thead>
-                <tr><th>Metric</th><th>Direction</th><th>Baseline mean</th><th>Winner mean</th><th>Change</th><th>Improved</th><th>Regressed</th><th>Tied</th><th>Errors</th><th>Unpaired</th></tr>
+                <tr><th>Metric</th><th>Direction</th><th>Baseline mean</th><th>Winner mean</th><th>Change</th><th>Pairs</th><th>Improved</th><th>Regressed</th><th>Tied</th><th>Errors</th><th>Unpaired</th></tr>
               </thead>
               <tbody>
                 <tr :for={{name, metric} <- Enum.sort(@report.metrics)}>
                   <td>{name}</td><td>{metric.direction}</td>
                   <td>{format_number(metric.baseline_mean)}</td><td>{format_number(metric.challenger_mean)}</td>
                   <td>{format_number(metric.delta)}</td>
+                  <td>{metric.paired_count}/{length(@report.case_ids)}</td>
                   <td :for={status <- [:improved, :regressed, :tied, :error, :unpaired]}>{Map.get(metric.counts, status, 0)}</td>
                 </tr>
               </tbody>

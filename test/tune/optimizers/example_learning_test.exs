@@ -4,14 +4,14 @@ defmodule Tune.Optimizers.ExampleLearningTest do
   alias Tune
   alias Tune.Adapter
   alias Tune.Error
-  alias Tune.Examples.GroundedQA
+  alias Tune.Examples.Support.GroundedQA
+  alias Tune.Examples.Support.QAWorld
+  alias Tune.Examples.Support.Transport
   alias Tune.Execution
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Optimizers.LabeledFewShot
   alias Tune.Predictor
   alias Tune.Result
-  alias Tune.TestSupport.QAWorld
-  alias Tune.TestSupport.Transport
 
   defp config(stub),
     do: [
@@ -44,7 +44,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
   describe "LabeledFewShot" do
     test "selects complete labeled rows without model calls, reproducibly by seed" do
       stub = Transport.script([])
-      opts = [optimizer: {LabeledFewShot, k: 3}, trainset: tickets(10), model: config(stub)]
+      opts = [search: {LabeledFewShot, k: 3}, train: tickets(10), model: config(stub)]
 
       assert {:ok, first, %Result{} = report} =
                Tune.TestSupport.Search.run(classifier(), Keyword.put(opts, :seed, 7))
@@ -69,8 +69,8 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
       assert {:ok, program, _} =
                Tune.TestSupport.Search.run(classifier(),
-                 optimizer: {LabeledFewShot, k: 2, sample: false},
-                 trainset: rows,
+                 search: {LabeledFewShot, k: 2, sample: false},
+                 train: rows,
                  model: config(:unused)
                )
 
@@ -85,16 +85,16 @@ defmodule Tune.Optimizers.ExampleLearningTest do
                |> Tune.search(LabeledFewShot)
                |> Tune.tune()
 
-      assert {:error, %Error.Invalid.Option{option: :trainset}} =
+      assert {:error, %Error.Invalid.Option{option: :train}} =
                Tune.TestSupport.Search.run(classifier(),
-                 optimizer: LabeledFewShot,
+                 search: LabeledFewShot,
                  model: config(:unused)
                )
 
       assert {:error, %Error.Invalid.Option{option: :kk}} =
                Tune.TestSupport.Search.run(classifier(),
-                 optimizer: {LabeledFewShot, kk: 1},
-                 trainset: tickets(2),
+                 search: {LabeledFewShot, kk: 1},
+                 train: tickets(2),
                  model: config(:unused)
                )
     end
@@ -118,12 +118,12 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
       assert {:ok, program, report} =
                Tune.TestSupport.Search.run(GroundedQA.new(),
-                 optimizer: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 2},
-                 trainset: rows,
+                 search: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 2},
+                 train: rows,
                  metric: &QAWorld.metric/2,
                  model: config(target),
                  teacher: config(teacher),
-                 max_model_calls: 20
+                 model_calls: 20
                )
 
       assert report.complete?
@@ -147,12 +147,12 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
       assert {:ok, program, report} =
                Tune.TestSupport.Search.run(GroundedQA.new(),
-                 optimizer: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 3},
-                 trainset: rows,
+                 search: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 3},
+                 train: rows,
                  metric: &QAWorld.metric/2,
                  model: config(:unused),
                  teacher: config(teacher),
-                 max_model_calls: 20
+                 model_calls: 20
                )
 
       questions = Enum.map(program.extract.demos, & &1.inputs["question"])
@@ -166,12 +166,12 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
       assert {:ok, program, _report} =
                Tune.TestSupport.Search.run(GroundedQA.new(),
-                 optimizer: {BootstrapFewShot, accept_score: 1.0},
-                 trainset: rows,
+                 search: {BootstrapFewShot, accept_score: 1.0},
+                 train: rows,
                  metric: &QAWorld.metric/2,
                  model: config(:unused),
                  teacher: config(teacher),
-                 max_model_calls: 20
+                 model_calls: 20
                )
 
       refute "What is Beta?" in Enum.map(program.answer.demos, & &1.inputs["question"])
@@ -182,12 +182,12 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
       assert {:error, %Error.Optimization.Failed{report: report, cause: cause}} =
                Tune.TestSupport.Search.run(GroundedQA.new(),
-                 optimizer: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 3},
-                 trainset: rows,
+                 search: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 3},
+                 train: rows,
                  metric: &QAWorld.metric/2,
                  model: config(:unused),
                  teacher: config(teacher),
-                 max_model_calls: 3
+                 model_calls: 3
                )
 
       assert %Error.Execution.LimitReached{limit: :model_calls} = cause
@@ -203,12 +203,12 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
       assert {:error, %Error.Optimization.Failed{report: %{calls: calls}}} =
                Tune.TestSupport.Search.run(GroundedQA.new(),
-                 optimizer: {BootstrapFewShot, accept_score: 1.0},
-                 trainset: rows,
+                 search: {BootstrapFewShot, accept_score: 1.0},
+                 train: rows,
                  metric: &QAWorld.metric/2,
                  model: config(:unused),
                  teacher: config(teacher),
-                 max_model_calls: 0
+                 model_calls: 0
                )
 
       assert calls == %{}
@@ -216,18 +216,18 @@ defmodule Tune.Optimizers.ExampleLearningTest do
     end
 
     test "explicit roles, limits, and thresholds are required", %{rows: rows} do
-      base = [trainset: rows, metric: &QAWorld.metric/2, model: config(:unused)]
+      base = [train: rows, metric: &QAWorld.metric/2, model: config(:unused)]
 
       assert {:error, %Error.Invalid.Option{option: :teacher}} =
                Tune.TestSupport.Search.run(
                  GroundedQA.new(),
-                 [optimizer: {BootstrapFewShot, accept_score: 1.0}, max_model_calls: 5] ++ base
+                 [search: {BootstrapFewShot, accept_score: 1.0}, model_calls: 5] ++ base
                )
 
       assert {:error, %Error.Invalid.Option{option: :model_calls}} =
                Tune.TestSupport.Search.run(
                  GroundedQA.new(),
-                 [optimizer: {BootstrapFewShot, accept_score: 1.0}, teacher: config(:unused)] ++
+                 [search: {BootstrapFewShot, accept_score: 1.0}, teacher: config(:unused)] ++
                    base
                )
 
@@ -235,7 +235,7 @@ defmodule Tune.Optimizers.ExampleLearningTest do
               %Error.Optimization.Failed{cause: %Error.Invalid.Option{option: :accept_score}}} =
                Tune.TestSupport.Search.run(
                  GroundedQA.new(),
-                 [optimizer: BootstrapFewShot, teacher: config(:unused), max_model_calls: 5] ++
+                 [search: BootstrapFewShot, teacher: config(:unused), model_calls: 5] ++
                    base
                )
     end
@@ -245,12 +245,12 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
       assert {:ok, _program, report} =
                Tune.TestSupport.Search.run(GroundedQA.new(),
-                 optimizer: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 5},
-                 trainset: rows ++ [hd(rows)],
+                 search: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 5},
+                 train: rows ++ [hd(rows)],
                  metric: &QAWorld.metric/2,
                  model: config(:unused),
                  teacher: config(teacher),
-                 max_model_calls: 20
+                 model_calls: 20
                )
 
       assert report.metadata.notes.train_duplicates_removed == 1
@@ -264,11 +264,11 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
       assert {:ok, _program, _report} =
                Tune.TestSupport.Search.run(classifier(),
-                 optimizer: {BootstrapFewShot, max_bootstrapped_demos: 3, max_labeled_demos: 3},
-                 trainset: tickets(3),
+                 search: {BootstrapFewShot, max_bootstrapped_demos: 3, max_labeled_demos: 3},
+                 train: tickets(3),
                  model: config(:unused),
                  teacher: config(teacher),
-                 max_model_calls: 10
+                 model_calls: 10
                )
 
       for {body, i} <- Enum.with_index(Transport.requests(teacher), 1) do
@@ -327,11 +327,11 @@ defmodule Tune.Optimizers.ExampleLearningTest do
 
     assert {:ok, program, _report} =
              Tune.TestSupport.Search.run(Repeating.new(),
-               optimizer: {BootstrapFewShot, max_bootstrapped_demos: 1, max_labeled_demos: 0},
-               trainset: [%{input: %{text: "start"}}],
+               search: {BootstrapFewShot, max_bootstrapped_demos: 1, max_labeled_demos: 0},
+               train: [%{input: %{text: "start"}}],
                model: config(:unused),
                teacher: config(teacher),
-               max_model_calls: 5
+               model_calls: 5
              )
 
     assert [%{inputs: %{"text" => "draft"}, outputs: %{"text_out" => "final"}}] =

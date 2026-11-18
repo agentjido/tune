@@ -3,16 +3,15 @@ defmodule Tune.Optimizers.ReflectiveTest do
 
   alias Tune
   alias Tune.Adapter
-  alias Tune.Artifact
-  alias Tune.Examples.GroundedQA
+  alias Tune.Examples.Support.GroundedQA
+  alias Tune.Examples.Support.QAWorld
+  alias Tune.Examples.Support.Transport
   alias Tune.Execution
   alias Tune.Optimizers.Anything
   alias Tune.Optimizers.GEPA
   alias Tune.Optimizers.Reflective
   alias Tune.Parameter
   alias Tune.Predictor
-  alias Tune.TestSupport.QAWorld
-  alias Tune.TestSupport.Transport
 
   defp config(stub),
     do: [
@@ -78,19 +77,18 @@ defmodule Tune.Optimizers.ReflectiveTest do
     {seed, opts} = Keyword.pop(opts, :seed, 0)
 
     Tune.TestSupport.Search.run(GroundedQA.new(),
-      optimizer:
-        {GEPA, Keyword.merge([max_iterations: 6, minibatch_size: 2, merge_every: 3], opts)},
-      trainset:
+      search: {GEPA, Keyword.merge([max_iterations: 6, minibatch_size: 2, merge_every: 3], opts)},
+      train:
         qa_rows(" train") ++
           QAWorld.rows([
             {"What is Gamma?", "gamma", "third"},
             {"What is Delta?", "delta", "fourth"}
           ]),
-      valset: qa_rows(""),
+      validation: qa_rows(""),
       metric: metric,
       model: config(qa_target()),
       proposal: config(reflector),
-      max_model_calls: 400,
+      model_calls: 400,
       seed: seed
     )
   end
@@ -134,8 +132,8 @@ defmodule Tune.Optimizers.ReflectiveTest do
     end
 
     test "score-only metrics still drive reflection" do
-      metric = fn example, result ->
-        if result.output["answer"] == example.expected["answer"], do: 1, else: 0
+      metric = fn example, output ->
+        if output["answer"] == example.expected["answer"], do: 1, else: 0
       end
 
       assert {:ok, _best, report} = gepa([use_merge: false], reflector(), metric)
@@ -165,13 +163,13 @@ defmodule Tune.Optimizers.ReflectiveTest do
     test "the call limit holds during reflection and validation" do
       assert {:ok, _best, report} =
                Tune.TestSupport.Search.run(GroundedQA.new(),
-                 optimizer: {GEPA, max_iterations: 10, minibatch_size: 2},
-                 trainset: qa_rows(" train"),
-                 valset: qa_rows(""),
+                 search: {GEPA, max_iterations: 10, minibatch_size: 2},
+                 train: qa_rows(" train"),
+                 validation: qa_rows(""),
                  metric: &QAWorld.metric/2,
                  model: config(qa_target()),
                  proposal: config(reflector()),
-                 max_model_calls: 13
+                 model_calls: 13
                )
 
       refute report.complete?
@@ -229,8 +227,8 @@ defmodule Tune.Optimizers.ReflectiveTest do
     end)
   end
 
-  defp polite(example, result) do
-    if result.output["reply"] == example.expected["reply"],
+  defp polite(example, output) do
+    if output["reply"] == example.expected["reply"],
       do: %{score: 1.0, feedback: "good"},
       else: %{score: 0.0, feedback: "the reply must be formal"}
   end
@@ -251,15 +249,15 @@ defmodule Tune.Optimizers.ReflectiveTest do
 
     result =
       Tune.TestSupport.Search.run(program,
-        optimizer:
+        search:
           {Anything,
            Keyword.merge([parameter: "style", max_iterations: 3, minibatch_size: 2], opts)},
-        trainset: rows.("train"),
-        valset: rows.("val"),
+        train: rows.("train"),
+        validation: rows.("val"),
         metric: &polite/2,
         model: config(styled_target()),
         proposal: config(proposer),
-        max_model_calls: 100
+        model_calls: 100
       )
 
     {result, proposer}
@@ -293,9 +291,9 @@ defmodule Tune.Optimizers.ReflectiveTest do
     end
 
     test "the optimized value reloads into the same application code" do
-      {{:ok, best, _report}, _} = anything(Styled.new(), ["Be formal."])
-      {:ok, artifact} = Artifact.dump(best)
-      {:ok, loaded} = Artifact.apply(artifact, Styled.new())
+      {{:ok, _best, report}, _} = anything(Styled.new(), ["Be formal."])
+      {:ok, artifact} = Tune.dump(report)
+      {:ok, loaded} = Tune.load(artifact, Styled.new())
       assert loaded.style.value == "Be formal."
     end
 

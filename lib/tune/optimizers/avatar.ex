@@ -51,7 +51,7 @@ defmodule Tune.Optimizers.Avatar do
 
   @impl true
   def requirements(_config),
-    do: %{datasets: [:train, :val], roles: [:proposal], model_calls?: true}
+    do: %{datasets: [:train, :validation], roles: [:proposal], model_calls?: true}
 
   @impl true
   def compile(config, program, %Context{} = ctx) do
@@ -80,7 +80,7 @@ defmodule Tune.Optimizers.Avatar do
     if Context.exhausted?(ctx) do
       Context.note(ctx, :iterations, Enum.reverse(log))
     else
-      {traces, ctx} = Reflective.traces(program, ctx.trainset, ctx)
+      {traces, ctx} = Reflective.traces(program, ctx.train, ctx)
 
       positive =
         traces

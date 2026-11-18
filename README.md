@@ -11,7 +11,7 @@ Run the offline search and compare the winner on a separate test split:
 
 ```sh
 mix deps.get
-MIX_ENV=test mix run examples/lazy_structured_prompt.exs
+MIX_ENV=test mix run examples/01_dspy/01_03_bootstrap_qa/compare_demo.exs
 ```
 
 The example uses scripted ReqLLM replies and needs no provider credentials.
@@ -27,8 +27,8 @@ Model calls: 6 -> 6
 study =
   Tune.new(program, model: target, teacher: teacher)
   |> Tune.data(train: train, validation: validation, test: test)
-  |> Tune.score(:answer, &answer_score/2, argument: :output, range: {0.0, 1.0})
-  |> Tune.score(:citations, &citation_score/2, argument: :output, range: {0.0, 1.0})
+  |> Tune.score(:answer, &answer_score/2, range: {0.0, 1.0})
+  |> Tune.score(:citations, &citation_score/2, range: {0.0, 1.0})
   |> Tune.select(weighted: [answer: 0.8, citations: 0.2])
   |> Tune.search(:bootstrap_few_shot, max_bootstrapped_demos: 4)
   |> Tune.limit(model_calls: 200)
@@ -87,17 +87,16 @@ side effects.
 
 ## Start here
 
-Run the offline examples from this directory:
+The [numbered offline examples](examples/README.md) form a learning path and
+an integration suite. Start with [typed prompt inspection](examples/01_dspy/01_01_extract_ticket/README.md)
+or [grid search and paired comparison](examples/03_evolution/03_01_batch_grid/README.md).
+Each lesson gives the commands to run its demo and tests.
+
+Print the full Chat, JSON, and XML prompts with zero model calls.
 
 ```sh
-mix run examples/inspect_prompts.exs
-MIX_ENV=test mix run examples/lazy_structured_prompt.exs
-mix run examples/generic_grid.exs
-mix run examples/generic_genetic.exs
+MIX_ENV=test mix run examples/01_dspy/01_01_extract_ticket/demo.exs --preview-only
 ```
-
-The examples show prompt inspection, grounded QA tuning and comparison,
-and search over plain Elixir configurations.
 
 Read these guides for more detail:
 

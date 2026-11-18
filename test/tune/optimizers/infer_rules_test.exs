@@ -3,9 +3,9 @@ defmodule Tune.Optimizers.InferRulesTest do
 
   alias Tune
   alias Tune.Adapter
+  alias Tune.Examples.Support.Transport
   alias Tune.Optimizers.InferRules
   alias Tune.Predictor
-  alias Tune.TestSupport.Transport
 
   defp config(stub),
     do: [
@@ -36,8 +36,8 @@ defmodule Tune.Optimizers.InferRulesTest do
       %{input: %{ticket: "val 2"}, expected: %{label: "SECRET"}}
     ]
 
-  defp metric(example, result),
-    do: if(result.output["label"] == example.expected["label"], do: 1.0, else: 0.0)
+  defp metric(example, output),
+    do: if(output["label"] == example.expected["label"], do: 1.0, else: 0.0)
 
   defp teacher, do: Transport.respond_with(fn _ -> Transport.chat(label: "billing") end)
 
@@ -54,7 +54,7 @@ defmodule Tune.Optimizers.InferRulesTest do
 
     result =
       Tune.TestSupport.Search.run(classifier(),
-        optimizer:
+        search:
           {InferRules,
            Keyword.merge(
              [
@@ -65,13 +65,13 @@ defmodule Tune.Optimizers.InferRulesTest do
              ],
              opts
            )},
-        trainset: train(),
-        valset: val(),
+        train: train(),
+        validation: val(),
         metric: &metric/2,
         model: config(target),
         teacher: config(teacher()),
         proposal: config(proposal),
-        max_model_calls: 100
+        model_calls: 100
       )
 
     {result, proposal}

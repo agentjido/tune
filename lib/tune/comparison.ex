@@ -5,12 +5,15 @@ defmodule Tune.Comparison do
   Each row contains the observations for both targets and one change per
   metric. Changes use the metric's direction. The delta is always the winner's
   value minus the original value. Aggregate means and deltas use only pairs
-  where both scores are available. Each evaluation also keeps its own full
-  summaries, model calls, and token usage.
+  where both scores are available. Each metric includes its `:paired_count`.
+  Compare it with the length of `case_ids` to check coverage. Each evaluation
+  also keeps its own full summaries, model calls, and token usage.
 
   `case_ids` preserves dataset order. `rows` is keyed by these IDs. A missing
   or stopped observation yields an unpaired metric. A failed metric yields an
   error, while other metrics on the same row can still be compared.
+  `complete?` means both evaluations finished attempting their selected cases.
+  Individual rows and scores can still have errors.
   """
 
   alias Tune.Evaluation
@@ -89,6 +92,7 @@ defmodule Tune.Comparison do
       direction: score.direction,
       baseline_mean: mean(paired, :baseline),
       challenger_mean: mean(paired, :challenger),
+      paired_count: length(paired),
       delta: delta,
       status: if(delta, do: classify(delta, score.direction), else: :unpaired),
       counts: Enum.frequencies_by(changes, & &1.status)

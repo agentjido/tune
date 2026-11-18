@@ -52,6 +52,15 @@ defmodule Tune.Error do
     def message(%{option: option, message: message}), do: "#{inspect(option)}: #{message}"
   end
 
+  defmodule Invalid.Dataset do
+    @moduledoc "A dataset source failed while Tune was reading its rows."
+    use Splode.Error, fields: [:split, :cause], class: :invalid
+
+    @spec message(map()) :: String.t()
+    def message(%{split: split, cause: cause}),
+      do: "could not read #{inspect(split)} data: #{Exception.message(cause)}"
+  end
+
   defmodule Invalid.Input do
     @moduledoc "Program inputs do not match the declared input fields."
     use Splode.Error, fields: [:message, :errors], class: :invalid

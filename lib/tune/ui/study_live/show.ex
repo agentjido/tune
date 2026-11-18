@@ -6,8 +6,12 @@ if Code.ensure_loaded?(PhoenixPlayground) do
     @impl true
     def mount(%{"id" => id}, _session, socket) do
       case Tune.UI.Store.get_study(id) do
-        nil -> {:ok, push_navigate(socket, to: "/studies")}
-        study -> {:ok, assign(socket, study: study)}
+        nil ->
+          {:ok, push_navigate(socket, to: "/studies")}
+
+        study ->
+          {:ok,
+           assign(socket, study: study, has_rows?: Tune.UI.Runner.available_splits(study) != [])}
       end
     end
 
@@ -15,24 +19,26 @@ if Code.ensure_loaded?(PhoenixPlayground) do
     def render(assigns) do
       ~H"""
       <.shell title={@study.name} active="studies">
-        <.study_steps study={@study} />
-        <div class="mb-6 grid gap-4 md:grid-cols-3">
-          <section class="card border border-base-300 bg-base-100 shadow-sm">
-            <div class="card-body"><div class="text-sm text-base-content/60">Recipe</div><div class="font-semibold">{@study.recipe}</div></div>
-          </section>
-          <section class="card border border-base-300 bg-base-100 shadow-sm">
-            <div class="card-body"><div class="text-sm text-base-content/60">Strategy</div><div class="font-semibold">{@study.config["strategy"]}</div></div>
-          </section>
-          <section class="card border border-base-300 bg-base-100 shadow-sm">
-            <div class="card-body"><div class="text-sm text-base-content/60">Model</div><div class="break-all font-semibold">{@study.config["model"]}</div></div>
-          </section>
-        </div>
-        <section class="card border border-base-300 bg-base-100 shadow-sm">
-          <div class="card-body">
-            <h2 class="card-title">Configuration</h2>
-            <div class="mockup-code text-sm"><pre class="px-5"><code>{Tune.JSON.pretty_encode!(@study.config)}</code></pre></div>
+        <.study_steps study={@study} current={:overview} />
+        <section class="card mb-6 border border-base-300 bg-base-100">
+          <div class="card-body gap-4">
+            <dl class="grid gap-4 sm:grid-cols-3">
+              <div><dt class="text-sm">Recipe</dt><dd class="font-medium">{@study.recipe}</dd></div>
+              <div><dt class="text-sm">Target model</dt><dd class="break-all font-medium">{@study.config["model"]}</dd></div>
+              <div><dt class="text-sm">Search strategy</dt><dd class="break-all font-medium">{@study.config["strategy"]}</dd></div>
+            </dl>
+            <div class="card-actions">
+              <a :if={!@has_rows?} class="btn btn-primary" href={"/studies/#{@study.id}/data"}>Add data</a>
+              <a :if={@has_rows?} class="btn btn-primary" href={"/studies/#{@study.id}/run"}>Run study</a>
+            </div>
           </div>
         </section>
+        <details class="collapse collapse-arrow border border-base-300 bg-base-100">
+          <summary class="collapse-title font-medium">Configuration</summary>
+          <div class="collapse-content">
+            <pre class="overflow-x-auto text-sm"><code>{Tune.JSON.pretty_encode!(@study.config)}</code></pre>
+          </div>
+        </details>
       </.shell>
       """
     end

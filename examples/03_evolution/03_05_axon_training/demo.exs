@@ -1,0 +1,5 @@
+{:ok, winner} = Tune.Examples.AxonTraining.axon()
+{:ok, artifact} = Tune.dump(winner)
+{:ok, config} = Tune.load(artifact, %{learning_rate: 0.02})
+IO.puts("Reloaded hyperparameters #{inspect(config)}")
+IO.puts("Held-out loss #{winner.best.evaluation.summaries.loss.mean}")

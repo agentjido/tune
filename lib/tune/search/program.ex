@@ -10,49 +10,36 @@ defmodule Tune.Search.Program do
   alias Tune.Search.Program.Context
   alias Tune.Search.Study
 
-  @options [
-    :optimizer,
-    :trainset,
-    :valset,
-    :scores,
-    :selector,
-    :model,
-    :teacher,
-    :proposal,
-    :max_steps,
-    :limits
-  ]
-
-  @spec run(Tune.Program.t(), keyword()) :: {:ok, Result.t()} | {:error, Exception.t()}
-  def run(program, opts) do
-    limits = Keyword.fetch!(opts, :limits)
+  @spec run(Tune.t(), {module(), keyword()}, map()) :: {:ok, Result.t()} | {:error, Exception.t()}
+  def run(%Tune{target: program} = tune, {module, options}, limits) do
     study = Study.new(limits: limits, seed: Map.get(limits, :seed, 0))
 
-    with :ok <- check_keys(opts),
-         {:ok, module, config} <- optimizer(opts),
-         requirements = module.requirements(config),
-         scores = Keyword.fetch!(opts, :scores),
-         {:ok, selector} <- selector(scores, opts[:selector], requirements),
-         :ok <- max_calls(limits, requirements, scores),
-         {:ok, run_options} <- run_options(opts, requirements),
+    with {:ok, config} <- optimizer_config(module, options),
+         {:ok, requirements} <- requirements(module, config),
+         {:ok, selector} <- selector(tune.scores, tune.selector, requirements),
+         :ok <- max_calls(limits, requirements, tune.scores),
+         {:ok, run_options} <- run_options(tune, requirements),
          {:ok, signature} <- Tune.Program.signature(program),
          {:ok, _parameters} <- Tune.Program.parameters(program),
          :ok <- check_start(study),
-         {:ok, trainset, duplicates} <- trainset(signature, opts, requirements, limits),
+         {:ok, train} <- load_split(signature, tune.data, :train, requirements, limits),
+         {train, duplicates} <- deduplicate_train(train),
+         :ok <- report_split(tune.data, :train, train, limits),
          :ok <- check_start(study),
-         {:ok, valset} <- valset(signature, opts, requirements, limits),
+         {:ok, validation} <- load_split(signature, tune.data, :validation, requirements, limits),
+         :ok <- report_split(tune.data, :validation, validation, limits),
          :ok <- check_start(study),
-         :ok <- check_overlap(trainset, valset) do
+         :ok <- check_overlap(train, validation) do
       ctx =
         Context.new(
           optimizer: module,
-          failure_score: if(selector, do: Selector.failure_score(scores, selector)),
-          scores: scores,
+          failure_score: if(selector, do: Selector.failure_score(tune.scores, selector)),
+          scores: tune.scores,
           selector: selector,
           run_options: run_options,
           study: study,
-          trainset: trainset,
-          valset: valset
+          train: train,
+          validation: validation
         )
         |> Context.note(:train_duplicates_removed, duplicates)
         |> Context.note(:settings, settings(config))
@@ -107,11 +94,12 @@ defmodule Tune.Search.Program do
         strategy: ctx.optimizer,
         seed: Context.seed(ctx),
         max_model_calls: Context.max_model_calls(ctx),
+        models: describe_models(Keyword.fetch!(ctx.run_options, :models)),
         datasets: %{
-          train: length(ctx.trainset),
-          validation: length(ctx.valset),
-          train_fingerprint: fingerprint(ctx.trainset),
-          validation_fingerprint: fingerprint(ctx.valset)
+          train: length(ctx.train),
+          validation: length(ctx.validation),
+          train_fingerprint: fingerprint(ctx.train),
+          validation_fingerprint: fingerprint(ctx.validation)
         },
         notes: Context.notes(ctx)
       }
@@ -125,6 +113,12 @@ defmodule Tune.Search.Program do
   end
 
   defp settings(_config), do: %{}
+
+  defp describe_models(models) do
+    Map.new(models, fn {role, config} ->
+      {Atom.to_string(role), Tune.ModelConfig.describe(config)}
+    end)
+  end
 
   defp portable?(value)
        when is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value), do: true
@@ -149,38 +143,27 @@ defmodule Tune.Search.Program do
     |> Base.encode16(case: :lower)
   end
 
-  defp check_keys(opts) do
-    case Keyword.keys(opts) -- @options do
-      [] -> :ok
-      [key | _] -> option_error(key, "unknown optimize option")
+  defp optimizer_config(module, options) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :compile, 3) and
+         function_exported?(module, :init, 1) and function_exported?(module, :requirements, 1),
+       do: module.init(options),
+       else:
+         option_error(:search, "#{inspect(module)} must implement Tune.Search.ProgramStrategy")
+  end
+
+  defp requirements(module, config) do
+    requirements = module.requirements(config)
+
+    case requirements.datasets -- [:train, :validation] do
+      [] -> {:ok, requirements}
+      [split | _] -> option_error(:search, "unknown required dataset split #{inspect(split)}")
     end
   end
 
-  defp optimizer(opts) do
-    {module, config} =
-      case Keyword.get(opts, :optimizer) do
-        {module, config} when is_atom(module) and is_list(config) -> {module, config}
-        module when is_atom(module) and not is_nil(module) -> {module, []}
-        other -> {other, nil}
-      end
+  defp run_options(tune, requirements) do
+    opts = [{:max_steps, tune.limits[:steps]} | Map.to_list(tune.models)]
 
-    cond do
-      config == nil ->
-        option_error(:optimizer, "must be a module or {module, options}")
-
-      not (Code.ensure_loaded?(module) and function_exported?(module, :compile, 3) and
-             function_exported?(module, :init, 1) and function_exported?(module, :requirements, 1)) ->
-        option_error(:optimizer, "#{inspect(module)} is not a Tune.Search.ProgramStrategy")
-
-      true ->
-        with {:ok, config} <- module.init(config), do: {:ok, module, config}
-    end
-  end
-
-  defp run_options(opts, requirements) do
-    run_keys = [:model, :teacher, :proposal, :max_steps]
-
-    with {:ok, options} <- Tune.Runtime.normalize_options(Keyword.take(opts, run_keys)) do
+    with {:ok, options} <- Tune.Runtime.normalize_options(opts) do
       models = Keyword.fetch!(options, :models)
 
       case Enum.find(requirements.roles, &(not Map.has_key?(models, &1))) do
@@ -204,37 +187,24 @@ defmodule Tune.Search.Program do
        else: :ok
   end
 
-  defp trainset(signature, opts, requirements, limits) do
-    case Keyword.get(opts, :trainset) do
-      nil ->
-        if :train in requirements.datasets,
-          do: option_error(:trainset, "is required"),
-          else: {:ok, [], 0}
-
-      factory ->
-        with {:ok, examples} <- snapshot(signature, factory, limits, :train) do
-          unique =
-            Enum.uniq_by(examples, &{Case.input_key(&1), Tune.CanonicalJSON.encode!(&1.expected)})
-
-          Dataset.report(limits, :train, :effective, unique)
-          {:ok, unique, length(examples) - length(unique)}
-        end
+  defp load_split(signature, data, split, requirements, limits) do
+    if is_map_key(data, split) or split in requirements.datasets do
+      with {:ok, factory} <- Dataset.factory(data, split) do
+        snapshot(signature, factory, limits, split)
+      end
+    else
+      {:ok, []}
     end
   end
 
-  defp valset(signature, opts, requirements, limits) do
-    case Keyword.fetch(opts, :valset) do
-      :error ->
-        if :val in requirements.datasets,
-          do: option_error(:valset, "is required; there is no automatic split"),
-          else: {:ok, []}
+  defp deduplicate_train(cases) do
+    unique = Enum.uniq_by(cases, &{Case.input_key(&1), Tune.CanonicalJSON.encode!(&1.expected)})
+    {unique, length(cases) - length(unique)}
+  end
 
-      {:ok, factory} ->
-        with {:ok, cases} <- snapshot(signature, factory, limits, :validation) do
-          Dataset.report(limits, :validation, :effective, cases)
-          {:ok, cases}
-        end
-    end
+  defp report_split(data, split, cases, limits) do
+    if is_map_key(data, split), do: Dataset.report(limits, split, :effective, cases)
+    :ok
   end
 
   defp snapshot(_signature, _factory, %{cases: 0} = limits, role) do
@@ -249,10 +219,10 @@ defmodule Tune.Search.Program do
     error -> option_error(:data, "could not read data: #{Exception.message(error)}")
   end
 
-  defp check_overlap(trainset, valset) do
-    train_keys = MapSet.new(trainset, &Case.input_key/1)
+  defp check_overlap(train, validation) do
+    train_keys = MapSet.new(train, &Case.input_key/1)
 
-    case Enum.filter(valset, &MapSet.member?(train_keys, Case.input_key(&1))) do
+    case Enum.filter(validation, &MapSet.member?(train_keys, Case.input_key(&1))) do
       [] ->
         :ok
 

@@ -5,9 +5,9 @@ defmodule Tune.XMLAdapterTest do
   alias Tune.Adapter
   alias Tune.Demo
   alias Tune.Error
+  alias Tune.Examples.Support.Transport
   alias Tune.Predictor
   alias Tune.Signature
-  alias Tune.TestSupport.Transport
 
   @fixtures Path.expand("../fixtures/prompts", __DIR__)
 

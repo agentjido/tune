@@ -99,7 +99,7 @@ and does not limit data ingestion.
 pipeline =
   Tune.new(program, model: target)
   |> Tune.data(test: fn -> File.stream!("cases.jsonl") |> Stream.map(&decode/1) end)
-  |> Tune.score(:correct, &correct?/2, argument: :output, failure_score: 0.0)
+  |> Tune.score(:correct, &correct?/2, failure_score: 0.0)
   |> Tune.limit(cases: 1_000, concurrency: 4, row_timeout: 30_000)
 
 {:ok, evaluation} = Tune.evaluate(pipeline)
@@ -109,10 +109,10 @@ A program row is a `%Tune.Case{}` or a map with `:input`, optional
 `:expected`, and optional `:id`. Expected values go only to the score callback.
 
 Each `Tune.score/4` call adds one named score. A score returns a number or a map
-with `:score` and optional `:feedback`. Use `argument: :output` to give a
-two-argument scorer `(case, output)`. Use `argument: :prediction` to inspect
-program steps or usage. Existing two-argument scorers receive the prediction
-when one is available and the output otherwise. Higher values win by default.
+with `:score` and optional `:feedback`. A one-argument function receives the
+output. A two-argument scorer receives `(case, output)` for every target.
+Set `argument: :prediction` to inspect program steps or usage. Higher values
+win by default.
 Use `direction: :minimize` for a loss or cost.
 
 Without `failure_score`, a failed row makes the evaluation ineligible. With a
@@ -125,8 +125,8 @@ several scores requires a selector:
 
 ```elixir
 pipeline
-|> Tune.score(:quality, &quality/2, argument: :output, range: {0.0, 1.0})
-|> Tune.score(:cost, &cost/2, argument: :output, direction: :minimize, range: {0.0, 10.0})
+|> Tune.score(:quality, &quality/2, range: {0.0, 1.0})
+|> Tune.score(:cost, &cost/2, direction: :minimize, range: {0.0, 10.0})
 |> Tune.select(weighted: [quality: 0.8, cost: 0.2])
 ```
 
@@ -193,18 +193,31 @@ Use `report.metrics` for paired mean changes and outcome counts. Use
 scores, and unpaired results. A positive delta means that the winner's
 numeric score increased. The score direction determines whether that is an
 improvement. Means in the comparison use only cases with a score from each
-version. The underlying evaluations keep all observed scores, errors, model
-calls, and token use.
+version. Check each metric's `paired_count` against `length(report.case_ids)`.
+The underlying evaluations keep all observed scores, errors, model calls,
+and token use. Use `Tune.evaluate/1` to score saved responses.
 
 The two evaluations share one model-call budget and deadline. The baseline
 runs first. If a limit stops either pass, the report keeps the available
 evidence and sets `complete?` to false. A case limit defines the size of
 the shared snapshot.
 
+Concurrent workers reserve calls before they start. After a worker returns,
+its unused reservation can fund another row. When cancellation or the
+deadline stops an active row, its observation has status `:interrupted`
+and records the stop reason. A row that reached its own timeout is a row
+error.
+
+A complete comparison can contain failed or unpaired metrics. Require a
+valid pair on each critical case before making a release decision.
+
 ## Evaluation results
 
 `Tune.evaluate/2` uses test data by default. Pass `:train`, `:validation`, or
 `:test` to select another role.
+If reading a dataset raises an exception, Tune returns a
+`Tune.Error.Invalid.Dataset` with the split and the original exception.
+Invalid saved rows that Tune can read still appear as individual row errors.
 
 It returns `%Tune.Evaluation{}` with:
 

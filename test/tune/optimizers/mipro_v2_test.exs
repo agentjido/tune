@@ -3,9 +3,9 @@ defmodule Tune.Optimizers.MIPROv2Test do
 
   alias Tune
   alias Tune.Adapter
+  alias Tune.Examples.Support.Transport
   alias Tune.Optimizers.MIPROv2
   alias Tune.Predictor
-  alias Tune.TestSupport.Transport
 
   defp config(stub),
     do: [
@@ -33,8 +33,8 @@ defmodule Tune.Optimizers.MIPROv2Test do
   defp val(n),
     do: for(i <- 1..n, do: %{input: %{ticket: "val #{i}"}, expected: %{label: "billing"}})
 
-  defp metric(example, result),
-    do: if(result.output["label"] == example.expected["label"], do: 1.0, else: 0.0)
+  defp metric(example, output),
+    do: if(output["label"] == example.expected["label"], do: 1.0, else: 0.0)
 
   defp target do
     Transport.respond_with(fn body ->
@@ -61,7 +61,7 @@ defmodule Tune.Optimizers.MIPROv2Test do
   defp optimize(opts) do
     Tune.TestSupport.Search.run(
       classifier(),
-      optimizer:
+      search:
         {MIPROv2,
          Keyword.merge(
            [
@@ -76,13 +76,13 @@ defmodule Tune.Optimizers.MIPROv2Test do
            ],
            opts
          )},
-      trainset: train(4),
-      valset: val(3),
+      train: train(4),
+      validation: val(3),
       metric: &metric/2,
       model: config(target()),
       teacher: config(teacher()),
       proposal: config(proposer()),
-      max_model_calls: 300,
+      model_calls: 300,
       seed: 5
     )
   end
@@ -136,20 +136,20 @@ defmodule Tune.Optimizers.MIPROv2Test do
 
   defp optimize_limited(limit) do
     Tune.TestSupport.Search.run(classifier(),
-      optimizer:
+      search:
         {MIPROv2,
          accept_score: 1.0,
          num_candidates: 3,
          num_trials: 10,
          minibatch_size: 2,
          max_labeled_demos: 0},
-      trainset: train(4),
-      valset: val(3),
+      train: train(4),
+      validation: val(3),
       metric: &metric/2,
       model: config(target()),
       teacher: config(teacher()),
       proposal: config(proposer()),
-      max_model_calls: limit
+      model_calls: limit
     )
   end
 end

@@ -45,7 +45,7 @@ defmodule Tune.UI.Recipes.SavedResponses do
 
   @impl true
   def normalize_data(%{test: rows} = data) do
-    with {:ok, rows} <- Tune.UI.RecipeInput.rows(Replay.legacy_rows(rows), :test, &Replay.parse/1) do
+    with {:ok, rows} <- Tune.UI.RecipeInput.rows(rows, :test, &Replay.parse/1) do
       {:ok, %{data | test: rows}}
     end
   end

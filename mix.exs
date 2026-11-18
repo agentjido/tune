@@ -32,6 +32,8 @@ defmodule Tune.MixProject do
     ]
   end
 
+  def cli, do: [preferred_envs: ["test.examples": :test]]
+
   def application do
     [
       extra_applications: [:logger, :crypto]
@@ -60,6 +62,7 @@ defmodule Tune.MixProject do
   defp aliases do
     [
       setup: ["deps.get"],
+      "test.examples": ["test --only example"],
       quality: [
         "format --check-formatted",
         "compile --warnings-as-errors",

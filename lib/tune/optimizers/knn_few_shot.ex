@@ -45,7 +45,7 @@ defmodule Tune.Optimizers.KNNFewShot do
 
   @impl true
   def compile(config, program, %Context{} = ctx) do
-    rows = Enum.map(ctx.trainset, &%{id: &1.id, input: &1.input, expected: &1.expected})
+    rows = Enum.map(ctx.train, &%{id: &1.id, input: &1.input, expected: &1.expected})
 
     case KNN.new(program, Map.to_list(config) ++ [pool: rows]) do
       {:ok, knn} -> {:ok, knn, Context.note(ctx, :pool_size, length(rows))}

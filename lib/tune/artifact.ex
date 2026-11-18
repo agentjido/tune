@@ -6,7 +6,6 @@ defmodule Tune.Artifact do
   alias Tune.CanonicalJSON
   alias Tune.Error
   alias Tune.Input
-  alias Tune.ModelConfig
   alias Tune.Result
 
   @enforce_keys [:version, :target_fingerprint, :parameters]
@@ -54,7 +53,7 @@ defmodule Tune.Artifact do
   @spec new(map()) :: {:ok, t()} | {:error, Exception.t()}
   def new(attrs) when is_map(attrs), do: validate_artifact(struct(__MODULE__, attrs))
 
-  @doc "Builds one artifact from a completed tuning result."
+  @doc false
   @spec from_result(Result.t()) :: {:ok, t()} | {:error, Exception.t()}
   def from_result(%Result{metadata: %{strategy: :genetic, genome?: true}} = result) do
     with {:ok, parameters} <- Generic.project(result.parameters) do
@@ -62,7 +61,7 @@ defmodule Tune.Artifact do
         version: @version,
         target_fingerprint: Generic.genome_fingerprint(result.value),
         parameters: parameters,
-        provenance: provenance(source: "Tune.tune/1", report: result, kind: "genome")
+        provenance: provenance(result, "genome")
       })
     end
   end
@@ -74,13 +73,7 @@ defmodule Tune.Artifact do
         version: @version,
         target_fingerprint: Generic.target_fingerprint(parameters),
         parameters: parameters,
-        provenance:
-          provenance(
-            source: "Tune.tune/1",
-            report: result,
-            kind: "generic",
-            models: Map.get(result.metadata, :models, %{})
-          )
+        provenance: provenance(result, "generic")
       })
     end
   end
@@ -92,29 +85,7 @@ defmodule Tune.Artifact do
         version: @version,
         target_fingerprint: fingerprint,
         parameters: parameters,
-        provenance:
-          provenance(
-            source: "Tune.tune/1",
-            report: result,
-            kind: "program",
-            models: Map.get(result.metadata, :models, %{})
-          )
-      })
-    end
-  end
-
-  @doc false
-  @spec dump(Tune.Program.t(), keyword()) :: {:ok, t()} | {:error, Exception.t()}
-  def dump(program, opts \\ []) do
-    with {:ok, parameters} <- Program.project(program),
-         {:ok, fingerprint} <- Program.target_fingerprint(program),
-         provenance <- Keyword.get(opts, :provenance, %{}),
-         provenance <- Map.put_new(provenance, "kind", "program") do
-      new(%{
-        version: @version,
-        target_fingerprint: fingerprint,
-        parameters: parameters,
-        provenance: provenance
+        provenance: provenance(result, "program")
       })
     end
   end
@@ -145,7 +116,7 @@ defmodule Tune.Artifact do
     end
   end
 
-  @doc "Validates and applies an artifact to fresh application code."
+  @doc false
   @spec apply(t(), term()) :: {:ok, term()} | {:error, Exception.t()}
   def apply(%__MODULE__{} = artifact, fresh_target) do
     with {:ok, artifact} <- validate_artifact(artifact) do
@@ -163,24 +134,6 @@ defmodule Tune.Artifact do
           invalid("artifact provenance needs a known kind")
       end
     end
-  end
-
-  @doc false
-  @spec fingerprint(Tune.Predictor.t() | Tune.Parameter.t()) :: String.t()
-  defdelegate fingerprint(parameter), to: Program
-
-  @doc false
-  @spec provenance(keyword()) :: map()
-  def provenance(opts) do
-    report = Keyword.get(opts, :report)
-
-    base = %{
-      "kind" => Keyword.get(opts, :kind, "program"),
-      "source" => Keyword.get(opts, :source),
-      "models" => describe_models(Keyword.get(opts, :models, []))
-    }
-
-    if report, do: Map.merge(base, report_provenance(report)), else: base
   end
 
   defp apply_program(artifact, fresh_target) do
@@ -260,14 +213,7 @@ defmodule Tune.Artifact do
 
   defp check_entries(_entries, _limit), do: :ok
 
-  defp describe_models(models) do
-    Map.new(models, fn
-      {role, %ModelConfig{} = config} -> {to_string(role), ModelConfig.describe(config)}
-      {role, value} -> {to_string(role), value}
-    end)
-  end
-
-  defp report_provenance(%Result{} = result) do
+  defp provenance(%Result{} = result, kind) do
     metadata = result.metadata
     notes = Map.get(metadata, :notes, %{})
     datasets = Map.get(metadata, :datasets, %{})
@@ -276,6 +222,9 @@ defmodule Tune.Artifact do
     summary = evaluation && Tune.Evaluation.summary(evaluation, :objective)
 
     %{
+      "kind" => kind,
+      "source" => "Tune.tune/1",
+      "models" => Map.get(metadata, :models, %{}),
       "optimizer" => inspect(metadata[:strategy]),
       "settings" => Map.get(notes, :settings, %{}),
       "seed" => metadata[:seed],

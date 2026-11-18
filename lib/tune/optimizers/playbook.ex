@@ -49,7 +49,7 @@ defmodule Tune.Optimizers.Playbook do
 
   @impl true
   def requirements(_config),
-    do: %{datasets: [:train, :val], roles: [:proposal], model_calls?: true}
+    do: %{datasets: [:train, :validation], roles: [:proposal], model_calls?: true}
 
   @impl true
   def compile(config, program, %Context{} = ctx) do
@@ -112,7 +112,7 @@ defmodule Tune.Optimizers.Playbook do
     else
       incumbent = incumbent(ctx, program)
       current = lessons(incumbent, config.parameter)
-      {traces, ctx} = Reflective.traces(incumbent, ctx.trainset, ctx)
+      {traces, ctx} = Reflective.traces(incumbent, ctx.train, ctx)
       task = "Lessons for the program parameter #{inspect(config.parameter)}."
 
       {proposed, ctx} =

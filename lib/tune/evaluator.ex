@@ -46,7 +46,7 @@ defmodule Tune.Evaluator do
       |> Dataset.lookahead(case_limit(limits))
       |> Stream.with_index()
       |> Stream.chunk_every(concurrency)
-      |> Enum.reduce_while(state, fn chunk, state ->
+      |> Dataset.reduce_while(state, limits[:dataset_split], fn chunk, state ->
         reduce_chunk(chunk, state, supervisor, runner, scores, limits)
       end)
       |> mark_truncation(limits)
@@ -89,33 +89,43 @@ defmodule Tune.Evaluator do
         {:halt, append(%{state | stop_reason: reason}, observations)}
 
       true ->
-        {admitted, skipped_cases} = admit(chunk, state.budget, limits[:row_calls])
+        {state, observations, worker_stop} =
+          evaluate_chunk(chunk, state, supervisor, runner, scores, limits, [])
 
-        {observations, worker_stop} =
-          run_chunk(admitted, supervisor, runner, scores, state, limits)
-
-        observations =
-          observations ++
-            Enum.map(skipped_cases, fn {tune_case, _index} ->
-              skipped(tune_case, :model_call_limit)
-            end)
-
-        state = account(append(state, observations), observations)
+        state = append(state, observations)
         notify_progress(limits[:on_progress], state, observations)
 
-        stop_reason =
-          cond do
-            worker_stop -> worker_stop
-            lost_accounting?(observations, state.budget) -> :lost_accounting
-            Enum.any?(observations, &(&1.status == :interrupted)) -> :model_call_limit
-            skipped_cases != [] -> :model_call_limit
-            reason = stop_reason(state.expires_at, limits) -> reason
-            limited? -> :case_limit
-            true -> nil
-          end
+        reason = worker_stop || stop_reason(state.expires_at, limits) || (limited? && :case_limit)
+        if reason, do: {:halt, %{state | stop_reason: reason}}, else: {:cont, state}
+    end
+  end
 
-        state = if stop_reason, do: %{state | stop_reason: stop_reason}, else: state
-        if stop_reason, do: {:halt, state}, else: {:cont, state}
+  defp evaluate_chunk(chunk, state, supervisor, runner, scores, limits, collected) do
+    {admitted, deferred} = admit(chunk, state.budget, limits[:row_calls])
+    {observations, worker_stop} = run_chunk(admitted, supervisor, runner, scores, state, limits)
+    state = account(state, observations)
+    collected = Enum.reverse(observations, collected)
+
+    reason =
+      cond do
+        worker_stop -> worker_stop
+        lost_accounting?(observations, state.budget) -> :lost_accounting
+        Enum.any?(observations, &(&1.status == :interrupted)) -> :model_call_limit
+        reason = stop_reason(state.expires_at, limits) -> reason
+        deferred != [] and state.budget == 0 -> :model_call_limit
+        true -> nil
+      end
+
+    cond do
+      reason ->
+        skipped = Enum.map(deferred, fn {tune_case, _index} -> skipped(tune_case, reason) end)
+        {state, Enum.reverse(collected, skipped), reason}
+
+      deferred == [] ->
+        {state, Enum.reverse(collected), nil}
+
+      true ->
+        evaluate_chunk(deferred, state, supervisor, runner, scores, limits, collected)
     end
   end
 
@@ -157,7 +167,7 @@ defmodule Tune.Evaluator do
     observations =
       Enum.map(tasks, fn {task, tune_case, allowance} ->
         outcome = Map.get(replies, task.ref) || Task.shutdown(task, :brutal_kill)
-        task_observation(outcome, tune_case, allowance, limits[:call_role] || :target)
+        task_observation(outcome, tune_case, allowance, limits[:call_role] || :target, reason)
       end)
 
     {observations, reason}
@@ -378,19 +388,20 @@ defmodule Tune.Evaluator do
 
   defp put_selection(observation, _scores, _selector), do: %{observation | eligible?: false}
 
-  defp task_observation({:ok, %Observation{} = observation}, _tune_case, _allowance, _role),
+  defp task_observation({:ok, %Observation{} = observation}, _case, _allowance, _role, _stop),
     do: observation
 
-  defp task_observation(outcome, tune_case, allowance, role) do
-    reason =
+  defp task_observation(outcome, tune_case, allowance, role, stop) do
+    {status, reason} =
       case outcome do
-        {:exit, value} -> value
-        nil -> :timeout
+        {:exit, value} -> {:error, value}
+        nil when is_nil(stop) -> {:error, :timeout}
+        nil -> {:interrupted, stop}
       end
 
     %Observation{
       id: tune_case.id,
-      status: :error,
+      status: status,
       eligible?: false,
       error:
         Error.Execution.Callback.exception(

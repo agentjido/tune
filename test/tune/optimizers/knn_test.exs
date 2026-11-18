@@ -5,10 +5,10 @@ defmodule Tune.Optimizers.KNNTest do
   alias Tune.Adapter
   alias Tune.Artifact
   alias Tune.Error
+  alias Tune.Examples.Support.Transport
   alias Tune.KNN
   alias Tune.Optimizers.KNNFewShot
   alias Tune.Predictor
-  alias Tune.TestSupport.Transport
 
   defp config(stub),
     do: [
@@ -40,8 +40,8 @@ defmodule Tune.Optimizers.KNNTest do
   defp knn(opts \\ []) do
     {:ok, program, report} =
       Tune.TestSupport.Search.run(classifier(),
-        optimizer: {KNNFewShot, Keyword.merge([k: 1], opts)},
-        trainset: @pool,
+        search: {KNNFewShot, Keyword.merge([k: 1], opts)},
+        train: @pool,
         model: config(:unused)
       )
 
@@ -161,12 +161,12 @@ defmodule Tune.Optimizers.KNNTest do
   end
 
   test "the pool round-trips through an artifact into matching code" do
-    {:ok, artifact} = Artifact.dump(knn())
+    {:ok, artifact} = Tune.dump(%Tune.Result{value: knn()})
     {:ok, json} = Artifact.encode(artifact)
     {:ok, decoded} = Artifact.decode(json)
     {:ok, fresh} = KNN.new(classifier(), pool: [], k: 1)
 
-    assert {:ok, loaded} = Artifact.apply(decoded, fresh)
+    assert {:ok, loaded} = Tune.load(decoded, fresh)
     assert loaded.pool.value == knn().pool.value
   end
 

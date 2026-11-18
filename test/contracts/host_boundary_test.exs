@@ -3,10 +3,10 @@ defmodule Tune.Contracts.HostBoundaryTest do
 
   alias Tune.Adapter
   alias Tune.Error
+  alias Tune.Examples.Support.Transport
   alias Tune.ModelConfig
   alias Tune.Predictor
   alias Tune.Prepared
-  alias Tune.TestSupport.Transport
 
   @secret "host-secret-key-123"
 

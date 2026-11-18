@@ -5,8 +5,8 @@ defmodule Tune.EvaluationTest do
   alias Tune.Adapter
   alias Tune.Error
   alias Tune.Evaluation
+  alias Tune.Examples.Support.Transport
   alias Tune.Predictor
-  alias Tune.TestSupport.Transport
 
   setup do
     {:ok, predictor} =
@@ -36,8 +36,8 @@ defmodule Tune.EvaluationTest do
   defp rows(texts),
     do: Enum.map(texts, &%{input: %{text: &1}, expected: %{label: "label-" <> &1}})
 
-  defp exact(example, result),
-    do: if(result.output["label"] == example.expected["label"], do: 1, else: 0)
+  defp exact(example, output),
+    do: if(output["label"] == example.expected["label"], do: 1, else: 0)
 
   defp evaluate(program, rows, opts) do
     pipeline =
@@ -154,6 +154,34 @@ defmodule Tune.EvaluationTest do
       assert [%{status: :error, error: %Error.Execution.Callback{}}] = eval.observations
       refute eval.eligible?
     end
+  end
+
+  test "malformed score evidence retains successful scores and target call accounting", ctx do
+    stub = echo_stub()
+
+    assert {:ok, evaluation} =
+             ctx.predictor
+             |> Tune.new(model: model(stub))
+             |> Tune.data(test: rows(["a", "b"]))
+             |> Tune.score(:exact, &exact/2)
+             |> Tune.score(:metadata, fn _ -> %{score: 1, metadata: []} end)
+             |> Tune.score(:counts, fn _ -> {:error, :failed, %{calls: %{judge: -1}}} end)
+             |> Tune.score(:judges, fn _ -> %{score: 1, judge_calls: [%{usage: 3}]} end)
+             |> Tune.limit(model_calls: 1)
+             |> Tune.evaluate()
+
+    assert [attempted, %{status: :skipped}] = evaluation.observations
+    assert attempted.scores == %{exact: 1}
+    assert Map.keys(attempted.score_errors) |> Enum.sort() == [:counts, :judges, :metadata]
+
+    assert Enum.all?(attempted.score_errors, fn {_name, error} ->
+             match?(%Error.Execution.Callback{}, error)
+           end)
+
+    assert evaluation.calls == %{target: 1}
+    assert evaluation.usage.total == 15
+    assert evaluation.stop_reason == :model_call_limit
+    assert length(Transport.requests(stub)) == 1
   end
 
   test "failed rows make a candidate ineligible without an explicit failure score", ctx do

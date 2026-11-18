@@ -112,10 +112,17 @@ defmodule Tune.Search.Genetic do
   end
 
   defp finish_generation(state, population, count, previous_best) do
-    best = Study.incumbent(state.study)
-    improved? = best && (previous_best == nil or best.id != previous_best.id)
-    state = if improved?, do: %{state | last_improvement: state.generation}, else: state
     complete? = length(population) == count and Study.stop_reason(state.study) == nil
+
+    study =
+      if not complete? and previous_best,
+        do: %{state.study | best: previous_best},
+        else: state.study
+
+    best = Study.incumbent(study)
+    improved? = best && (previous_best == nil or best.id != previous_best.id)
+    state = %{state | study: study}
+    state = if improved?, do: %{state | last_improvement: state.generation}, else: state
 
     Study.emit(state.study, %{
       event: :generation_evaluated,

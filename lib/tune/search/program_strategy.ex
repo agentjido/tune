@@ -12,7 +12,7 @@ defmodule Tune.Search.ProgramStrategy do
   alias Tune.Search.Program.Context
 
   @type requirements :: %{
-          required(:datasets) => [:train | :val],
+          required(:datasets) => [:train | :validation],
           required(:roles) => [:teacher | :proposal],
           required(:model_calls?) => boolean(),
           optional(:metric?) => boolean()

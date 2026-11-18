@@ -66,12 +66,15 @@ if Code.ensure_loaded?(PhoenixPlayground) do
                 <option :for={type <- ~w(string integer float boolean)} value={type} selected={@form[:output_type].value == type}>{type}</option>
               </select></label>
           </div>
-          <div class="grid gap-4 md:grid-cols-3">
-            <label class="form-control"><span class="label-text mb-2 font-medium">Target model</span><input class="input input-bordered w-full" list="tune-models" name="study[model]" value={@form[:model].value} /></label>
+          <label class="form-control"><span class="label-text mb-2 font-medium">Target model</span><input class="input input-bordered w-full" list="tune-models" name="study[model]" value={@form[:model].value} /></label>
+          <datalist id="tune-models"><option :for={model <- @models} value={model}></option></datalist>
+          <details class="collapse collapse-arrow border border-base-300" open={not is_nil(@error)}>
+            <summary class="collapse-title font-medium">Advanced settings</summary>
+            <div class="collapse-content space-y-4">
+              <div class="grid gap-4 md:grid-cols-2">
             <label class="form-control"><span class="label-text mb-2 font-medium">Teacher model</span><input class="input input-bordered w-full" list="tune-models" name="study[teacher_model]" value={@form[:teacher_model].value} /></label>
             <label class="form-control"><span class="label-text mb-2 font-medium">Proposal model</span><input class="input input-bordered w-full" list="tune-models" name="study[proposal_model]" value={@form[:proposal_model].value} /></label>
-          </div>
-          <datalist id="tune-models"><option :for={model <- @models} value={model}></option></datalist>
+              </div>
           <div class="grid gap-4 md:grid-cols-2">
             <label class="form-control"><span class="label-text mb-2 font-medium">Adapter</span>
               <select class="select select-bordered w-full" name="study[adapter]">
@@ -83,6 +86,8 @@ if Code.ensure_loaded?(PhoenixPlayground) do
             <label class="form-control"><span class="label-text mb-2 font-medium">Strategy options (JSON)</span><textarea class="textarea textarea-bordered min-h-36 w-full font-mono text-sm" name="study[strategy_options]">{@form[:strategy_options].value}</textarea></label>
             <label class="form-control"><span class="label-text mb-2 font-medium">Limits (JSON)</span><textarea class="textarea textarea-bordered min-h-36 w-full font-mono text-sm" name="study[limits]">{@form[:limits].value}</textarea></label>
           </div>
+            </div>
+          </details>
           <div class="card-actions justify-end"><button class="btn btn-primary" type="submit">Create study</button></div>
           </div>
         </form>

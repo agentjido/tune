@@ -8,6 +8,7 @@ defmodule Tune do
 
   alias Tune.Artifact
   alias Tune.Comparison
+  alias Tune.Error
   alias Tune.Input
   alias Tune.Limits
   alias Tune.Pipeline.Compiler
@@ -112,10 +113,10 @@ defmodule Tune do
   @doc """
   Adds one uniquely named score.
 
-  Use `argument: :output` with a two-argument scorer for `(case, output)`.
-  Use `argument: :prediction` for `(case, prediction)` on program runs.
-  The default preserves the existing behavior: a two-argument function or
-  module receives the prediction when available and the output otherwise.
+  A one-argument function receives the output. A two-argument function or
+  module receives `(case, output)`. Use `argument: :prediction` to give a
+  two-argument scorer the prediction instead. The prediction is `nil` if
+  the runner did not return one.
   """
   @spec score(t(), atom(), function() | module() | struct(), keyword()) :: t()
   def score(%__MODULE__{} = tune, name, metric, opts \\ [])
@@ -170,24 +171,38 @@ defmodule Tune do
   end
 
   @doc "Evaluates the pipeline target on test data, or on an explicit data role."
-  @spec evaluate(t(), atom()) :: {:ok, Tune.Evaluation.t()} | {:error, Exception.t()}
-  def evaluate(%__MODULE__{} = tune, role \\ :test) when role in @data_roles do
-    Compiler.evaluate(tune, role)
+  @spec evaluate(t(), :train | :validation | :test) ::
+          {:ok, Tune.Evaluation.t()} | {:error, Exception.t()}
+  def evaluate(%__MODULE__{} = tune, role \\ :test) do
+    if role in @data_roles do
+      Compiler.evaluate(tune, role)
+    else
+      {:error,
+       Error.Invalid.Option.exception(
+         option: :split,
+         message: "expected :train, :validation, or :test, got #{inspect(role)}"
+       )}
+    end
   end
 
   @doc "Runs the selected search and returns one immutable result."
   @spec tune(t()) :: {:ok, Result.t()} | {:error, Exception.t()}
   def tune(%__MODULE__{} = tune), do: Compiler.tune(tune)
 
-  @doc "Compares the original target and the search winner on an explicit split."
-  @spec compare(t(), Result.t(), keyword()) :: {:ok, Comparison.t()} | {:error, Exception.t()}
-  def compare(%__MODULE__{} = tune, %Result{} = winner, opts) do
+  @doc """
+  Compares the original target and a search result or saved artifact on an explicit split.
+
+  For a saved artifact, Tune loads it into the original target before running the comparison.
+  """
+  @spec compare(t(), Result.t() | Artifact.t(), keyword()) ::
+          {:ok, Comparison.t()} | {:error, Exception.t()}
+  def compare(%__MODULE__{} = tune, %type{} = candidate, opts) when type in [Result, Artifact] do
     case opts do
       [split: split] when split in @data_roles ->
-        Compiler.compare(tune, winner.value, split)
+        Compiler.compare(tune, candidate, split)
 
       _ ->
-        {:error, Tune.Error.Invalid.Option.exception(option: :split, message: "choose a split")}
+        {:error, Error.Invalid.Option.exception(option: :split, message: "choose a split")}
     end
   end
 

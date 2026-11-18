@@ -114,7 +114,12 @@ study =
 {:ok, comparison} = Tune.compare(study, winner, split: :test)
 ```
 
-Run `mix run examples/generic_grid.exs` for a complete example.
+Run the [grid search example](../examples/03_evolution/03_01_batch_grid/README.md)
+from the Tune root.
+
+```sh
+MIX_ENV=test mix run examples/03_evolution/03_01_batch_grid/demo.exs
+```
 
 ## Evolve a seeded population
 
@@ -158,3 +163,12 @@ Tune counts managed model calls, including failed attempts. ReqLLM owns
 transport retries within a call. An opaque runner owns external calls and
 detached resources. Keep data factories and variation callbacks bounded so the
 study can reach its worker deadline and cancellation checks.
+
+Run the [seeded word search](../examples/03_evolution/03_02_evolve_string/README.md)
+and [hyperparameter reload](../examples/03_evolution/03_05_axon_training/README.md)
+demos from the Tune root.
+
+```sh
+MIX_ENV=test mix run examples/03_evolution/03_02_evolve_string/demo.exs
+MIX_ENV=test mix run examples/03_evolution/03_05_axon_training/demo.exs
+```

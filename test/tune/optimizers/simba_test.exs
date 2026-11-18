@@ -3,9 +3,9 @@ defmodule Tune.Optimizers.SIMBATest do
 
   alias Tune
   alias Tune.Adapter
+  alias Tune.Examples.Support.Transport
   alias Tune.Optimizers.SIMBA
   alias Tune.Predictor
-  alias Tune.TestSupport.Transport
 
   defp config(stub),
     do: [
@@ -29,8 +29,8 @@ defmodule Tune.Optimizers.SIMBATest do
 
   defp rows(texts), do: Enum.map(texts, &%{input: %{ticket: &1}, expected: %{label: "billing"}})
 
-  defp metric(example, result),
-    do: if(result.output["label"] == example.expected["label"], do: 1.0, else: 0.0)
+  defp metric(example, output),
+    do: if(output["label"] == example.expected["label"], do: 1.0, else: 0.0)
 
   defp proposal(text \\ "Always answer billing."),
     do: Transport.respond_with(fn _ -> Transport.chat(feedback: text) end)
@@ -38,14 +38,14 @@ defmodule Tune.Optimizers.SIMBATest do
   defp optimize(target, opts, extra \\ []) do
     Tune.TestSupport.Search.run(
       classifier(),
-      optimizer:
+      search:
         {SIMBA, Keyword.merge([bsz: 3, num_candidates: 2, max_steps: 2, num_final: 2], opts)},
-      trainset: Keyword.get(extra, :train, rows(["easy one", "easy two", "hard case"])),
-      valset: rows(["val easy", "val hard"]),
+      train: Keyword.get(extra, :train, rows(["easy one", "easy two", "hard case"])),
+      validation: rows(["val easy", "val hard"]),
       metric: &metric/2,
       model: config(target),
       proposal: config(Keyword.get(extra, :proposal, proposal())),
-      max_model_calls: Keyword.get(extra, :max_model_calls, 300),
+      model_calls: Keyword.get(extra, :model_calls, 300),
       seed: Keyword.get(extra, :seed, 1)
     )
   end

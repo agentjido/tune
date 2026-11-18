@@ -3,9 +3,9 @@ defmodule Tune.Contracts.QAReleaseTest do
 
   alias Tune.Adapter
   alias Tune.Artifact
-  alias Tune.Examples.GroundedQA
-  alias Tune.TestSupport.QAWorld
-  alias Tune.TestSupport.Transport
+  alias Tune.Examples.Support.GroundedQA
+  alias Tune.Examples.Support.QAWorld
+  alias Tune.Examples.Support.Transport
 
   @moduledoc """
   Offline release proof for the public lazy pipeline.
@@ -112,15 +112,15 @@ defmodule Tune.Contracts.QAReleaseTest do
     pipeline
     |> Tune.score(
       :answer,
-      fn example, prediction ->
-        if prediction.output["answer"] == example.expected["answer"], do: 1.0, else: 0.0
+      fn example, output ->
+        if output["answer"] == example.expected["answer"], do: 1.0, else: 0.0
       end,
       range: {0.0, 1.0}
     )
     |> Tune.score(
       :citations,
-      fn example, prediction ->
-        if prediction.output["sources"] == example.expected["sources"], do: 1.0, else: 0.0
+      fn example, output ->
+        if output["sources"] == example.expected["sources"], do: 1.0, else: 0.0
       end,
       range: {0.0, 1.0}
     )

@@ -1,5 +1,10 @@
 defmodule Tune.Runtime do
-  @moduledoc false
+  @moduledoc """
+  Runs a typed predictor or composed program on one input.
+
+  Use `run/3` to execute a program in an application, including a program
+  loaded from an artifact.
+  """
 
   alias Tune.Error
   alias Tune.Execution
@@ -24,6 +29,15 @@ defmodule Tune.Runtime do
                  unrecognized_keys: :error
                )
 
+  @doc """
+  Runs a program with a required `:model` configuration and returns a
+  `Tune.Prediction` with its output, steps, and call counts.
+
+  Pass `:max_model_calls`, `:max_steps`, or `:timeout` to bound execution.
+  Timeout is in milliseconds and defaults to 60,000. Use `:infinity` for
+  no timeout. If a program fails after it starts, the error retains the
+  partial prediction.
+  """
   @spec run(Program.t(), map(), keyword()) ::
           {:ok, Prediction.t()} | {:error, Exception.t()}
   def run(program, inputs, opts) when is_list(opts) do
@@ -33,6 +47,7 @@ defmodule Tune.Runtime do
     end
   end
 
+  @doc false
   @spec run_with(Program.t(), map(), Execution.t()) ::
           {:ok, Prediction.t()} | {:error, Exception.t()}
   def run_with(program, inputs, %Execution{} = execution) do
@@ -53,6 +68,7 @@ defmodule Tune.Runtime do
     end
   end
 
+  @doc false
   @spec new_execution(Program.t(), keyword()) ::
           {:ok, Execution.t()} | {:error, Exception.t()}
   def new_execution(program, run_opts) do
@@ -61,6 +77,7 @@ defmodule Tune.Runtime do
     end
   end
 
+  @doc false
   @spec normalize_options(keyword()) :: {:ok, keyword()} | {:error, Exception.t()}
   def normalize_options(opts) do
     with {:ok, opts} <- Input.options(@run_options, opts, :run, :first),

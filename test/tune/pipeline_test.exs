@@ -3,9 +3,9 @@ defmodule Tune.PipelineTest do
 
   alias Tune.Adapter.Chat
   alias Tune.Artifact
+  alias Tune.Examples.Support.Transport
   alias Tune.Predictor
   alias Tune.Result
-  alias Tune.TestSupport.Transport
 
   defp predictor do
     {:ok, predictor} =
@@ -31,8 +31,14 @@ defmodule Tune.PipelineTest do
     def init(opts), do: {:ok, opts}
 
     @impl true
-    def requirements(_opts),
-      do: %{datasets: [:val], roles: [], model_calls?: true, metric?: true}
+    def requirements(opts) do
+      %{
+        datasets: Keyword.get(opts, :datasets, [:validation]),
+        roles: [],
+        model_calls?: true,
+        metric?: true
+      }
+    end
 
     @impl true
     def compile(_opts, program, ctx) do
@@ -58,14 +64,25 @@ defmodule Tune.PipelineTest do
              predictor()
              |> Tune.new(model: model(stub))
              |> Tune.data(validation: validation)
-             |> Tune.score(:correct, fn tune_case, prediction ->
-               if prediction.output == tune_case.expected, do: 1.0, else: 0.0
+             |> Tune.score(:correct, fn tune_case, output ->
+               if output == tune_case.expected, do: 1.0, else: 0.0
              end)
              |> Tune.search(RepeatValidation)
              |> Tune.limit(model_calls: 2)
              |> Tune.tune()
 
     assert Agent.get(counter, & &1) == 1
+  end
+
+  test "program search rejects an invalid required split before opening data" do
+    assert {:error, %Tune.Error.Invalid.Option{option: :search, message: message}} =
+             predictor()
+             |> Tune.new()
+             |> Tune.data(validation: fn -> flunk("opened data for an invalid split") end)
+             |> Tune.search(RepeatValidation, datasets: [:val])
+             |> Tune.tune()
+
+    assert message =~ "unknown required dataset split :val"
   end
 
   test "the facade contains only the selected workflow names" do

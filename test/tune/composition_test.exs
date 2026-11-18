@@ -4,12 +4,12 @@ defmodule Tune.CompositionTest do
   alias Tune
   alias Tune.Adapter
   alias Tune.Error
-  alias Tune.Examples.GroundedQA
+  alias Tune.Examples.Support.GroundedQA
+  alias Tune.Examples.Support.Transport
   alias Tune.Execution
   alias Tune.Parameter
   alias Tune.Prediction
   alias Tune.Predictor
-  alias Tune.TestSupport.Transport
 
   @inputs %{
     context: [

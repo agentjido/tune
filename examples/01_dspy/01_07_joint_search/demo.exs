@@ -1,0 +1,5 @@
+{:ok, winner} = Tune.Examples.JointSearch.mipro()
+IO.puts("Selected instruction #{inspect(winner.value.signature.instructions)}")
+IO.puts("Selected demonstrations #{length(winner.value.demos)}")
+IO.puts("Full held-out score #{winner.best.evaluation.selected_score}")
+IO.puts("Calls by role #{inspect(winner.calls)}")

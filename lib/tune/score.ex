@@ -13,7 +13,7 @@ defmodule Tune.Score do
     direction: :maximize,
     range: nil,
     failure_score: nil,
-    argument: :legacy
+    argument: :output
   ]
 
   @type t :: %__MODULE__{
@@ -22,7 +22,7 @@ defmodule Tune.Score do
           direction: :maximize | :minimize,
           range: {number(), number()} | nil,
           failure_score: number() | nil,
-          argument: :legacy | :output | :prediction
+          argument: :output | :prediction
         }
 
   @options Zoi.keyword(
@@ -30,7 +30,7 @@ defmodule Tune.Score do
                direction: Zoi.enum([:maximize, :minimize]) |> Zoi.default(:maximize),
                range: Zoi.tuple({Zoi.number(), Zoi.number()}) |> Zoi.nullable(),
                failure_score: Zoi.number() |> Zoi.nullable(),
-               argument: Zoi.enum([:legacy, :output, :prediction]) |> Zoi.default(:legacy)
+               argument: Zoi.enum([:output, :prediction]) |> Zoi.default(:output)
              ],
              unrecognized_keys: :error
            )
@@ -62,7 +62,7 @@ defmodule Tune.Score do
     range = opts[:range]
     argument = opts[:argument]
 
-    if argument != :legacy and not (is_function(metric, 2) or is_atom(metric)) do
+    if argument == :prediction and not (is_function(metric, 2) or is_atom(metric)) do
       raise ArgumentError, "score argument applies to two-argument scorers"
     end
 
@@ -117,7 +117,6 @@ defmodule Tune.Score do
 
   defp score_argument(%{argument: :output}, output, _prediction), do: output
   defp score_argument(%{argument: :prediction}, _output, prediction), do: prediction
-  defp score_argument(_score, output, prediction), do: prediction || output
 
   defp invoke(metric, tune_case, output, argument) do
     cond do
@@ -139,7 +138,7 @@ defmodule Tune.Score do
   end
 
   defp normalize({:ok, value}), do: normalize(value)
-  defp normalize({:error, error, metadata}) when is_map(metadata), do: {:error, error, metadata}
+  defp normalize({:error, error, metadata}), do: with_metadata(:error, error, metadata)
   defp normalize({:error, error}), do: {:error, error, %{}}
 
   defp normalize(%{score: score} = value) when is_number(score) do
@@ -147,7 +146,7 @@ defmodule Tune.Score do
 
     if is_nil(feedback) or is_binary(feedback) do
       metadata = Map.get(value, :metadata, Map.drop(value, [:score, :feedback]))
-      {:ok, %{score: score, feedback: feedback}, metadata}
+      with_metadata(:ok, %{score: score, feedback: feedback}, metadata)
     else
       metric_error("score feedback must be a string or nil", feedback)
     end
@@ -158,6 +157,30 @@ defmodule Tune.Score do
 
   defp normalize(other),
     do: metric_error("the score must return a number or %{score: number, feedback: text}", other)
+
+  defp with_metadata(status, value, metadata) do
+    if valid_metadata?(metadata),
+      do: {status, value, metadata},
+      else: metric_error("score metadata has invalid call evidence", metadata)
+  end
+
+  defp valid_metadata?(metadata) when is_map(metadata) do
+    calls = Map.get(metadata, :calls, %{})
+    judges = Map.get(metadata, :judge_calls, [])
+
+    is_map(calls) and not is_struct(calls) and
+      Enum.all?(calls, fn {_role, count} -> is_integer(count) and count >= 0 end) and
+      is_list(judges) and Enum.all?(judges, &valid_judge_call?/1)
+  end
+
+  defp valid_metadata?(_metadata), do: false
+
+  defp valid_judge_call?(call) when is_map(call) and not is_struct(call) do
+    usage = Map.get(call, :usage)
+    is_nil(usage) or is_map(usage)
+  end
+
+  defp valid_judge_call?(_call), do: false
 
   defp metric_error(message, value),
     do: {:error, Error.Execution.Callback.exception(message: message, value: value), %{}}

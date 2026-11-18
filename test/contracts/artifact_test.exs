@@ -4,14 +4,14 @@ defmodule Tune.Contracts.ArtifactTest do
   alias Tune
   alias Tune.Adapter
   alias Tune.Artifact
+  alias Tune.Artifact.Program
   alias Tune.Error
-  alias Tune.Examples.GroundedQA
-  alias Tune.ModelConfig
+  alias Tune.Examples.Support.GroundedQA
+  alias Tune.Examples.Support.QAWorld
+  alias Tune.Examples.Support.Transport
   alias Tune.Optimizers.BootstrapFewShot
   alias Tune.Parameter
   alias Tune.Predictor
-  alias Tune.TestSupport.QAWorld
-  alias Tune.TestSupport.Transport
 
   @secret "artifact-secret-key"
 
@@ -22,47 +22,33 @@ defmodule Tune.Contracts.ArtifactTest do
       request_options: Transport.request_options(stub) ++ [api_key: @secret]
     ]
 
-  setup_all do
-    {:ok, model} =
-      ModelConfig.new(
-        model: Transport.model(),
-        adapter: Adapter.JSON,
-        adapter_options: [mode: :text],
-        request_options: [api_key: @secret]
-      )
-
-    %{model: model}
-  end
-
   defp optimized do
     rows =
       QAWorld.rows([{"What is Alpha?", "alpha", "first"}, {"What is Beta?", "beta", "second"}])
 
     {:ok, program, report} =
       Tune.TestSupport.Search.run(GroundedQA.new(),
-        optimizer: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 2},
-        trainset: rows,
+        search: {BootstrapFewShot, accept_score: 1.0, max_bootstrapped_demos: 2},
+        train: rows,
         metric: &QAWorld.metric/2,
         model: config(QAWorld.stub()),
         teacher: config(QAWorld.stub()),
-        max_model_calls: 10
+        model_calls: 10
       )
 
     {:ok, lessons} = Parameter.put_value(program.lessons, ["Quote the passage id."])
     {:ok, program} = Tune.Program.replace_parameters(program, %{"lessons" => lessons})
-    {program, report}
+    %{report | value: program}
   end
 
-  test "an optimized QA program reloads into fresh code with the same values and provenance", %{
-    model: model
-  } do
-    {program, report} = optimized()
-    provenance = Artifact.provenance(source: "test", report: report, models: [target: model])
+  test "an optimized QA program reloads into fresh code with the same values and provenance" do
+    report = optimized()
+    program = report.value
 
-    assert {:ok, artifact} = Artifact.dump(program, provenance: provenance)
+    assert {:ok, artifact} = Tune.dump(report)
     assert {:ok, json} = Artifact.encode(artifact)
     assert {:ok, decoded} = Artifact.decode(json)
-    assert {:ok, loaded} = Artifact.apply(decoded, GroundedQA.new())
+    assert {:ok, loaded} = Tune.load(decoded, GroundedQA.new())
 
     assert loaded.extract.demos == program.extract.demos
     assert loaded.answer.demos == program.answer.demos
@@ -81,15 +67,14 @@ defmodule Tune.Contracts.ArtifactTest do
   end
 
   test "encoding is canonical and stable" do
-    {program, _report} = optimized()
-    {:ok, artifact} = Artifact.dump(program)
+    {:ok, artifact} = Tune.dump(optimized())
     {:ok, first} = Artifact.encode(artifact)
     {:ok, decoded} = Artifact.decode(JSON.encode!(wire(artifact)))
     {:ok, second} = Artifact.encode(decoded)
     assert first == second
   end
 
-  test "loads a version 1 generic artifact with existing wire keys and values" do
+  test "loads a version 1 generic artifact and validates the target contract" do
     json = ~S"""
     {
       "version": 1,
@@ -103,6 +88,15 @@ defmodule Tune.Contracts.ArtifactTest do
     assert {:ok, %{batch_size: 8}} = Tune.load(artifact, %{batch_size: 1})
     assert {:ok, encoded} = Artifact.encode(artifact)
     assert JSON.decode!(json) == JSON.decode!(encoded)
+
+    assert {:error, %Error.Invalid.Definition{}} =
+             Tune.load(artifact, %{:batch_size => 1, "batch_size" => 2})
+
+    assert {:ok, %{{:runtime, :state} => :live, batch_size: 8}} =
+             Tune.load(artifact, %{:batch_size => 1, {:runtime, :state} => :live})
+
+    malformed = put_in(artifact.parameters["batch_size"], "eight")
+    assert {:error, %Error.Invalid.Definition{}} = Tune.load(malformed, %{batch_size: 1})
   end
 
   describe "fingerprints" do
@@ -126,8 +120,8 @@ defmodule Tune.Contracts.ArtifactTest do
           ]
         )
 
-      assert Artifact.fingerprint(base) == Artifact.fingerprint(instructed)
-      assert Artifact.fingerprint(base) == Artifact.fingerprint(described)
+      assert Program.fingerprint(base) == Program.fingerprint(instructed)
+      assert Program.fingerprint(base) == Program.fingerprint(described)
     end
 
     test "change with field order, names, or schemas", %{base: base} do
@@ -147,15 +141,14 @@ defmodule Tune.Contracts.ArtifactTest do
       {:ok, renamed} =
         Predictor.new(signature: [inputs: [question: Zoi.string()], outputs: [a: Zoi.string()]])
 
-      fingerprints = Enum.map([base, two, swapped, typed, renamed], &Artifact.fingerprint/1)
+      fingerprints = Enum.map([base, two, swapped, typed, renamed], &Program.fingerprint/1)
       assert length(Enum.uniq(fingerprints)) == 5
     end
   end
 
   describe "mismatches apply nothing" do
     setup do
-      {program, _report} = optimized()
-      {:ok, artifact} = Artifact.dump(program)
+      {:ok, artifact} = Tune.dump(optimized())
       %{artifact: artifact}
     end
 
@@ -163,7 +156,7 @@ defmodule Tune.Contracts.ArtifactTest do
       missing = %{artifact | parameters: Map.delete(artifact.parameters, "lessons")}
 
       assert {:error, %Error.Invalid.Definition{}} =
-               Artifact.apply(missing, GroundedQA.new())
+               Tune.load(missing, GroundedQA.new())
 
       extra =
         %{
@@ -171,7 +164,7 @@ defmodule Tune.Contracts.ArtifactTest do
           | parameters: Map.put(artifact.parameters, "other", artifact.parameters["lessons"])
         }
 
-      assert {:error, %Error.Invalid.Definition{}} = Artifact.apply(extra, GroundedQA.new())
+      assert {:error, %Error.Invalid.Definition{}} = Tune.load(extra, GroundedQA.new())
     end
 
     test "a kind change", %{artifact: artifact} do
@@ -182,7 +175,7 @@ defmodule Tune.Contracts.ArtifactTest do
         }
 
       assert {:error, %Error.Invalid.Definition{message: message}} =
-               Artifact.apply(swapped, GroundedQA.new())
+               Tune.load(swapped, GroundedQA.new())
 
       assert message =~ "different kind"
     end
@@ -193,7 +186,7 @@ defmodule Tune.Contracts.ArtifactTest do
       program = %{program | lessons: changed}
 
       assert {:error, %Error.Invalid.Definition{message: message}} =
-               Artifact.apply(artifact, program)
+               Tune.load(artifact, program)
 
       assert message =~ "different program contract"
     end
@@ -205,18 +198,17 @@ defmodule Tune.Contracts.ArtifactTest do
         end)
 
       fresh = GroundedQA.new()
-      assert {:error, %Error.Invalid.Definition{}} = Artifact.apply(bad_demo, fresh)
+      assert {:error, %Error.Invalid.Definition{}} = Tune.load(bad_demo, fresh)
       assert fresh == GroundedQA.new()
 
       bad_value = put_in(artifact.parameters["lessons"]["value"], [1])
-      assert {:error, %Error.Invalid.Definition{}} = Artifact.apply(bad_value, GroundedQA.new())
+      assert {:error, %Error.Invalid.Definition{}} = Tune.load(bad_value, GroundedQA.new())
     end
   end
 
   describe "decode" do
     setup do
-      {program, _report} = optimized()
-      {:ok, artifact} = Artifact.dump(program)
+      {:ok, artifact} = Tune.dump(optimized())
       {:ok, json} = Artifact.encode(artifact)
       %{artifact: artifact, json: json}
     end
@@ -255,17 +247,20 @@ defmodule Tune.Contracts.ArtifactTest do
         })
 
       assert {:ok, decoded} = Artifact.decode(JSON.encode!(data))
-      assert {:error, _} = Artifact.apply(decoded, GroundedQA.new())
+      assert {:error, _} = Tune.load(decoded, GroundedQA.new())
       assert_raise ArgumentError, fn -> String.to_existing_atom(key) end
     end
   end
 
-  test "dump rejects provenance that is not plain allowlisted data" do
-    assert {:error, %Error.Invalid.Definition{}} =
-             Artifact.dump(GroundedQA.new(), provenance: %{"source" => fn -> :x end})
+  test "an artifact rejects provenance outside its data contract" do
+    {:ok, artifact} = Tune.dump(optimized())
+    attrs = Map.from_struct(artifact)
 
     assert {:error, %Error.Invalid.Definition{}} =
-             Artifact.dump(GroundedQA.new(), provenance: %{"request_options" => []})
+             Artifact.new(put_in(attrs.provenance["source"], fn -> :x end))
+
+    assert {:error, %Error.Invalid.Definition{}} =
+             Artifact.new(put_in(attrs.provenance["request_options"], []))
   end
 
   defp wire(artifact) do

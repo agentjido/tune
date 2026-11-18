@@ -40,7 +40,7 @@ defmodule Tune.Optimizers.Anything do
 
   @impl true
   def requirements(_config),
-    do: %{datasets: [:train, :val], roles: [:proposal], model_calls?: true}
+    do: %{datasets: [:train, :validation], roles: [:proposal], model_calls?: true}
 
   @impl true
   def compile(config, program, %Context{} = ctx) do

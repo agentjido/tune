@@ -1,0 +1,5 @@
+id,expected,answer,cost
+refund,billing,billing,0.02
+unclear,abstain,abstain,0.03
+withdrawal,cash,abstain,0.04
+broken,billing,billing,not-a-number

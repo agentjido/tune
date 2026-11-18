@@ -10,10 +10,9 @@ workbench routes still run without those assets. The workbench follows the
 operating system light or dark preference and updates when that preference
 changes. It does not include a separate theme switcher.
 
-The workbench uses one small ApexCharts hook for score, data split, score
-comparison, and row status charts. The dashboard score chart includes
-completed runs that have a selected score. Compare only runs that use the
-same metric and data.
+The workbench uses one small ApexCharts hook for score, score comparison, and row
+status charts. The dashboard lists scores for individual
+runs. Compare only runs that use the same metric and data.
 
 ## Install
 
@@ -73,8 +72,9 @@ Precision results independently.
 
 Use **Compare with baseline** on a completed search. Choose a dataset split.
 The workbench uses the search's original recipe and configuration and the
-currently selected dataset. The report shows metric changes, paired rows,
-model calls, token use, and incomplete results.
+currently selected dataset. The report shows metric changes, the number of
+scored pairs for each metric, row outcomes, model calls, token use, and
+incomplete results.
 
 Each run records its split, declared scores, and non-secret model
 configuration. The report shows the count and fingerprint of the selected
@@ -89,8 +89,8 @@ completed workbench runs. It is read-only. It does not call a model and it
 does not show credential values. A successful response records the model that responded at that time. It does not prove that the provider is reachable now.
 Known models appear as suggestions in study model fields.
 
-The data page shows split counts, a small preview, and one split chart. Raw
-JSON editors stay in collapsed sections. The run page shows its model, data,
+The data page shows row counts beside each JSON editor and a preview of saved
+rows. The Test rows editor opens by default. The run page shows its model, data,
 strategy, and call limit before execution. Completed runs show score and row
 status charts; the full Elixir result stays in a collapsed section.
 

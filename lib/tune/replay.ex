@@ -22,7 +22,18 @@ defmodule Tune.Replay do
   def study(rows, opts) do
     tune = Tune.new(:saved_responses, opts)
     tune = %{tune | runner: :replay}
-    Tune.data(tune, test: fn -> rows |> resolve() |> Stream.with_index(&saved_case/2) end)
+
+    Tune.data(tune,
+      test: fn ->
+        source = resolve(rows)
+
+        if Enumerable.impl_for(source) do
+          Stream.with_index(source, &saved_case/2)
+        else
+          source
+        end
+      end
+    )
   end
 
   def output(%Case{metadata: %{saved_output: result}}), do: result
@@ -55,26 +66,6 @@ defmodule Tune.Replay do
     Protocol.UndefinedError -> {:error, "must be convertible to a string"}
     ArgumentError -> {:error, "must be convertible to a string"}
   end
-
-  def legacy_rows(rows), do: rows |> resolve() |> Stream.map(&legacy_row/1)
-
-  defp legacy_row(%{output: _} = row), do: row
-  defp legacy_row(%{"output" => _} = row), do: row
-
-  defp legacy_row(%{} = row) do
-    fields = %{input: row, expected: Case.field(row, :reference)}
-    aliases = Input.fields(row, [:id, :response])
-
-    case Map.pop(aliases, :response) do
-      {response, rest} when is_map_key(aliases, :response) ->
-        fields |> Map.merge(rest) |> Map.put(:output, response)
-
-      {_response, rest} ->
-        Map.merge(fields, rest)
-    end
-  end
-
-  defp legacy_row(row), do: row
 
   defp saved_case(row, index) do
     case parse(row) do

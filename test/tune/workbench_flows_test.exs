@@ -1,7 +1,7 @@
 defmodule Tune.WorkbenchFlowsTest do
   use ExUnit.Case, async: false
 
-  alias Tune.TestSupport.Transport
+  alias Tune.Examples.Support.Transport
   alias Tune.UI.ArtifactLive.Index, as: Artifacts
   alias Tune.UI.DashboardLive, as: Dashboard
   alias Tune.UI.RunLive.Show, as: RunReport
@@ -189,9 +189,9 @@ defmodule Tune.WorkbenchFlowsTest do
     assert conn.resp_body == "artifact not found"
   end
 
-  test "dashboard loads the example and shows score changes from completed runs" do
+  test "dashboard loads the example and shows individual scores from completed runs" do
     before_runs = mount(Dashboard)
-    assert render(Dashboard, before_runs) =~ "Scores appear after your first completed run"
+    assert render(Dashboard, before_runs) =~ "Runs will appear here"
     assert render(Artifacts, mount(Artifacts)) =~ "A completed tuning run will appear here"
 
     assert {:noreply, %{redirected: {:live, :redirect, %{to: "/studies/" <> path}}}} =
@@ -204,16 +204,15 @@ defmodule Tune.WorkbenchFlowsTest do
     study = offline_study(%{}, %{test: [2], validation: [2]})
     assert {:ok, evaluated} = Runner.start(study, :evaluate)
     assert finished(evaluated.id).result.selected_score == 2
-    assert mount(Dashboard).assigns.score_summary.change == nil
 
     assert {:ok, tuned} = Runner.start(study, :tune)
     assert %Tune.Artifact{} = finished(tuned.id).artifact
 
     dashboard = mount(Dashboard)
-    assert dashboard.assigns.score_summary == %{best: 6.0, latest: 6.0, change: 4.0}
     html = render(Dashboard, dashboard)
-    assert html =~ "run-score-chart"
-    assert html =~ "+4.0"
+    assert html =~ "Score 2"
+    assert html =~ "Score 6.0"
+    refute html =~ "Score trend"
     assert html =~ "/runs/#{evaluated.id}"
     assert render(Artifacts, mount(Artifacts)) =~ "/runs/#{tuned.id}/artifact"
     refute render(Artifacts, mount(Artifacts)) =~ "/runs/#{evaluated.id}/artifact"
@@ -221,8 +220,7 @@ defmodule Tune.WorkbenchFlowsTest do
     assert {:ok, changed} = Store.update_study(study.id, %{data: %{test: [1]}})
     assert {:ok, run} = Runner.start(changed, :evaluate)
     assert finished(run.id).status == :completed
-    assert mount(Dashboard).assigns.score_summary == %{best: 6.0, latest: 1.0, change: -1.0}
-    assert render(Dashboard, mount(Dashboard)) =~ "-1.0"
+    assert render(Dashboard, mount(Dashboard)) =~ "Score 1"
   end
 
   test "run preflight reports missing splits and rejects submission" do

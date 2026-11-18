@@ -40,7 +40,7 @@ defmodule Tune.Optimizers.COPRO do
 
   @impl true
   def requirements(_config),
-    do: %{datasets: [:train, :val], roles: [:proposal], model_calls?: true}
+    do: %{datasets: [:train, :validation], roles: [:proposal], model_calls?: true}
 
   @impl true
   def compile(config, program, %Context{} = ctx) do
@@ -57,7 +57,7 @@ defmodule Tune.Optimizers.COPRO do
     {baseline_id, ctx} =
       Context.consider(ctx, program, evaluation, %{label: "baseline", parent: nil})
 
-    evidence = Proposals.evidence(ctx.trainset, config.evidence_examples)
+    evidence = Proposals.evidence(ctx.train, config.evidence_examples)
     state = %{current: program, current_id: baseline_id, attempts: Map.new(names, &{&1, []})}
 
     {_state, ctx} =

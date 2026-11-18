@@ -4,11 +4,11 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
   alias Tune
   alias Tune.Adapter
   alias Tune.Artifact
-  alias Tune.Examples.GroundedQA
+  alias Tune.Examples.Support.GroundedQA
+  alias Tune.Examples.Support.QAWorld
+  alias Tune.Examples.Support.Transport
   alias Tune.Optimizers.Avatar
   alias Tune.Optimizers.Playbook
-  alias Tune.TestSupport.QAWorld
-  alias Tune.TestSupport.Transport
 
   defp config(stub),
     do: [
@@ -34,13 +34,13 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
 
   defp optimize(optimizer, target, proposal, extra \\ []) do
     Tune.TestSupport.Search.run(GroundedQA.new(),
-      optimizer: optimizer,
-      trainset: Keyword.get(extra, :train, train()),
-      valset: val(),
+      search: optimizer,
+      train: Keyword.get(extra, :train, train()),
+      validation: val(),
       metric: &QAWorld.metric/2,
       model: config(target),
       proposal: config(proposal),
-      max_model_calls: 200
+      model_calls: 200
     )
   end
 
@@ -164,7 +164,7 @@ defmodule Tune.Optimizers.AvatarPlaybookTest do
         refute text =~ "HIDDEN-ANSWER"
       end
 
-      {:ok, artifact} = Artifact.dump(best)
+      {:ok, artifact} = Tune.dump(report)
       assert artifact.parameters["lessons"]["value"] == ["Quote the source."]
       {:ok, json} = Artifact.encode(artifact)
       refute json =~ "fn"

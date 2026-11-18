@@ -1,0 +1,2 @@
+{"id":"paris","input":"Where is Paris?","output":"France","expected":"France"}
+{"id":"rome","input":"Where is Rome?","output":"Italy","expected":"Italy"}

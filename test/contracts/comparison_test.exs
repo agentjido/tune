@@ -1,8 +1,8 @@
 defmodule Tune.Contracts.ComparisonTest do
   use ExUnit.Case, async: true
 
+  alias Tune.Examples.Support.Transport
   alias Tune.Result
-  alias Tune.TestSupport.Transport
 
   test "resolves a limited split once and pairs the same ordered cases in both directions" do
     owner = self()
@@ -105,9 +105,40 @@ defmodule Tune.Contracts.ComparisonTest do
     assert report.baseline.summaries.value.mean == 5
     assert report.rows["row"].baseline.status == :ok
     assert report.challenger.stop_reason == :deadline
+    assert report.rows["row"].challenger.status == :interrupted
+    assert report.rows["row"].challenger.error.value == :deadline
+    assert report.rows["row"].metrics.value.status == :unpaired
     refute report.complete?
     assert_received {:winner_worker, worker}
     refute Process.alive?(worker)
+  end
+
+  test "reuses unspent reservations within a concurrent comparison" do
+    stub = Transport.script(List.duplicate(Transport.chat(answer: "yes"), 6))
+
+    {:ok, target} =
+      Tune.Predictor.new(
+        signature: [inputs: [question: Zoi.string()], outputs: [answer: Zoi.string()]]
+      )
+
+    study =
+      Tune.new(target,
+        model: [
+          model: Transport.model(),
+          adapter: Tune.Adapter.Chat,
+          request_options: Transport.request_options(stub)
+        ]
+      )
+      |> Tune.data(test: Enum.map(1..3, &%{input: %{question: "Question #{&1}?"}}))
+      |> Tune.score(:answer, fn output -> if output["answer"] == "yes", do: 1, else: 0 end)
+      |> Tune.limit(concurrency: 4, model_calls: 6, row_calls: 4)
+
+    assert {:ok, report} = Tune.compare(study, %Result{value: target}, split: :test)
+    assert report.complete?
+    assert report.baseline.calls == %{target: 3}
+    assert report.challenger.calls == %{target: 3}
+    assert report.metrics.answer.counts == %{tied: 3}
+    assert length(Transport.requests(stub)) == 6
   end
 
   test "does not start the winner after the baseline loses call accounting" do

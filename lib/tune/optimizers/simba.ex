@@ -63,11 +63,11 @@ defmodule Tune.Optimizers.SIMBA do
 
   @impl true
   def requirements(_config),
-    do: %{datasets: [:train, :val], roles: [:proposal], model_calls?: true}
+    do: %{datasets: [:train, :validation], roles: [:proposal], model_calls?: true}
 
   @impl true
   def compile(config, program, %Context{} = ctx) do
-    {order, ctx} = Context.shuffle(ctx, ctx.trainset)
+    {order, ctx} = Context.shuffle(ctx, ctx.train)
 
     state = %{
       pool: [%{id: 0, program: program, scores: [], parent: nil, strategy: :baseline}],

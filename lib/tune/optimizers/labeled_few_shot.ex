@@ -36,7 +36,7 @@ defmodule Tune.Optimizers.LabeledFewShot do
 
   @impl true
   def compile(config, program, %Context{} = ctx) do
-    {demos, ctx} = build(config, program, ctx.trainset, ctx)
+    {demos, ctx} = build(config, program, ctx.train, ctx)
     ctx = Context.note(ctx, :demos, Map.new(demos, fn {name, list} -> {name, length(list)} end))
     {:ok, Shared.put_demos(program, demos), ctx}
   end

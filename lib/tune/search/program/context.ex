@@ -21,8 +21,8 @@ defmodule Tune.Search.Program.Context do
     :run_options,
     :selector,
     :study,
-    trainset: [],
-    valset: [],
+    train: [],
+    validation: [],
     scores: []
   ]
 
@@ -36,8 +36,8 @@ defmodule Tune.Search.Program.Context do
       run_options: Keyword.fetch!(opts, :run_options),
       scores: Keyword.get(opts, :scores, []),
       selector: Keyword.get(opts, :selector),
-      trainset: Keyword.get(opts, :trainset, []),
-      valset: Keyword.get(opts, :valset, []),
+      train: Keyword.get(opts, :train, []),
+      validation: Keyword.get(opts, :validation, []),
       study: Keyword.get_lazy(opts, :study, fn -> Study.new(opts) end)
     }
   end
@@ -129,7 +129,7 @@ defmodule Tune.Search.Program.Context do
 
   @spec evaluate_validation(t(), Program.t()) :: {Evaluation.t(), t()}
   def evaluate_validation(%__MODULE__{} = ctx, program) do
-    evaluate(ctx, program, ctx.valset)
+    evaluate(ctx, program, ctx.validation)
   end
 
   @spec consider(t(), Program.t(), Evaluation.t() | nil, map()) :: {String.t(), t()}

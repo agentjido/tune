@@ -2,11 +2,11 @@ defmodule Tune.Contracts.FailurePathsTest do
   use ExUnit.Case, async: true
 
   alias Tune.Error
+  alias Tune.Examples.Support.Transport
   alias Tune.ModelConfig
   alias Tune.Predictor
   alias Tune.Program
   alias Tune.Result
-  alias Tune.TestSupport.Transport
 
   defmodule ProgramContract do
     @behaviour Tune.Program
@@ -92,6 +92,65 @@ defmodule Tune.Contracts.FailurePathsTest do
              |> Tune.evaluate()
 
     assert Transport.requests(stub) == []
+  end
+
+  test "invalid evaluation splits identify the allowed values without opening data" do
+    study =
+      Tune.replay(fn -> flunk("dataset opened for an invalid split") end)
+      |> Tune.score(:value, & &1)
+
+    assert {:error, %Error.Invalid.Option{option: :split, message: message}} =
+             Tune.evaluate(study, "test")
+
+    assert message =~ "expected :train, :validation, or :test"
+  end
+
+  test "comparison rejects replay studies before reading the saved rows" do
+    study =
+      Tune.replay(fn -> flunk("dataset opened for an unsupported comparison") end)
+      |> Tune.score(:value, & &1)
+
+    assert {:error, %Error.Invalid.Option{option: :compare, message: message}} =
+             Tune.compare(study, %Result{value: :winner}, split: :test)
+
+    assert message =~ "Use Tune.evaluate/1"
+  end
+
+  test "returns the split and the original stream error for each evaluation path", %{
+    predictor: predictor
+  } do
+    source = Stream.map([:bad_row], fn _ -> raise "malformed JSONL row" end)
+    stub = Transport.script([])
+
+    studies = [
+      {Tune.replay(source), :test},
+      {Tune.new(:target, run: fn _ -> flunk("runner started") end)
+       |> Tune.data(train: source), :train},
+      {Tune.new(predictor, model: model_options(stub)) |> Tune.data(validation: source),
+       :validation}
+    ]
+
+    for {study, split} <- studies do
+      assert {:error,
+              %Error.Invalid.Dataset{
+                split: ^split,
+                cause: %RuntimeError{message: "malformed JSONL row"}
+              } = error} = study |> Tune.score(:value, & &1) |> Tune.evaluate(split)
+
+      assert Exception.message(error) =~ inspect(split)
+    end
+
+    assert Transport.requests(stub) == []
+  end
+
+  test "a progress callback exception is not attributed to dataset reading" do
+    study =
+      Tune.replay([%{input: 1, output: 1}],
+        on_progress: fn _ -> raise "progress callback failed" end
+      )
+      |> Tune.score(:value, & &1)
+
+    assert_raise RuntimeError, "progress callback failed", fn -> Tune.evaluate(study) end
   end
 
   test "rejects invalid search strategies and spaces before opening the dataset", %{

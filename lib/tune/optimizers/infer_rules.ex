@@ -44,14 +44,14 @@ defmodule Tune.Optimizers.InferRules do
 
   @impl true
   def requirements(_config),
-    do: %{datasets: [:train, :val], roles: [:teacher, :proposal], model_calls?: true}
+    do: %{datasets: [:train, :validation], roles: [:teacher, :proposal], model_calls?: true}
 
   @impl true
   def compile(config, program, %Context{} = ctx) do
     {original, ctx} = Context.evaluate_validation(ctx, program)
     {_id, ctx} = Context.consider(ctx, program, original, %{label: "original"})
 
-    case BootstrapFewShot.build(ExampleSets.bootstrap_config(config), program, ctx.trainset, ctx) do
+    case BootstrapFewShot.build(ExampleSets.bootstrap_config(config), program, ctx.train, ctx) do
       {:ok, bootstrapped, ctx} ->
         {evaluation, ctx} = Context.evaluate_validation(ctx, bootstrapped)
         {_id, ctx} = Context.consider(ctx, bootstrapped, evaluation, %{label: "bootstrapped"})

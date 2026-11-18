@@ -53,7 +53,7 @@ defmodule Tune.Optimizers.BootstrapFewShot do
   @impl true
   def compile(config, program, %Context{} = ctx) do
     case check_accept_score(config, ctx) do
-      :ok -> build(config, program, ctx.trainset, ctx)
+      :ok -> build(config, program, ctx.train, ctx)
       {:error, error} -> {:error, error, ctx}
     end
   end

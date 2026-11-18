@@ -4,12 +4,12 @@ defmodule Tune.Optimizers.SearchTest do
   alias Tune
   alias Tune.Adapter
   alias Tune.Error
+  alias Tune.Examples.Support.Transport
   alias Tune.Optimizers.BootstrapFewShotWithOptuna
   alias Tune.Optimizers.BootstrapFewShotWithRandomSearch
   alias Tune.Optimizers.TPE
   alias Tune.Predictor
   alias Tune.Search.Program.Context
-  alias Tune.TestSupport.Transport
 
   defp config(stub),
     do: [
@@ -45,8 +45,8 @@ defmodule Tune.Optimizers.SearchTest do
     end)
   end
 
-  defp metric(example, result),
-    do: if(result.output["label"] == example.expected["label"], do: 1.0, else: 0.0)
+  defp metric(example, output),
+    do: if(output["label"] == example.expected["label"], do: 1.0, else: 0.0)
 
   defp has_demo?(prompt, ticket), do: String.contains?(prompt, "[[ ## ticket ## ]]\n#{ticket}\n")
 
@@ -86,15 +86,15 @@ defmodule Tune.Optimizers.SearchTest do
 
       assert {:ok, best, report} =
                Tune.TestSupport.Search.run(classifier(),
-                 optimizer:
+                 search:
                    {BootstrapFewShotWithRandomSearch,
                     accept_score: 1.0, num_candidate_programs: 2, max_labeled_demos: 0},
-                 trainset: train(3),
-                 valset: val(2),
+                 train: train(3),
+                 validation: val(2),
                  metric: &metric/2,
                  model: config(stub),
                  teacher: config(teacher()),
-                 max_model_calls: 100
+                 model_calls: 100
                )
 
       assert report.complete?
@@ -118,15 +118,15 @@ defmodule Tune.Optimizers.SearchTest do
 
       assert {:ok, best, report} =
                Tune.TestSupport.Search.run(classifier(),
-                 optimizer:
+                 search:
                    {BootstrapFewShotWithRandomSearch,
                     accept_score: 1.0, num_candidate_programs: 1},
-                 trainset: train(2),
-                 valset: val(2),
+                 train: train(2),
+                 validation: val(2),
                  metric: &metric/2,
                  model: config(stub),
                  teacher: config(teacher()),
-                 max_model_calls: 100
+                 model_calls: 100
                )
 
       assert report.best.metadata.label == "zero_shot"
@@ -145,15 +145,15 @@ defmodule Tune.Optimizers.SearchTest do
 
       assert {:ok, _best, report} =
                Tune.TestSupport.Search.run(classifier(),
-                 optimizer:
+                 search:
                    {BootstrapFewShotWithRandomSearch,
                     accept_score: 1.0, num_candidate_programs: 0, max_labeled_demos: 0},
-                 trainset: train(2),
-                 valset: val(2),
+                 train: train(2),
+                 validation: val(2),
                  metric: &metric/2,
                  model: config(stub),
                  teacher: config(teacher()),
-                 max_model_calls: 100
+                 model_calls: 100
                )
 
       [zero | _] = report.history
@@ -168,15 +168,15 @@ defmodule Tune.Optimizers.SearchTest do
 
       assert {:ok, _best, report} =
                Tune.TestSupport.Search.run(classifier(),
-                 optimizer:
+                 search:
                    {BootstrapFewShotWithRandomSearch,
                     accept_score: 1.0, num_candidate_programs: 3},
-                 trainset: train(2),
-                 valset: val(3),
+                 train: train(2),
+                 validation: val(3),
                  metric: &metric/2,
                  model: config(stub),
                  teacher: config(teacher()),
-                 max_model_calls: 4
+                 model_calls: 4
                )
 
       refute report.complete?
@@ -194,13 +194,13 @@ defmodule Tune.Optimizers.SearchTest do
     test "with no complete candidate the error carries the report" do
       assert {:error, %Error.Optimization.Failed{report: report}} =
                Tune.TestSupport.Search.run(classifier(),
-                 optimizer: {BootstrapFewShotWithRandomSearch, accept_score: 1.0},
-                 trainset: train(2),
-                 valset: val(3),
+                 search: {BootstrapFewShotWithRandomSearch, accept_score: 1.0},
+                 train: train(2),
+                 validation: val(3),
                  metric: &metric/2,
                  model: config(target(fn _, _ -> "billing" end)),
                  teacher: config(teacher()),
-                 max_model_calls: 2
+                 model_calls: 2
                )
 
       assert report.stop_reason == :budget_exhausted
@@ -210,21 +210,21 @@ defmodule Tune.Optimizers.SearchTest do
 
     test "validation data is required and must not overlap training inputs" do
       base = [
-        optimizer: {BootstrapFewShotWithRandomSearch, accept_score: 1.0},
-        trainset: train(2),
+        search: {BootstrapFewShotWithRandomSearch, accept_score: 1.0},
+        train: train(2),
         metric: &metric/2,
         model: config(:unused),
         teacher: config(:unused),
-        max_model_calls: 10
+        model_calls: 10
       ]
 
-      assert {:error, %Error.Invalid.Option{option: :valset}} =
+      assert {:error, %Error.Invalid.Option{option: :validation}} =
                Tune.TestSupport.Search.run(classifier(), base)
 
       assert {:error, %Error.Invalid.Definition{message: message}} =
                Tune.TestSupport.Search.run(
                  classifier(),
-                 Keyword.put(base, :valset, [hd(train(1))])
+                 Keyword.put(base, :validation, [hd(train(1))])
                )
 
       assert message =~ "same inputs"
@@ -232,13 +232,12 @@ defmodule Tune.Optimizers.SearchTest do
 
     test "the same seed gives the same search" do
       opts = [
-        optimizer:
-          {BootstrapFewShotWithRandomSearch, accept_score: 1.0, num_candidate_programs: 2},
-        trainset: train(5),
-        valset: val(2),
+        search: {BootstrapFewShotWithRandomSearch, accept_score: 1.0, num_candidate_programs: 2},
+        train: train(5),
+        validation: val(2),
         metric: &metric/2,
         teacher: config(teacher()),
-        max_model_calls: 200,
+        model_calls: 200,
         seed: 3
       ]
 
@@ -266,7 +265,7 @@ defmodule Tune.Optimizers.SearchTest do
 
       assert {:ok, best, report} =
                Tune.TestSupport.Search.run(classifier(),
-                 optimizer:
+                 search:
                    {BootstrapFewShotWithOptuna,
                     accept_score: 1.0,
                     max_bootstrapped_demos: 1,
@@ -274,12 +273,12 @@ defmodule Tune.Optimizers.SearchTest do
                     num_demo_sets: 6,
                     num_trials: 12,
                     n_startup: 3},
-                 trainset: train(6),
-                 valset: val(2),
+                 train: train(6),
+                 validation: val(2),
                  metric: &metric/2,
                  model: config(stub),
                  teacher: config(teacher()),
-                 max_model_calls: 200,
+                 model_calls: 200,
                  seed: 11
                )
 

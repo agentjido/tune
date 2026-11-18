@@ -50,7 +50,7 @@ defmodule Tune.Optimizers.BootstrapFewShotWithOptuna do
 
   @impl true
   def requirements(_config),
-    do: %{datasets: [:train, :val], roles: [:teacher], model_calls?: true}
+    do: %{datasets: [:train, :validation], roles: [:teacher], model_calls?: true}
 
   @impl true
   def compile(config, program, %Context{} = ctx) do

@@ -29,16 +29,19 @@ defmodule Tune.Artifact.Generic do
 
   @spec apply(map(), map(), String.t()) :: {:ok, map()} | {:error, Exception.t()}
   def apply(fresh_target, parameters, fingerprint) when is_map(fresh_target) do
-    available = Map.new(fresh_target, fn {name, value} -> {to_string(name), {name, value}} end)
-    names = Map.keys(parameters)
+    fields =
+      for {key, value} <- Map.to_list(fresh_target),
+          key != :__struct__ and (is_atom(key) or is_binary(key)),
+          name = to_string(key),
+          is_map_key(parameters, name),
+          do: {name, {key, value}}
 
-    current =
-      Map.new(names, fn name ->
-        value = available[name] && elem(available[name], 1)
-        {name, value}
-      end)
+    available = Map.new(fields)
 
-    with true <- Enum.all?(names, &Map.has_key?(available, &1)),
+    with true <- length(fields) == map_size(available),
+         true <- map_size(available) == map_size(parameters),
+         true <- target_fingerprint(parameters) == fingerprint,
+         current = Map.new(available, fn {name, {_key, value}} -> {name, value} end),
          true <- target_fingerprint(current) == fingerprint do
       {:ok,
        Enum.reduce(parameters, fresh_target, fn {name, value}, target ->

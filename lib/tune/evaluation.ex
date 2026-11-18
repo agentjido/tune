@@ -35,29 +35,10 @@ defmodule Tune.Evaluation do
             | :lost_accounting
         }
 
-  @doc """
-  Builds a pipeline that scores saved responses. Rows use `response`, with optional
-  `id`, `user_input`, `retrieved_contexts`, and `reference` fields.
-  """
-  @spec replay(Enumerable.t() | (-> Enumerable.t()), keyword()) :: Tune.t()
-  def replay(rows, opts \\ []) do
-    Tune.replay(fn -> Tune.Replay.legacy_rows(rows) end, opts)
-  end
-
   @doc "Starts an evaluation under the caller's Task.Supervisor."
   @spec start(GenServer.server(), Tune.t(), :train | :validation | :test) :: Task.t()
   def start(supervisor, pipeline, role \\ :test) do
     Task.Supervisor.async_nolink(supervisor, fn -> Tune.evaluate(pipeline, role) end)
-  end
-
-  @doc "Compares a baseline with a loaded artifact. Use Tune.compare/3 for a search result."
-  @spec compare(Tune.t(), Tune.Artifact.t(), :train | :validation | :test) ::
-          {:ok, %{baseline: t(), challenger: t()}} | {:error, term()}
-  def compare(%Tune{} = pipeline, %Tune.Artifact{} = artifact, role \\ :test) do
-    with {:ok, target} <- Tune.load(artifact, pipeline.target),
-         {:ok, report} <- Tune.Pipeline.Compiler.compare(pipeline, target, role) do
-      {:ok, Map.take(report, [:baseline, :challenger])}
-    end
   end
 
   @doc "Returns the summary for one named score."

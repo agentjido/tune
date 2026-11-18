@@ -26,10 +26,10 @@ if Code.ensure_loaded?(PhoenixPlayground) do
              Tune.UI.Store.update_study(socket.assigns.study.id, %{
                data: %{train: train, validation: validation, test: test}
              }) do
-        {:noreply, assign_data(socket, study, params, nil)}
+        {:noreply, assign_data(socket, study, params, "Data saved.")}
       else
         {:error, error} ->
-          {:noreply, assign(socket, error: error, form: to_form(params, as: :data))}
+          {:noreply, assign(socket, error: error, notice: nil, form: to_form(params, as: :data))}
       end
     end
 
@@ -37,26 +37,44 @@ if Code.ensure_loaded?(PhoenixPlayground) do
     def render(assigns) do
       ~H"""
       <.shell title={"#{@study.name}: data"} active="studies">
-        <.study_steps study={@study} />
+        <.study_steps study={@study} current={:data} />
         <div :if={@error} class="alert alert-error mb-6">{error_message(@error)}</div>
-        <section class="card mb-6 border border-base-300 bg-base-100 shadow-sm">
+        <form phx-submit="save" class="card border border-base-300 bg-base-100">
+          <div class="card-body gap-5">
+          <h2 class="card-title">Edit rows</h2>
+          <div class="space-y-1 text-sm">
+            <p :if={@study.recipe == "saved_responses"}>
+              Paste saved answers under Test rows. Use <code>input</code> with
+              <code>user_input</code> and <code>retrieved_contexts</code>, and provide the saved answer as
+              <code>output</code>. Use <code>expected</code> for an optional reference.
+            </p>
+            <p :if={@study.recipe == "structured_prompt"}>
+              Paste JSON arrays with <code>inputs</code> and <code>labels</code>.
+            </p>
+            <p>Each split accepts up to 1,000 rows.</p>
+          </div>
+          <details class="collapse collapse-arrow border border-base-300 bg-base-200" open>
+            <summary class="collapse-title font-medium">Test rows · {@counts.test}</summary>
+            <div class="collapse-content"><textarea aria-label="Test rows" class="textarea textarea-bordered min-h-40 w-full font-mono text-sm" name="data[test]">{@form[:test].value}</textarea></div>
+          </details>
+          <details class="collapse collapse-arrow border border-base-300 bg-base-200">
+            <summary class="collapse-title font-medium">Training rows · {@counts.train}</summary>
+            <div class="collapse-content"><textarea aria-label="Training rows" class="textarea textarea-bordered min-h-40 w-full font-mono text-sm" name="data[train]">{@form[:train].value}</textarea></div>
+          </details>
+          <details class="collapse collapse-arrow border border-base-300 bg-base-200">
+            <summary class="collapse-title font-medium">Validation rows · {@counts.validation}</summary>
+            <div class="collapse-content"><textarea aria-label="Validation rows" class="textarea textarea-bordered min-h-40 w-full font-mono text-sm" name="data[validation]">{@form[:validation].value}</textarea></div>
+          </details>
+          <div class="card-actions items-center">
+            <button class="btn btn-primary" type="submit" phx-disable-with="Saving…">Save data</button>
+            <p role="status">{@notice}</p>
+          </div>
+          </div>
+        </form>
+        <section :if={@preview != []} class="card mt-6 border border-base-300 bg-base-100">
           <div class="card-body">
-            <div class="grid gap-4 md:grid-cols-2 md:items-center">
-              <div class="stats stats-vertical border border-base-300 shadow-sm sm:stats-horizontal">
-                <div class="stat"><div class="stat-title">Train</div><div class="stat-value text-2xl">{@counts.train}</div></div>
-                <div class="stat"><div class="stat-title">Validation</div><div class="stat-value text-2xl">{@counts.validation}</div></div>
-                <div class="stat"><div class="stat-title">Test</div><div class="stat-value text-2xl">{@counts.test}</div></div>
-              </div>
-              <.chart
-                id="data-split-chart"
-                type="bar"
-                labels={["Train", "Validation", "Test"]}
-                series={[%{name: "Rows", data: [@counts.train, @counts.validation, @counts.test]}]}
-                height={180}
-                class="min-h-44 w-full"
-              />
-            </div>
-            <div :if={@preview != []} class="mt-4 overflow-x-auto">
+            <h2 class="card-title">Saved row preview</h2>
+            <div class="overflow-x-auto">
               <table class="table table-sm">
                 <thead><tr><th>Split</th><th>Inputs</th><th>Labels</th></tr></thead>
                 <tbody>
@@ -70,34 +88,6 @@ if Code.ensure_loaded?(PhoenixPlayground) do
             </div>
           </div>
         </section>
-        <form phx-submit="save" class="card border border-base-300 bg-base-100 shadow-sm">
-          <div class="card-body gap-5">
-          <div class="alert alert-info">
-            <span :if={@study.recipe == "saved_responses"}>
-              Paste saved answers under Test rows. Use <code>input</code> with
-              <code>user_input</code> and <code>retrieved_contexts</code>, and provide the saved answer as
-              <code>output</code>. Use <code>expected</code> for an optional reference.
-            </span>
-            <span :if={@study.recipe == "structured_prompt"}>
-              Paste JSON arrays with <code>inputs</code> and <code>labels</code>.
-            </span>
-            <span>Each role accepts at most 1,000 rows.</span>
-          </div>
-          <details class="collapse collapse-arrow border border-base-300 bg-base-200">
-            <summary class="collapse-title font-medium">Training rows · {@counts.train}</summary>
-            <div class="collapse-content"><textarea aria-label="Training rows" class="textarea textarea-bordered min-h-40 w-full font-mono text-sm" name="data[train]">{@form[:train].value}</textarea></div>
-          </details>
-          <details class="collapse collapse-arrow border border-base-300 bg-base-200">
-            <summary class="collapse-title font-medium">Validation rows · {@counts.validation}</summary>
-            <div class="collapse-content"><textarea aria-label="Validation rows" class="textarea textarea-bordered min-h-40 w-full font-mono text-sm" name="data[validation]">{@form[:validation].value}</textarea></div>
-          </details>
-          <details class="collapse collapse-arrow border border-base-300 bg-base-200">
-            <summary class="collapse-title font-medium">Test rows · {@counts.test}</summary>
-            <div class="collapse-content"><textarea aria-label="Test rows" class="textarea textarea-bordered min-h-40 w-full font-mono text-sm" name="data[test]">{@form[:test].value}</textarea></div>
-          </details>
-          <div class="card-actions justify-end"><button class="btn btn-primary" type="submit">Save data</button></div>
-          </div>
-        </form>
       </.shell>
       """
     end
@@ -124,7 +114,7 @@ if Code.ensure_loaded?(PhoenixPlayground) do
 
     defp preview_row(row, role), do: %{role: role, inputs: row, labels: nil}
 
-    defp assign_data(socket, study, params, error) do
+    defp assign_data(socket, study, params, notice) do
       counts = Map.new([:train, :validation, :test], &{&1, length(study.data[&1] || [])})
 
       preview =
@@ -141,7 +131,8 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         form: to_form(params, as: :data),
         counts: counts,
         preview: preview,
-        error: error
+        error: nil,
+        notice: notice
       )
     end
   end

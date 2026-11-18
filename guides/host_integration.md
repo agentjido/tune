@@ -19,6 +19,17 @@ evidence that the application gives it.
 
 ## Hosted structured inference
 
+A host can run a typed predictor or composed program directly with
+`Tune.Runtime.run/3`. Pass the application model configuration and any
+execution limits.
+
+~~~elixir
+{:ok, prediction} =
+  Tune.Runtime.run(program, inputs, model: model, max_model_calls: 2)
+
+prediction.output
+~~~
+
 A host can keep its own inference path for a structured Tune predictor.
 
 ```elixir

@@ -4,10 +4,10 @@ defmodule Tune.PredictorTest do
   alias Tune
   alias Tune.Adapter
   alias Tune.Error
+  alias Tune.Examples.Support.Transport
   alias Tune.ModelConfig
   alias Tune.Prediction
   alias Tune.Predictor
-  alias Tune.TestSupport.Transport
 
   @expected %{"label" => "billing", "confidence" => 0.8}
 

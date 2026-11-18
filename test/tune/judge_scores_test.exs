@@ -2,9 +2,9 @@ defmodule Tune.JudgeScoresTest do
   use ExUnit.Case, async: true
 
   alias Tune.Case
+  alias Tune.Examples.Support.Transport
   alias Tune.Scores.ContextPrecision
   alias Tune.Scores.Faithfulness
-  alias Tune.TestSupport.Transport
 
   defp judge_options(stub) do
     [

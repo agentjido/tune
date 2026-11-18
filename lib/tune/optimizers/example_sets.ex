@@ -25,13 +25,13 @@ defmodule Tune.Optimizers.ExampleSets do
     boot = bootstrap_config(config)
 
     {labeled, ctx} =
-      LabeledFewShot.build(%{k: boot.max_labeled_demos, sample: true}, program, ctx.trainset, ctx)
+      LabeledFewShot.build(%{k: boot.max_labeled_demos, sample: true}, program, ctx.train, ctx)
 
     {:ok, "labeled", Shared.put_demos(program, labeled), ctx}
   end
 
   def build(-1, config, program, ctx) do
-    case BootstrapFewShot.build(bootstrap_config(config), program, ctx.trainset, ctx) do
+    case BootstrapFewShot.build(bootstrap_config(config), program, ctx.train, ctx) do
       {:ok, candidate, ctx} -> {:ok, "bootstrap", candidate, ctx}
       {:error, _error, ctx} -> {:error, ctx}
     end
@@ -39,7 +39,7 @@ defmodule Tune.Optimizers.ExampleSets do
 
   def build(seed, config, program, ctx) when seed >= 0 do
     boot = bootstrap_config(config)
-    {train, ctx} = Context.shuffle(ctx, ctx.trainset)
+    {train, ctx} = Context.shuffle(ctx, ctx.train)
     {size, ctx} = Context.uniform(ctx, max(boot.max_bootstrapped_demos, 1))
 
     case BootstrapFewShot.build(%{boot | max_bootstrapped_demos: size + 1}, program, train, ctx) do

@@ -34,51 +34,54 @@ if Code.ensure_loaded?(PhoenixPlayground) do
     def render(assigns) do
       ~H"""
       <.shell title={"#{@study.name}: run"} active="studies">
-        <.study_steps study={@study} />
+        <.study_steps study={@study} current={:run} />
         <div :if={@error} class="alert alert-error mb-6">{error_message(@error)}</div>
-        <section class="card mb-6 border border-base-300 bg-base-100 shadow-sm">
-          <div class="card-body">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <h2 class="card-title">Ready to run</h2>
-              <a class="btn btn-sm btn-ghost" href={"/studies/#{@study.id}/settings"}>Edit setup</a>
+        <section class="card mb-6 border border-base-300 bg-base-100">
+          <div class="card-body gap-4">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <h2 class="card-title">{if @preflight.replay?, do: "Evaluate saved answers", else: "Evaluate"}</h2>
+              <a class="btn btn-ghost btn-sm" href={"/studies/#{@study.id}/settings"}>Edit setup</a>
             </div>
-            <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <div><div class="text-sm text-base-content/60">Target model</div><div class="break-all font-medium">{@preflight.model}</div></div>
-              <div><div class="text-sm text-base-content/60">Adapter</div><div class="font-medium">{@preflight.adapter}</div></div>
-              <div><div class="text-sm text-base-content/60">Strategy</div><div class="font-medium">{@preflight.strategy}</div></div>
-              <div><div class="text-sm text-base-content/60">Model-call limit</div><div class="font-medium">{@preflight.model_calls}</div></div>
+            <dl class="grid gap-4 sm:grid-cols-3">
+              <div class="min-w-0">
+                <dt class="text-sm">Target model</dt>
+                <dd class="break-all font-medium">{@preflight.model}</dd>
+              </div>
+              <div>
+                <dt class="text-sm">Evaluation data</dt>
+                <dd class="font-medium">
+                  <span :if={@preflight.evaluation_role}>{@preflight.evaluation_role} · {@preflight.evaluation_rows} rows</span>
+                  <span :if={!@preflight.evaluation_role}>No rows</span>
+                </dd>
+              </div>
+              <div>
+                <dt class="text-sm">Model-call limit</dt>
+                <dd class="font-medium">{@preflight.model_calls}</dd>
+              </div>
+            </dl>
+            <p :if={@preflight.adapter} class="text-sm">Adapter: {@preflight.adapter}</p>
+            <div :if={!@preflight.evaluate_ready?} class="alert alert-warning">
+              <span>Add test, validation, or training data before evaluation.</span>
+              <a class="link" href={"/studies/#{@study.id}/data"}>Add rows</a>
             </div>
-            <div class="mt-2 flex flex-wrap gap-2">
-              <span class="badge badge-ghost">train {@preflight.train}</span>
-              <span class="badge badge-ghost">validation {@preflight.validation}</span>
-              <span class="badge badge-ghost">test {@preflight.test}</span>
-              <span :if={@preflight.evaluation_role} class="badge badge-info">
-                evaluation uses {@preflight.evaluation_role} · {@preflight.evaluation_rows} rows
-              </span>
-            </div>
-            <div :if={!@preflight.evaluate_ready?} class="alert alert-warning mt-4">
-              Add test, validation, or training data before evaluation.
-            </div>
-            <div :if={@preflight.tune_issue} class="alert alert-warning mt-4">
-              {@preflight.tune_issue}
+            <div class="card-actions">
+              <button class="btn btn-primary" disabled={!@preflight.evaluate_ready?} phx-click="start" phx-value-mode="evaluate">Start evaluation</button>
             </div>
           </div>
         </section>
-        <div class="grid gap-4 md:grid-cols-2">
-          <section class="card border border-base-300 bg-base-100 shadow-sm">
-            <div class="card-body">
-            <h2 class="card-title">{if @preflight.replay?, do: "Evaluate saved answers", else: "Evaluate"}</h2>
-            <div class="card-actions mt-4"><button class="btn btn-outline" disabled={!@preflight.evaluate_ready?} phx-click="start" phx-value-mode="evaluate">Start evaluation</button></div>
-            </div>
-          </section>
-          <section :if={@study.recipe != "saved_responses"} class="card border border-primary/30 bg-primary text-primary-content shadow-sm">
-            <div class="card-body">
+        <section :if={!@preflight.replay?} class="card border border-base-300 bg-base-100">
+          <div class="card-body gap-3">
             <h2 class="card-title">Tune</h2>
-            <p class="opacity-80">Run the selected strategy and produce a learned-value artifact.</p>
-            <div class="card-actions mt-4"><button class="btn" disabled={!@preflight.tune_ready?} phx-click="start" phx-value-mode="tune">Start tuning</button></div>
+            <p :if={@preflight.strategy} class="text-sm">Search strategy: {@preflight.strategy}</p>
+            <p :if={@preflight.tune_issue} class="text-sm">
+              {@preflight.tune_issue}
+              <a class="link" href={"/studies/#{@study.id}/data"}>Add rows</a>
+            </p>
+            <div class="card-actions">
+              <button class="btn btn-outline" disabled={!@preflight.tune_ready?} phx-click="start" phx-value-mode="tune">Start tuning</button>
             </div>
-          </section>
-        </div>
+          </div>
+        </section>
         <div :if={@preflight.compare_ready?} class="mt-4">
           <.compare_form splits={@preflight.splits} />
         </div>
@@ -114,9 +117,6 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         adapter: study.config["adapter"],
         strategy: strategy,
         model_calls: Tune.Case.field(study.config["limits"] || %{}, :model_calls, "not set"),
-        train: counts.train,
-        validation: counts.validation,
-        test: counts.test,
         evaluation_role: role,
         evaluation_rows: if(role, do: counts[role], else: 0),
         evaluate_ready?: not is_nil(role),

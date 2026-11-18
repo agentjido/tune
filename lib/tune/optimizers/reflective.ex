@@ -54,7 +54,7 @@ defmodule Tune.Optimizers.Reflective do
   def run(config, program, components, ctx) do
     {evaluation, ctx} = Context.evaluate_validation(ctx, program)
     {id, ctx} = Context.consider(ctx, program, evaluation, %{label: "baseline", parents: []})
-    {order, ctx} = Context.shuffle(ctx, ctx.trainset)
+    {order, ctx} = Context.shuffle(ctx, ctx.train)
 
     state = %{
       pool: [entry(id, program, evaluation, [], components)],

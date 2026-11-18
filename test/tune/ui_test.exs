@@ -107,6 +107,15 @@ defmodule Tune.UITest do
     assert message =~ "output"
 
     assert {:error, %Tune.Error.Invalid.Definition{message: message}} =
+             Store.update_study(study.id, %{
+               data: %{test: [%{"user_input" => "question", "response" => "answer"}]}
+             })
+
+    assert message =~ "test row 1"
+    assert message =~ "input"
+    assert message =~ "output"
+
+    assert {:error, %Tune.Error.Invalid.Definition{message: message}} =
              Store.update_study(study.id, %{config: %{"limits" => %{"concurrency" => 0}}})
 
     assert message =~ "concurrency"

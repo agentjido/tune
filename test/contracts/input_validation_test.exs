@@ -2,8 +2,8 @@ defmodule Tune.Contracts.InputValidationTest do
   use ExUnit.Case, async: true
 
   alias Tune.Error
+  alias Tune.Examples.Support.Transport
   alias Tune.ModelConfig
-  alias Tune.TestSupport.Transport
 
   test "rejects invalid public options and preserves Tune's semantic checks" do
     study = Tune.new(1, run: fn _, input -> input end)
