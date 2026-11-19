@@ -22,7 +22,7 @@ defmodule Tune.Examples.RouterService do
 
   @doc "Runs a policy locally with no model calls."
   def execute(program, input) do
-    Tune.Runtime.run(program, input, model: Offline.model(:offline_router), max_model_calls: 0)
+    Tune.Runtime.run(program, input, model: Offline.model(:unused), max_model_calls: 0)
   end
 
   @impl true

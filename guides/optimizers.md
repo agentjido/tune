@@ -120,7 +120,7 @@ study =
 {:ok, comparison} = Tune.compare(study, winner, split: :test)
 ```
 
-Run the [grid search example](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/03_evolution/03_01_batch_grid)
+Run the [grid search example](https://github.com/agentjido/tune/tree/v0.5.0/examples/03_evolution/03_01_batch_grid)
 from the Tune root.
 
 ```sh
@@ -170,8 +170,8 @@ transport retries within a call. An opaque runner owns external calls and
 detached resources. Keep data factories and variation callbacks bounded so the
 study can reach its worker deadline and cancellation checks.
 
-Run the [seeded word search](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/03_evolution/03_02_evolve_string)
-and [hyperparameter reload](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/03_evolution/03_05_axon_training)
+Run the [seeded word search](https://github.com/agentjido/tune/tree/v0.5.0/examples/03_evolution/03_02_evolve_string)
+and [hyperparameter reload](https://github.com/agentjido/tune/tree/v0.5.0/examples/03_evolution/03_05_axon_training)
 demos from the Tune root.
 
 ```sh

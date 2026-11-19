@@ -18,5 +18,5 @@ The initial CI pairs are Elixir 1.18.4 with OTP 27 and Elixir 1.20.4 with
 OTP 29. Use a versioned sample to reproduce issues with artifacts. Replace
 credentials, private prompts, and user data with sample values.
 
-Maintainers can use the [release procedure](https://github.com/mikehostetler/tune/blob/main/docs/releasing.md)
+Maintainers can use the [release procedure](https://github.com/agentjido/tune/blob/main/docs/releasing.md)
 to verify a release commit, publish to Hex, and check the published package.

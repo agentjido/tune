@@ -1,51 +1,59 @@
 # Release Tune
 
-Tune uses the shared Jido CI checks. Its Release workflow uses the same
-Hex API key method as ReqLLM. The workflow verifies a tag, publishes to
-Hex, checks the published package, and creates the GitHub release.
+Tune uses the shared Jido CI checks and the same `HEX_API_KEY` secret name
+as ReqLLM. Its Release workflow verifies the tagged commit, tests the
+package, and checks the Hex checksum before it creates a GitHub release.
 
 ## Set up the repository
 
-Before the first release, review the repository history and make the
-source public with owner approval. Enable private vulnerability reporting
-and the required CI checks on `main`. Restrict creation and changes to
-version tags to release maintainers.
+Enable private vulnerability reporting and the required CI checks on
+`main`. Restrict creation and changes to version tags to release maintainers.
 
-Create the GitHub environment `hex-publish`. Restrict it to version tags
-and enable review where supported by the GitHub plan. Make the existing
-Hex publish key available as `HEX_API_KEY` to that environment or as an
-approved repository secret. Check that the key can create the first public
-package under the intended Hex owner. Keep provider credentials out of CI.
+Use the GitHub environment `hex-publish`, restricted to version tags.
+After the first release, create a Hex key with `publish:tune` for the
+package and `api:read`. Add it as an environment secret. Run the command in
+your own terminal and paste the key at the GitHub CLI prompt.
+
+```sh
+gh secret set HEX_API_KEY -R agentjido/tune --env hex-publish
+```
+
+## Record the first release
+
+Hex already has `tune` version `0.5.0`. The published package files match
+commit `b271f775aca0300b34f2a5e01d951ce15c7b5f66`. Use that commit for
+the `v0.5.0` tag. Its workflow predates the `finalize` operation, so use
+the changelog entry to create the first GitHub release from that tag.
+Use a new patch version for later package changes.
 
 ## Publish a version
 
 1. Update `@version` in `mix.exs` and add the matching changelog entry in a
-   pull request. Check that the docs and examples still use the correct
-   version. The first version is `0.5.0`.
+   pull request. Check that the docs and examples use the release version.
 2. Merge the PR and wait for the CI run on the exact commit on `main`.
    Create and push the matching annotated version tag when authorized.
-3. Open the Release workflow, select the tag, and run it with publishing
-   turned off. Inspect the package manifest and checksum in the workflow's
-   artifact. Check the package, docs, and release notes.
-4. Run the same workflow for the same tag with publishing turned on.
-   Approve the environment if it requests review. The workflow verifies
-   the commit before publishing and checks the published package before
-   it creates the GitHub release.
+3. Open the Release workflow, select the tag, and run it with operation
+   `dry-run`. Inspect the manifest and checksum in the workflow artifact.
+4. Run the same workflow for the same tag with operation `publish`. If Hex
+   stages the release, open the approval link in the publish job log.
+   Compare the checksums and approve it on Hex with 2FA while the job waits.
 5. Open the version on Hex, its HexDocs, and its GitHub release. Check
    the install instruction and the links in the generated start page.
 
-For the first tag, the equivalent GitHub CLI commands after approval are:
+For example, use these commands for `v0.5.1`.
 
 ```sh
-gh workflow run release.yml --ref v0.5.0
-gh workflow run release.yml --ref v0.5.0 -f publish=true
+gh workflow run release.yml --ref v0.5.1 -f operation=dry-run
+gh workflow run release.yml --ref v0.5.1 -f operation=publish
 ```
 
-If Hex succeeds and the GitHub release job fails, rerun the failed job in
-the original workflow. If Hex published the version but the publish job
-was interrupted, verify the published package and create the GitHub
-release from the same tag. For a defective package, have the Hex owner
-retire the affected version and ship a fix under a new patch version.
+If the publish job times out while it waits for Hex approval, check the
+release on Hex before you rerun the workflow. After approval, run
+`operation=finalize` for the same tag to verify the package and create the
+GitHub release. For a local publish from a new tag, use the Hex version
+pinned in the workflow so the archive checksum matches. For a defective
+package, have the Hex owner retire the affected version and ship a fix
+under a new patch version.
 
 Hex Workload Identity can replace the API key after the package exists
 and the Jido projects are ready to make that change.

@@ -2,7 +2,7 @@ defmodule Tune.MixProject do
   use Mix.Project
 
   @version "0.5.0"
-  @source_url "https://github.com/mikehostetler/tune"
+  @source_url "https://github.com/agentjido/tune"
   @description "Evaluation and search pipelines for Elixir"
 
   def project do
@@ -75,7 +75,6 @@ defmodule Tune.MixProject do
       {:llm_db, "~> 2026.11.0"},
       {:zoi, "~> 0.19"},
       {:splode, "~> 0.3"},
-      {:req, "~> 0.7"},
       {:phoenix_playground, "~> 0.1.9", optional: true},
       {:plug, "~> 1.20 and >= 1.20.4", optional: true},
       {:nx, "~> 1.0", only: :test},

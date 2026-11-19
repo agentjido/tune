@@ -58,9 +58,9 @@ MIX_ENV=test mix run examples/01_dspy/01_03_bootstrap_qa/compare_demo.exs
 This demo tunes a question-answering program using scripted ReqLLM replies.
 It reports held-out accuracy, improved and regressed rows, and model calls.
 
-See the [numbered offline examples](https://github.com/mikehostetler/tune/tree/v0.5.0/examples),
-[typed prompt inspection](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/01_dspy/01_01_extract_ticket),
-and [grid search with paired comparison](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/03_evolution/03_01_batch_grid).
+See the [numbered offline examples](https://github.com/agentjido/tune/tree/v0.5.0/examples),
+[typed prompt inspection](https://github.com/agentjido/tune/tree/v0.5.0/examples/01_dspy/01_01_extract_ticket),
+and [grid search with paired comparison](https://github.com/agentjido/tune/tree/v0.5.0/examples/03_evolution/03_01_batch_grid).
 
 ## Experimental local workbench
 

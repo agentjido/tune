@@ -22,7 +22,12 @@ case System.fetch_env!("TUNE_SMOKE_MODE") do
     try do
       {:ok, _pid} = Tune.UI.start(port: 0, open_browser: false)
       {:ok, {{127, 0, 0, 1}, port}} = PhoenixPlayground.Endpoint.server_info(:http)
-      %{status: 200, body: body} = Req.get!("http://127.0.0.1:#{port}/")
+
+      {:ok, {{_, 200, _}, _, body}} =
+        :httpc.request(:get, {~c"http://127.0.0.1:#{port}/", []}, [timeout: 5_000],
+          body_format: :binary
+        )
+
       true = String.contains?(body, "Tune dashboard")
     after
       System.no_halt(false)

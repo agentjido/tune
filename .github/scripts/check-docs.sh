@@ -13,7 +13,7 @@ for page in getting_started programs changelog; do
   grep -Fq "href=\"$page.html\"" "$docs_dir/readme.html"
 done
 
-source_url="https://github.com/mikehostetler/tune"
+source_url="https://github.com/agentjido/tune"
 grep -Fq "href=\"$source_url/blob/v$version/README.md" "$docs_dir/readme.html"
 
 for example in examples examples/01_dspy/01_01_extract_ticket examples/03_evolution/03_01_batch_grid; do

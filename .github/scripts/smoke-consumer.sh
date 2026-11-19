@@ -37,6 +37,8 @@ defmodule TuneSmoke.MixProject do
 
   def project, do: [app: :tune_smoke, version: "0.0.0", deps: deps()]
 
+  def application, do: [extra_applications: [:inets]]
+
   defp deps do
     tune =
       case System.fetch_env("TUNE_SMOKE_SOURCE") do

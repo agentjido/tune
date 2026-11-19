@@ -11,7 +11,7 @@ defmodule Tune.Contracts.QAReleaseTest do
   Offline release proof for the public lazy pipeline.
 
   It compares a two-step grounded QA program before and after search for each
-  prompt format. All replies use Req.Test through the public ReqLLM API.
+  prompt format. All replies use an in-process Plug through the public ReqLLM API.
   """
 
   defp target(adapter, options) do

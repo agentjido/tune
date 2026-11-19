@@ -3,10 +3,14 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      publish:
-        description: Publish to Hex and create a GitHub release
-        type: boolean
-        default: false
+      operation:
+        description: Check a tag, publish through Hex, or record an existing Hex release
+        type: choice
+        default: dry-run
+        options:
+          - dry-run
+          - publish
+          - finalize
 
 concurrency:
   group: tune-hex-release
@@ -73,8 +77,6 @@ jobs:
       - run: mix hex.audit
       - run: bash .github/scripts/check-package.sh "$RUNNER_TEMP/tune-hex"
       - run: mix hex.publish --dry-run --yes
-        env:
-          HEX_API_KEY: dry-run
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: tune-hex
@@ -82,10 +84,10 @@ jobs:
 
   publish:
     name: Publish to Hex
-    if: ${{ inputs.publish }}
+    if: ${{ inputs.operation == 'publish' }}
     needs: verify
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 60
     environment: hex-publish
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -123,13 +125,14 @@ jobs:
             echo "Configure the Hex publish key in the hex-publish environment." >&2
             exit 1
           fi
-          mix hex.publish --yes
+          mix hex.publish --yes --wait
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
 
   release:
     name: Verify Hex and create GitHub release
     needs: [verify, publish]
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (inputs.operation == 'finalize' || needs.publish.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -144,10 +147,19 @@ jobs:
         with:
           otp-version: "29"
           elixir-version: "1.20.4"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tune-hex
+          path: ${{ runner.temp }}/tune-hex
       - name: Verify published metadata and docs
         run: |
           curl -fsS --retry 5 --retry-all-errors "https://hex.pm/api/packages/tune/releases/$VERSION" \
-            | jq -er '.checksum' > "$RUNNER_TEMP/tune-hex-checksum"
+            | jq -er '.checksum | ascii_downcase' > "$RUNNER_TEMP/tune-hex-checksum"
+          read -r expected _ < "$RUNNER_TEMP/tune-hex/sha256.txt"
+          if [[ "$(cat "$RUNNER_TEMP/tune-hex-checksum")" != "$expected" ]]; then
+            echo "The published Hex checksum differs from the package built from this tag." >&2
+            exit 1
+          fi
           curl -fsS --retry 5 --retry-all-errors -o /dev/null "https://hexdocs.pm/tune/$VERSION/"
       - run: bash .github/scripts/smoke-consumer.sh "$VERSION" core
       - name: Create GitHub release
