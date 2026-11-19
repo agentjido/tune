@@ -18,6 +18,15 @@ score. Tune runs your code on the examples, searches for a better setting or
 prompt, and then checks the winner against your current version on examples
 the search did not see.
 
+The same small API covers three jobs that usually need three tools:
+
+- **An eval suite.** Score live code, saved answers, tool calls, or
+  multi-turn transcripts, and gate a release on a paired comparison.
+- **An evolution runner.** Run grid or genetic search over any Elixir value,
+  from a config map to a route plan or an Axon learning rate.
+- **A prompt optimizer.** Dial in instructions and few-shot examples with
+  strategies modeled on DSPy and GEPA, in native Elixir with no Python.
+
 > **Status:** Tune is in beta. The API can change before 1.0.
 
 ## Why Tune?
@@ -108,11 +117,16 @@ walks through each step and shows how to load the saved JSON.
 ## Features
 
 - **Evaluate** Elixir functions, typed LLM programs, or saved outputs against
-  labeled cases with named scores.
-- **Search** Elixir values with grid or genetic search.
-- **Tune prompts** by searching instructions and few-shot demonstrations under
-  an explicit model-call limit. Teacher and proposal models stay separate from
-  the model you are tuning.
+  labeled cases with named scores. Built-in judges score faithfulness and
+  context precision for retrieval.
+- **Evolve** any Elixir value with grid or genetic search. You supply the
+  genome callbacks; Tune handles selection, elitism, stop rules, snapshots,
+  and cancellation.
+- **Tune prompts** with more than a dozen strategies, including bootstrap
+  few-shot, MIPROv2, COPRO, SIMBA, and GEPA-style reflective search. Every
+  model-calling search runs under an explicit call limit, and teacher and
+  proposal models stay separate from the model you are tuning.
+- **Ensemble** several tuned programs and vote on the answer.
 - **Compare** a search winner with its baseline on a held-out split, case by
   case.
 - **Preview** the exact Chat, JSON, or XML prompt before any model call.
