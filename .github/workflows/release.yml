@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Prepare a tag, check it, publish through Hex, or record an existing Hex release
+        description: Prepare a tag, check it, submit to Hex, or finalize a public Hex release
         type: choice
         default: dry-run
         options:
@@ -138,6 +138,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     environment: hex-publish
+    outputs:
+      staged: ${{ steps.submit.outputs.staged }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -170,19 +172,40 @@ jobs:
           tar -xOf "$RUNNER_TEMP/tune-hex/tune.tar" metadata.config > "$check_dir/verified.config"
           cmp "$check_dir/verified.config" "$check_dir/metadata.config"
       - name: Publish package and docs
+        id: submit
         run: |
           if [[ -z "$HEX_API_KEY" ]]; then
             echo "Configure the Hex publish key in the hex-publish environment." >&2
             exit 1
           fi
-          mix hex.publish --yes --wait
+
+          publish_log="$RUNNER_TEMP/tune-hex-publish.log"
+          mix hex.publish --yes --no-progress 2>&1 | tee "$publish_log"
+
+          if ! grep -Eq '^Package (published to|staged for approval at) ' "$publish_log" ||
+             ! grep -Eq '^(Docs will soon be available at|Documentation staged for approval at) ' "$publish_log"; then
+            echo "Hex did not confirm submission of both the package and docs." >&2
+            exit 1
+          fi
+
+          if grep -Eq '^(Package|Documentation) staged for approval at ' "$publish_log"; then
+            echo 'staged=true' >> "$GITHUB_OUTPUT"
+            read -r checksum _ < "$RUNNER_TEMP/tune-hex/sha256.txt"
+            {
+              echo 'Hex requires approval. Open the publish step log for the approval link.'
+              printf '\nPackage SHA-256 `%s`\n\n' "$checksum"
+              printf 'After approval, run the Release workflow with `operation=finalize` on `%s`.\n' "$GITHUB_REF_NAME"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'staged=false' >> "$GITHUB_OUTPUT"
+          fi
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
 
   release:
     name: Verify Hex and create GitHub release
     needs: [verify, publish]
-    if: ${{ !cancelled() && needs.verify.result == 'success' && (inputs.operation == 'finalize' || needs.publish.result == 'success') }}
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (inputs.operation == 'finalize' || (needs.publish.result == 'success' && needs.publish.outputs.staged == 'false')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

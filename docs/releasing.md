@@ -49,10 +49,13 @@ to verify the full GitHub-to-Hex publish path.
 4. Run the Release workflow on the new tag with operation `dry-run`.
    Inspect the manifest and checksum in the workflow artifact.
 5. After approval to publish, run the Release workflow on the same tag
-   with operation `publish`. If Hex stages the release, use the approval
-   link in the publish job log. Compare the checksums and approve on Hex
-   with 2FA while the job waits.
-6. Check the completed workflow. It verifies the checksum in the Hex API
+   with operation `publish`. If Hex stages the release, the workflow ends
+   after it submits the package and docs. Open the approval link in the
+   publish job log. Compare the package checksum with the run summary and
+   approve on Hex with 2FA. Then run `finalize` on the same tag.
+6. Check the final verification job. It runs in `publish` when Hex makes
+   the release public immediately, or in `finalize` after a staged release
+   is approved. It verifies the checksum in the Hex API
    and the downloaded archive, checks HexDocs, and installs the published
    version with and without the optional workbench. It creates the GitHub
    Release after those checks pass.
@@ -72,6 +75,12 @@ gh workflow run release.yml -R agentjido/tune --ref main -f operation=dry-run -f
 gh workflow run release.yml -R agentjido/tune --ref main -f operation=prepare -f tag_name=v0.5.1
 gh workflow run release.yml -R agentjido/tune --ref v0.5.1 -f operation=dry-run
 gh workflow run release.yml -R agentjido/tune --ref v0.5.1 -f operation=publish
+```
+
+If Hex stages the release, run this command after you approve it on Hex.
+
+```sh
+gh workflow run release.yml -R agentjido/tune --ref v0.5.1 -f operation=finalize
 ```
 
 If the publish run fails, check Hex before you retry. When the version
