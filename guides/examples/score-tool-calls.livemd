@@ -1,0 +1,182 @@
+# Score Tool Calls
+
+This notebook scores the tool calls a small order-status agent makes, apart
+from the answer it gives. The host runner records every tool call, and two
+independent scorers check the trace and the final answer. One run answers
+correctly without looking the order up, so its tool score fails while its
+answer score passes. The notebook runs offline and needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Stub the tool and the agent
+
+`OrderTools` stands in for the order database. `lookup_order` is the only
+tool the agent should use to answer a status question.
+
+```elixir
+defmodule OrderTools do
+  @moduledoc "A stub order lookup with fixed statuses."
+
+  @statuses %{"A100" => "shipped", "A101" => "processing", "A102" => "shipped"}
+
+  def call("lookup_order", %{order_id: id}), do: Map.fetch!(@statuses, id)
+end
+```
+
+`OrderAgent` stands in for the application's agent. It receives a
+`call_tool` function, so it does not know how calls are recorded. It
+remembers order `A102` from an earlier conversation and answers that one
+without a lookup.
+
+```elixir
+defmodule OrderAgent do
+  @moduledoc "A stub order-status agent that answers one order question."
+
+  @remembered %{"A102" => "shipped"}
+
+  def answer(%{order_id: id}, call_tool) do
+    status =
+      case Map.fetch(@remembered, id) do
+        {:ok, status} -> status
+        :error -> call_tool.("lookup_order", %{order_id: id})
+      end
+
+    "Order #{id} is #{status}."
+  end
+end
+```
+
+## Record the trace in the host runner
+
+The host runner gives the agent a `call_tool` function that records each
+tool name and its arguments before calling the stub. It returns the answer
+and the ordered trace as the run output. The scorers below read only this
+output, so they work with any host that records its trace the same way.
+
+```elixir
+run_order_agent = fn _agent, request ->
+  {:ok, log} = Agent.start_link(fn -> [] end)
+
+  call_tool = fn name, arguments ->
+    Agent.update(log, &[%{name: name, arguments: arguments} | &1])
+    OrderTools.call(name, arguments)
+  end
+
+  answer = OrderAgent.answer(request, call_tool)
+
+  tool_calls =
+    log
+    |> Agent.get(&Enum.reverse/1)
+    |> Enum.with_index(1)
+    |> Enum.map(fn {call, step} -> Map.put(call, :step, step) end)
+
+  Agent.stop(log)
+  %{answer: answer, tool_calls: tool_calls}
+end
+```
+
+## Define the scorers
+
+`tool_use` requires the first tool call to be `lookup_order` for the order
+in the request, and allows no other calls.
+
+```elixir
+tool_use = fn row, %{tool_calls: calls} ->
+  expected = [%{step: 1, name: "lookup_order", arguments: %{order_id: row.input.order_id}}]
+
+  if calls == expected do
+    %{score: 1, feedback: "looked up #{row.input.order_id}"}
+  else
+    %{score: 0, feedback: "expected one lookup_order call, got #{inspect(calls)}"}
+  end
+end
+```
+
+`answer` compares the final answer with the expected text and ignores the
+trace.
+
+```elixir
+answer = fn row, %{answer: text} ->
+  if text == row.expected, do: 1, else: 0
+end
+```
+
+## Evaluate the agent
+
+Use `Tune.new/2` with the host runner, add the requests as test data, and
+give each scorer its own name with `Tune.score/4`.
+
+```elixir
+requests = [
+  %{id: "A100", input: %{order_id: "A100"}, expected: "Order A100 is shipped."},
+  %{id: "A101", input: %{order_id: "A101"}, expected: "Order A101 is processing."},
+  %{id: "A102", input: %{order_id: "A102"}, expected: "Order A102 is shipped."}
+]
+
+{:ok, report} =
+  Tune.new(:order_agent, run: run_order_agent)
+  |> Tune.data(test: requests)
+  |> Tune.score(:tool_use, tool_use)
+  |> Tune.score(:answer, answer)
+  |> Tune.evaluate()
+
+IO.puts("tool_use mean: #{Float.round(report.summaries.tool_use.mean, 3)}")
+IO.puts("answer mean: #{report.summaries.answer.mean}")
+```
+
+```text
+tool_use mean: 0.667
+answer mean: 1.0
+```
+
+Every answer is correct, but one run in three skipped the required lookup.
+
+## Inspect the skipped lookup
+
+Find the `A102` observation and print each score with its trace.
+
+```elixir
+skipped = Enum.find(report.observations, &(&1.id == "A102"))
+
+IO.puts("tool_use: #{skipped.scores.tool_use} (#{skipped.feedback.tool_use})")
+IO.puts("answer: #{skipped.scores.answer}")
+IO.puts("answer text: #{skipped.output.answer}")
+IO.inspect(skipped.output.tool_calls, label: "tool calls")
+```
+
+```text
+tool_use: 0 (expected one lookup_order call, got [])
+answer: 1
+answer text: Order A102 is shipped.
+tool calls: []
+```
+
+Compare it with a run that looked the order up.
+
+```elixir
+looked_up = Enum.find(report.observations, &(&1.id == "A100"))
+IO.inspect(looked_up.output.tool_calls, label: "tool calls")
+```
+
+```text
+tool calls: [%{name: "lookup_order", arguments: %{order_id: "A100"}, step: 1}]
+```
+
+The answer score alone would rate all three runs as correct. The separate
+tool score shows that `A102` was right by luck of memory, not because the
+agent checked the order.
+
+## Next steps
+
+- [Score transcripts](score-transcripts.livemd) scores ordered
+  conversation turns with independent scorers.
+- [Getting started](../getting_started.md) builds a first pipeline with a
+  `run:` function.
+- [Host integration](../host_integration.md) covers running Tune inside an
+  application.

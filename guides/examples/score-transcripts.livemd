@@ -1,0 +1,172 @@
+# Score Transcripts
+
+This notebook replays saved support conversations and scores two things
+separately: whether the agent escalated when it should, and whether the
+conversation ended with the expected resolution. One transcript has no final
+answer, so its resolution score fails while its escalation score still
+counts. The notebook runs offline and needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Save the transcripts
+
+Each row stores the conversation as an ordered list of turns in `output`.
+`input` holds the ticket and the resolution the support team expects.
+`expected` says whether the ticket should be escalated.
+
+```elixir
+transcripts = [
+  %{
+    id: "refund",
+    input: %{ticket: "refund", resolution: "Refund sent"},
+    expected: %{escalate: true},
+    output: [
+      %{role: :customer, text: "I'd like a refund"},
+      %{role: :agent, text: "Escalating to payments"},
+      %{role: :agent, text: "Refund sent"}
+    ]
+  },
+  %{
+    id: "password",
+    input: %{ticket: "password reset", resolution: "Reset link sent"},
+    expected: %{escalate: false},
+    output: [
+      %{role: :customer, text: "I can't log in"},
+      %{role: :agent, text: "Reset link sent"}
+    ]
+  },
+  %{
+    id: "blocked",
+    input: %{ticket: "blocked payment", resolution: "Payment restored"},
+    expected: %{escalate: true},
+    output: [
+      %{role: :customer, text: "Payment is blocked"},
+      %{role: :agent, text: "Escalating to payments"}
+    ]
+  }
+]
+```
+
+The `blocked` conversation stops after the hand-off, so it has no final
+answer.
+
+## Define the scorers
+
+Each scorer is a module with a `score/2` function that receives the case and
+the saved turns. Keep the scorers separate so one can fail without hiding the
+other.
+
+`Escalation` checks whether any agent turn escalates and compares that with
+`expected.escalate`.
+
+```elixir
+defmodule Escalation do
+  @moduledoc "Scores whether the agent escalated exactly when the ticket required it."
+
+  def score(row, turns) do
+    escalated? = Enum.any?(turns, &escalation?/1)
+    if escalated? == row.expected.escalate, do: 1, else: 0
+  end
+
+  def escalation?(%{role: :agent, text: "Escalating" <> _}), do: true
+  def escalation?(_turn), do: false
+end
+```
+
+`Resolution` reads the last turn. If the conversation ends on a customer turn
+or an escalation, there is no final answer to judge, so the scorer returns an
+error instead of a zero.
+
+```elixir
+defmodule Resolution do
+  @moduledoc "Scores whether the final agent turn delivers the expected resolution."
+
+  def score(row, turns) do
+    case List.last(turns) do
+      %{role: :agent, text: text} = turn ->
+        cond do
+          Escalation.escalation?(turn) -> {:error, :missing_final_answer}
+          text == row.input.resolution -> 1
+          true -> 0
+        end
+
+      _turn ->
+        {:error, :missing_final_answer}
+    end
+  end
+end
+```
+
+## Replay and evaluate
+
+`Tune.replay/1` turns each row into a case. The saved turns reach the scorers
+unchanged and in order.
+
+```elixir
+{:ok, report} =
+  transcripts
+  |> Tune.replay()
+  |> Tune.score(:escalation, Escalation)
+  |> Tune.score(:resolution, Resolution)
+  |> Tune.evaluate()
+
+for name <- [:escalation, :resolution] do
+  summary = report.summaries[name]
+  IO.puts("#{name}: mean #{summary.mean}, count #{summary.count}, coverage #{Float.round(summary.coverage, 3)}")
+end
+```
+
+```text
+escalation: mean 1.0, count 3, coverage 1.0
+resolution: mean 1.0, count 2, coverage 0.667
+```
+
+Escalation scored every transcript. Resolution scored two of three. Its mean
+covers only the scored rows, and coverage shows the missing one.
+
+## Inspect row errors
+
+Each observation keeps the scores that succeeded and the errors for the ones
+that failed.
+
+```elixir
+for observation <- report.observations do
+  IO.puts(
+    "#{observation.id} #{observation.status} scores: #{inspect(observation.scores)} " <>
+      "errors: #{inspect(observation.score_errors)}"
+  )
+end
+```
+
+```text
+refund ok scores: %{resolution: 1, escalation: 1} errors: %{}
+password ok scores: %{resolution: 1, escalation: 1} errors: %{}
+blocked error scores: %{escalation: 1} errors: %{resolution: :missing_final_answer}
+```
+
+The `blocked` row has status `:error` because one of its scores failed. Its
+escalation score is still in the summary.
+
+The saved turns are kept on each observation, in their original order.
+
+```elixir
+refund = hd(report.observations)
+IO.inspect(Enum.map(refund.output, & &1.role))
+```
+
+```text
+[:customer, :agent, :agent]
+```
+
+## Next steps
+
+- [Replay JSONL](replay-jsonl.livemd) loads saved rows from a file.
+- [Score tool calls](score-tool-calls.livemd) scores recorded tool use
+  separately from the final answer.
+- [Score retrieval](score-retrieval.livemd) adds model-judged scores.

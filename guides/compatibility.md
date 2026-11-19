@@ -1,123 +1,134 @@
-# Compatibility and boundaries
+# Compatibility
 
-Tune follows documented behavior from DSPy and Imp. It uses an Elixir API and
-an Elixir runtime. Exact seeded parity and every upstream option are not goals.
-Tune uses no Python runtime.
+This reference maps DSPy, GEPA, Jido Evolve, Jido Eval, and Nx or Axon
+workflows to Tune entry points. Tune follows the documented workflow of each
+source. It does not copy their object models, options, or exact random
+sequences, and it runs no Python.
+
+The "Tested by" column names the offline lesson whose tests exercise that
+workflow with scripted replies or local fixtures. Codes such as `01_01` refer to
+the numbered lessons under
+[`examples/`](https://github.com/agentjido/tune/tree/v0.5.1/examples) in the
+source repository; they are not part of the Hex package. A workflow is
+listed as available only when a lesson or contract test covers it.
 
 ## Prompt formats
 
-| Format | Tune behavior | Main difference |
+All three adapters render a prompt and parse a reply. None of them calls a
+model, retries, repairs output, or falls back to another adapter.
+
+| Format | Tune module | Difference that affects your code | Tested by |
+| --- | --- | --- | --- |
+| Chat field markers | `Tune.Adapter.Chat` | Field types are described with JSON Schema; field values must be valid JSON where the type is not a string. | `01_01` |
+| JSON object | `Tune.Adapter.JSON` | `adapter_options: [mode: :text]` or `[mode: :structured]` is required. No JSON repair, no automatic switch between modes. | `01_01` |
+| XML elements | `Tune.Adapter.XML` | Bounded parser with no entities, DTDs, attributes, or namespaces. | `01_01` |
+
+Signatures use Zoi schemas in place of Python type annotations. Validated
+outputs are maps with string keys.
+
+## Prompt and demonstration search
+
+Pass the strategy name to `Tune.search/3`. The target program, its adapter,
+and its model configuration stay fixed during search. Teacher and proposal
+models are separate `teacher:` and `proposal:` options to `Tune.new/2`.
+
+| DSPy or GEPA optimizer | Tune strategy | Tested by |
 | --- | --- | --- |
-| Chat | Field markers, field list, demonstrations, and a completion marker | Uses JSON Schema types and strict JSON values |
-| JSON | Object skeleton, ordered demonstrations, text mode, and structured mode | No repair and no automatic format fallback |
-| XML | Schema-directed elements and array items | Bounded parser with no entities, DTDs, attributes, or namespaces |
+| LabeledFewShot | `:labeled_few_shot` | `01_02` |
+| BootstrapFewShot | `:bootstrap_few_shot` | `01_03` |
+| BootstrapFewShotWithRandomSearch | `:bootstrap_few_shot_random_search` | `01_04` |
+| BootstrapFewShotWithOptuna | `:bootstrap_few_shot_optuna` | `01_04` |
+| KNNFewShot | `:knn_few_shot` | `01_05` |
+| SignatureOptimizer, COPRO | `:signature_optimizer`, `:copro` | `01_06` |
+| MIPROv2 | `:mipro_v2` | `01_07` |
+| InferRules | `:infer_rules` | `01_08` |
+| SIMBA | `:simba` | `01_09` |
+| AvatarOptimizer | `:avatar` | `01_10` |
+| Playbook-style lessons | `:playbook` | `01_11` |
+| Ensemble | `Tune.Ensemble`, or `:ensemble` to search members | `01_12`; `:ensemble` in `test/tune/ensemble_test.exs` |
+| GEPA | `:gepa` | `02_01`, `02_02` |
+| Optimize Anything | `:anything` | `02_03` |
 
-All adapters are pure. They render and parse. They do not call a model, retry,
-repair, or select another adapter.
+Differences that affect Elixir code:
 
-## Prompt and example search
+- Data splits are explicit. Pass `train:`, `validation:`, and `test:` to
+  `Tune.data/2`, and compare on a split you choose with `Tune.compare/3`.
+- Random state is local and seeded with `Tune.limit/2` (`seed:`). Tune does
+  not reproduce Python random sequences.
+- The Optuna-style search uses a small native categorical TPE.
+- GEPA uses model-call budgets and one selected score.
+- Learned values leave the run as a `Tune.Artifact`, not a pickled program.
 
-Tune includes the documented behavior of these prompt and example targets:
+## Evaluation and replay
 
-- LabeledFewShot
-- BootstrapFewShot
-- BootstrapFewShotWithRandomSearch
-- BootstrapFewShotWithOptuna
-- KNNFewShot
-- COPRO
-- SignatureOptimizer
-- MIPROv2
-- InferRules
-- SIMBA
-- GEPA
-- Avatar
-- Ensemble
-- Playbook
-- Anything
+| Jido Eval or DSPy workflow | Tune entry point | Tested by |
+| --- | --- | --- |
+| Score saved answers | `Tune.replay/2` with an Enumerable of `input` and `output` rows | `04_01` |
+| Grounding and context precision judges | `Tune.Scores.Faithfulness`, `Tune.Scores.ContextPrecision` | `04_02` |
+| Stream a large file | Parse in the application; pass the stream or a zero-arity factory | `04_03` |
+| Multi-turn transcripts | Application-defined scores over ordered turns | `04_04` |
+| Background runs and progress | `Tune.evaluate/2` in a host task, or `Tune.Evaluation.start/3`; `on_progress:` | `04_05`; `start/3` in `test/contracts/saved_evaluation_test.exs` |
+| Paired release decision | `Tune.compare/3` on the same holdout cases | `04_06` |
+| Evaluate live code | `Tune.new/2` with `run:`, then `Tune.evaluate/2` | `03_01`, `04_06` |
 
-Tune uses native Elixir search and local random state. Its Optuna-style search
-uses a small categorical TPE implementation. Its GEPA-style search uses model
-call budgets and one selected score. Tune does not reproduce Python object
-models, package options, tracking services, or exact random sequences.
+Tune records each score independently, with coverage, failed rows, and judge
+calls. It has no dataset types of its own. The host owns parsing, transcript
+rules, report delivery, and persistence.
 
-## Selected evaluation behavior
+## Evolution and configuration search
 
-Tune replays saved answers from an Enumerable and records independent metric
-results, coverage, judge evidence, and failed attempts. Use
-`Tune.Evaluation.start/3` with your Task supervisor for asynchronous runs.
-The progress callback lets an application publish events, write reports, or
-store results. Parse JSONL or CSV with an application stream. See
-[Programs and evaluation](programs.md#replay-saved-responses).
+| Jido Evolve workflow | Tune entry point | Tested by |
+| --- | --- | --- |
+| Exhaustive finite search | `Tune.vary/2` with ranges or lists, `Tune.search(:grid)` | `03_01` |
+| Seeded string population | `Tune.search(:genetic, ...)` with application crossover and mutation | `03_02` |
+| Binary genome with feasibility | `:genetic` with application operators | `03_03` |
+| Permutation genome, custom parent selection | `:genetic` with permutation-safe crossover | `03_04` |
+| Generation snapshots and interruption | `:genetic` with `on_progress:` and `cancel:` | `03_06` |
 
-ReqLLM owns provider transport and retries. Tune counts logical inference
-attempts and records the usage that ReqLLM returns.
-
-## Selected evolutionary behavior
-
-Tune evaluates an application-supplied population, or samples named spaces
-around an initial value. It supports whole-genome variation, custom parent
-selection, deterministic random state, tournament selection, elitism, and
-generation snapshots. A search can stop on a target score, lack of improvement,
-evaluation limits, deadline, or cancellation. The progress callback delivers
-generation snapshots during execution. See
-[Search strategies](optimizers.md#evolve-a-seeded-population).
+Jido Evolve ships operator modules for each genome type. In Tune the
+application supplies genome callbacks, and Tune supplies selection, elitism,
+stop rules, and snapshots. Tune reports score feedback as evidence, and GEPA
+uses it to propose changes. A generic genetic operator receives the genome and
+random state, not evaluation feedback.
 
 ## Nx and Axon
 
-Tune has no runtime dependency on Nx or Axon. An application runner can receive
-Nx tensor streams and can return tensors, Axon models, loop state, or other
-opaque terms. Tune does not inspect those terms.
+Tune has no runtime dependency on Nx or Axon. Tested by `03_05` and
+`test/contracts/nx_axon_compatibility_test.exs`:
 
-A score callback must convert a final scalar tensor to a finite Elixir number.
-The application owns Axon model construction, loops, backends, devices, model
-parameters, and serialization. Tune tunes configuration values. It does not
-train model weights.
+- A runner can receive Nx tensor streams and return tensors, Axon models, or
+  loop state. Tune keeps them as opaque output.
+- A score must return a finite Elixir number. Convert a scalar tensor with
+  `Nx.to_number/1`.
+- Tune tunes configuration such as layer width or learning rate. It does not
+  train weights. The application owns models, loops, backends, and devices.
+- `Tune.dump/1` rejects tensors and Axon models in learned parameters.
 
-Artifacts accept only JSON-compatible learned parameters and provenance. They
-reject tensors, Axon models, functions, processes, ports, and references.
+## Run-time boundaries
 
-## Fixed boundaries
+| Owner | Responsibilities |
+| --- | --- |
+| Tune | Programs, prompts, scores, evaluation, selection, search, artifacts. |
+| ReqLLM | Model resolution, provider transport, responses, structured output, retries. |
+| Host | Tools, agent loops, side effects, credentials, persistence, training, deployment. |
 
-- Zoi checks Tune-owned input fields when they enter a workflow. Saved replay
-  rows are checked as the evaluator reads them. The workbench uses the same row
-  schema when it saves a study.
-- Paired comparison requires nonblank UTF-8 case IDs and checks the selected
-  cases for duplicates before target work starts. Ordinary evaluation keeps
-  its existing ID rules.
-- Tune checks rules that depend on multiple fields or records, such as score
-  range order, artifact versions, and matching program fingerprints. Adapters
-  check their own options. ReqLLM resolves models and checks provider options.
-- ReqLLM owns model transport, responses, structured output, and retries.
-- Tune owns programs, prompts, scores, evaluation, selection, search, and
-  learned-value artifacts.
-- The application owns tools, agent loops, side effects, credentials,
-  persistence, training, and deployment.
-- Jido can consume Tune, but Tune does not depend on Jido.
+Tune has no Jido dependency. A Jido host passes its run function as a runner
+and keeps its own inference controls. See [Host Integration](host_integration.md).
 
-## Workflow comparisons
+What can cross each boundary (tested by
+`test/contracts/artifact_test.exs` and the Nx and Axon contract test):
 
-- **DSPy.** Tune uses Zoi-typed Elixir programs, explicit data splits, and
-  separate target, teacher, and proposal roles. The
-  [DSPy workflow lessons](https://github.com/agentjido/tune/tree/v0.5.0/examples/01_dspy) test the optimizer
-  contracts and candidate evidence with deterministic transport.
-- **Imp.** Imp exposes module macros, agent loops, and supervised agents.
-  Tune uses ordinary Elixir functions for program composition and leaves
-  agent state, tools, and supervision with the host.
-- **Jido Evolve.** Jido Evolve ships operator modules for binary, text,
-  permutation, and parameter genomes. Tune supports named variation spaces
-  and application-owned genome callbacks. Its generation snapshots report
-  complete and interrupted populations. See the
-  [evolution lessons](https://github.com/agentjido/tune/tree/v0.5.0/examples/03_evolution).
-- **Jido Eval.** Jido Eval exposes its own dataset types and metric harness.
-  Tune replays saved `input` and `output` rows from an Elixir Enumerable. It
-  reports independent metrics and judge calls. The host owns parsing,
-  transcript rules, report delivery, and persistence. See the
-  [evaluation lessons](https://github.com/agentjido/tune/tree/v0.5.0/examples/04_eval).
+| Value | Through a runner | In a JSON artifact |
+| --- | --- | --- |
+| Case input and output, any Elixir term | Yes | No |
+| Tensors and Axon models | Yes, as opaque output | Rejected by `Tune.dump/1` |
+| Functions, PIDs, references | Yes, as opaque output | Rejected (functions in provenance are tested) |
+| JSON-compatible learned parameters | Yes | Yes |
+| Demonstrations and instructions of a program | Yes | Yes, checked against the program fingerprint on load |
+| Non-secret model names, adapter, dataset counts and fingerprints | Yes | Yes, as provenance |
+| Credentials, request options, `api_key` | Host-owned | Rejected |
+| Module names or code | Host-owned | Rejected on decode |
 
-### Automatic feedback-driven mutation
-
-Jido Evolve passes fitness feedback to operators that declare
-`mutate_with_feedback/3`. Tune's generic mutation callback receives the genome
-and random state. Tune reports score feedback as evidence, and GEPA uses
-feedback during proposal generation. Automatic transfer of evaluation feedback
-to a generic genetic operator is a separate compatibility item.
+`Tune.Artifact.decode/2` creates no atoms from artifact data and enforces
+byte and entry limits. `Tune.load/2` applies nothing when the artifact does not
+match the fresh target.

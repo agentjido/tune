@@ -1,0 +1,440 @@
+# Multi-Hop QA
+
+In this notebook you use `:gepa` to improve a two-step program. The first
+step selects evidence passages and the second answers from that evidence.
+The metric returns a score and short feedback, GEPA sends that feedback to a
+proposal model, and the proposal model rewrites one instruction at a time.
+The notebook runs offline with no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"},
+  {:plug, "~> 1.20"}
+])
+```
+
+## Script the models
+
+`Scripted` serves OpenAI-compatible replies through an in-process Plug, so
+ReqLLM runs its real request path without a network call. Each role gets a
+reply function of the decoded request body, because GEPA's request order
+depends on the search. In real use you pass a real model spec and the host's
+credentials instead.
+
+```elixir
+defmodule Scripted do
+  @moduledoc "Serves scripted OpenAI-compatible replies to ReqLLM through an in-process Plug."
+
+  def model, do: %{provider: :openai, id: "gpt-4-turbo", extra: %{wire: %{protocol: "openai_chat"}}}
+
+  def options(reply) when is_function(reply, 1) do
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      respond(conn, reply.(JSON.decode!(body)))
+    end
+
+    [api_key: "scripted", req_http_options: [plug: plug], max_retries: 0]
+  end
+
+  def role(reply), do: [model: model(), adapter: Tune.Adapter.Chat, request_options: options(reply)]
+
+  def chat(fields) do
+    Enum.map_join(fields, "\n\n", fn {name, value} ->
+      text = if is_binary(value), do: value, else: JSON.encode!(value)
+      "[[ ## #{name} ## ]]\n#{text}"
+    end) <> "\n\n[[ ## completed ## ]]"
+  end
+
+  def system(body), do: hd(body["messages"])["content"]
+
+  def field(body, name) do
+    text = body["messages"] |> Enum.filter(&(&1["role"] == "user")) |> List.last() |> Map.fetch!("content")
+
+    case Regex.run(~r/\[\[ ## #{name} ## \]\]\n(.*?)(?=\n\n\[\[ ## |\n\nRespond with|\z)/s, text) do
+      [_, value] -> value
+      nil -> nil
+    end
+  end
+
+  defp respond(conn, text) do
+    send_json(conn, 200, %{
+      id: "scripted",
+      model: "gpt-4-turbo",
+      choices: [%{message: %{role: "assistant", content: text}, finish_reason: "stop"}],
+      usage: %{prompt_tokens: 10, completion_tokens: 5, total_tokens: 15}
+    })
+  end
+
+  defp send_json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(status, JSON.encode!(body))
+  end
+end
+```
+
+## Define the program
+
+`MultiHop` implements `Tune.Program`. It declares two predictors, `"select"`
+and `"answer"`, and composes them in plain Elixir. GEPA treats each
+predictor's instruction as a separate component.
+
+```elixir
+defmodule MultiHop do
+  @moduledoc "Selects evidence passages, then answers from the selected evidence."
+  @behaviour Tune.Program
+
+  alias Tune.{Execution, Predictor, Signature}
+
+  defstruct [:select, :answer]
+
+  @passage Zoi.object(%{"id" => Zoi.string(), "text" => Zoi.string()})
+
+  def new do
+    {:ok, select} =
+      Predictor.new(
+        signature: [
+          instructions: "Select the passages that help answer the question.",
+          inputs: [context: Zoi.array(@passage), question: Zoi.string()],
+          outputs: [evidence: Zoi.array(@passage)]
+        ]
+      )
+
+    {:ok, answer} =
+      Predictor.new(
+        signature: [
+          instructions: "Answer the question from the evidence. Cite the passage ids you used.",
+          inputs: [question: Zoi.string(), evidence: Zoi.array(@passage)],
+          outputs: [answer: Zoi.string(), sources: Zoi.array(Zoi.string())]
+        ]
+      )
+
+    %__MODULE__{select: select, answer: answer}
+  end
+
+  @impl true
+  def signature(_program) do
+    {:ok, signature} =
+      Signature.new(
+        inputs: [context: Zoi.array(@passage), question: Zoi.string()],
+        outputs: [answer: Zoi.string(), sources: Zoi.array(Zoi.string())]
+      )
+
+    signature
+  end
+
+  @impl true
+  def parameters(program), do: %{"select" => program.select, "answer" => program.answer}
+
+  @impl true
+  def put_parameters(program, parameters),
+    do: %{program | select: parameters["select"], answer: parameters["answer"]}
+
+  @impl true
+  def call(_program, inputs, execution) do
+    with {:ok, %{"evidence" => evidence}, execution} <- Execution.predict(execution, "select", inputs) do
+      Execution.predict(execution, "answer", %{"question" => inputs["question"], "evidence" => evidence})
+    end
+  end
+end
+```
+
+## Prepare cases and feedback
+
+Two questions need two hops: the bridge's designer, then the designer's
+birthplace. A third question needs only the opening hours. Training and
+validation use the same three questions with different IDs.
+
+The metric returns `%{score: ..., feedback: ...}`. The feedback names the
+missing passage or the unsupported answer.
+
+```elixir
+rows = fn split ->
+  two_hop =
+    for {bridge, designer, country} <- [{"Pine Bridge", "Nora Hill", "Canada"}, {"Copper Bridge", "Tomas Velez", "Chile"}] do
+      %{
+        id: "#{split}-#{bridge}",
+        input: %{
+          question: "Which country was the designer of #{bridge} born in? (#{split})",
+          context: [
+            %{"id" => "design", "text" => "#{bridge} was designed by #{designer}."},
+            %{"id" => "birth", "text" => "#{designer} was born in #{country}."},
+            %{"id" => "hours", "text" => "#{bridge} is open from dawn to dusk."}
+          ]
+        },
+        expected: %{answer: country, sources: ["design", "birth"]}
+      }
+    end
+
+  one_hop = %{
+    id: "#{split}-Stone Bridge",
+    input: %{
+      question: "When is Stone Bridge open? (#{split})",
+      context: [
+        %{"id" => "design", "text" => "Stone Bridge was designed by Ada Park."},
+        %{"id" => "birth", "text" => "Ada Park was born in Peru."},
+        %{"id" => "hours", "text" => "Stone Bridge is open from 6am to 10pm."}
+      ]
+    },
+    expected: %{answer: "from 6am to 10pm", sources: ["hours"]}
+  }
+
+  two_hop ++ [one_hop]
+end
+
+grounded = fn row, output ->
+  missing = row.expected["sources"] -- output["sources"]
+
+  cond do
+    output["answer"] == row.expected["answer"] and missing == [] ->
+      %{score: 1, feedback: "The cited evidence supports the answer."}
+
+    missing != [] ->
+      %{score: 0, feedback: "missing evidence: the answer needs passage #{Enum.join(missing, " and ")}"}
+
+    true ->
+      %{score: 0, feedback: "unsupported answer: the cited passages say #{row.expected["answer"]}, not #{output["answer"]}"}
+  end
+end
+
+:ok
+```
+
+## Script the target and the reflector
+
+The scripted target follows its instructions literally:
+
+- By default, the selector drops the birthplace passage for Pine Bridge, and
+  the answerer guesses "Argentina" for Copper Bridge.
+- "Retain both hops" keeps the designer and birthplace passages for every
+  question, including the opening-hours question.
+- "Keep every passage the question needs" keeps the right passages for each
+  question.
+- "Connect both passages" makes the answerer read the birthplace from the
+  second passage.
+
+The scripted reflector reads the feedback GEPA sends. For the selector, it
+proposes a general rule when the trajectories include the opening-hours
+question and a two-hop rule otherwise. It records each request so you can
+inspect the evidence later.
+
+```elixir
+select = fn body ->
+  question = Scripted.field(body, "question")
+  instruction = Scripted.system(body)
+  [design, birth, hours] = JSON.decode!(Scripted.field(body, "context"))
+  needed = if question =~ "open", do: [hours], else: [design, birth]
+
+  evidence =
+    cond do
+      instruction =~ "Keep every passage the question needs" -> needed
+      instruction =~ "Retain both hops" -> [design, birth]
+      question =~ "Pine" -> [design]
+      true -> needed
+    end
+
+  Scripted.chat(evidence: evidence)
+end
+
+answer = fn body ->
+  question = Scripted.field(body, "question")
+  instruction = Scripted.system(body)
+  evidence = JSON.decode!(Scripted.field(body, "evidence"))
+  ids = Enum.map(evidence, & &1["id"])
+  two_hop? = not (question =~ "open") and ids == ["design", "birth"]
+
+  cond do
+    question =~ "open" and ids == ["hours"] ->
+      [_, hours] = Regex.run(~r/open (.+)\.$/, hd(evidence)["text"])
+      Scripted.chat(answer: hours, sources: ids)
+
+    two_hop? and (question =~ "Pine" or instruction =~ "Connect both passages") ->
+      [_, country] = Regex.run(~r/born in (.+)\.$/, List.last(evidence)["text"])
+      Scripted.chat(answer: country, sources: ids)
+
+    two_hop? ->
+      Scripted.chat(answer: "Argentina", sources: ids)
+
+    true ->
+      Scripted.chat(answer: "unknown", sources: ids)
+  end
+end
+
+target = fn body -> if Scripted.field(body, "context"), do: select.(body), else: answer.(body) end
+
+{:ok, reflections} = Agent.start_link(fn -> [] end)
+
+reflector = fn body ->
+  feedback = Scripted.field(body, "examples_with_feedback")
+  selector? = Scripted.field(body, "task") =~ "Outputs: `evidence`"
+
+  instruction =
+    cond do
+      selector? and feedback =~ "open?" -> "Keep every passage the question needs."
+      selector? -> "Retain both hops: the designer and the birthplace."
+      true -> "Connect both passages and cite their IDs."
+    end
+
+  Agent.update(reflections, &(&1 ++ [%{proposed: instruction, feedback: feedback}]))
+  Scripted.chat(new_instruction: instruction)
+end
+
+study =
+  Tune.new(MultiHop.new(), model: Scripted.role(target), proposal: Scripted.role(reflector))
+  |> Tune.data(train: rows.("practice"), validation: rows.("holdout"))
+  |> Tune.score(:grounded, grounded)
+  |> Tune.search(:gepa, max_iterations: 8, minibatch_size: 2, use_merge: false)
+  |> Tune.limit(seed: 2, model_calls: 150)
+
+:ok
+```
+
+## Find the failing cases
+
+Evaluate the original program on the validation split.
+
+```elixir
+{:ok, baseline} = Tune.evaluate(study, :validation)
+
+for observation <- baseline.observations do
+  IO.puts("#{observation.id}: #{observation.scores.grounded} - #{observation.feedback.grounded}")
+end
+
+:ok
+```
+
+```text
+holdout-Pine Bridge: 0 - missing evidence: the answer needs passage birth
+holdout-Copper Bridge: 0 - unsupported answer: the cited passages say Chile, not Argentina
+holdout-Stone Bridge: 1 - The cited evidence supports the answer.
+```
+
+Pine Bridge fails in the selector, Copper Bridge fails in the answerer, and
+Stone Bridge already passes.
+
+## Run GEPA
+
+Each iteration picks a parent from the per-case Pareto frontier, runs it on a
+training minibatch, and asks the proposal model to rewrite one instruction
+from those trajectories. The child must beat its parent on the same
+minibatch before it gets a full validation pass.
+
+```elixir
+{:ok, winner} = Tune.tune(study)
+
+IO.inspect(winner.best.evaluation.selected_score, label: "validation score")
+IO.inspect(winner.calls, label: "calls")
+
+IO.puts("select: " <> winner.value.select.signature.instructions)
+IO.puts("answer: " <> winner.value.answer.signature.instructions)
+```
+
+```text
+validation score: 1.0
+calls: %{target: 82, proposal: 8}
+select: Keep every passage the question needs.
+answer: Connect both passages and cite their IDs.
+```
+
+Both instructions changed. The proposal calls count against the same
+`model_calls` limit as the target calls.
+
+## Read the evidence behind a change
+
+The reflector's request holds the trajectories and feedback that produced
+the selector instruction in the winner.
+
+```elixir
+reflections
+|> Agent.get(& &1)
+|> Enum.find(&(&1.proposed == "Keep every passage the question needs."))
+|> Map.fetch!(:feedback)
+|> String.split("\n")
+|> Enum.filter(&String.starts_with?(&1, ["score:", "feedback:"]))
+|> Enum.each(&IO.puts/1)
+```
+
+```text
+score: 1
+feedback: The cited evidence supports the answer.
+score: 0
+feedback: missing evidence: the answer needs passage hours
+```
+
+The parent was a candidate whose selector said "Retain both hops". It passed
+Pine Bridge, but it dropped the hours passage for the opening-hours
+question. Each trajectory in the request also includes the case inputs and
+every step's inputs and outputs, so the reflector sees which step lost the
+passage.
+
+## Compare candidates by case
+
+`winner.history` holds every candidate that reached validation, with its
+per-case scores.
+
+```elixir
+for candidate <- winner.history do
+  scores =
+    Enum.map_join(candidate.evaluation.observations, " ", fn observation ->
+      "#{String.replace_prefix(observation.id, "holdout-", "")}=#{observation.scores.grounded}"
+    end)
+
+  IO.puts("#{candidate.id} #{candidate.metadata.label} #{candidate.metadata[:component]}: #{scores}")
+  IO.puts("  select: #{candidate.value.select.signature.instructions}")
+end
+
+:ok
+```
+
+```text
+0 baseline : Pine Bridge=0 Copper Bridge=0 Stone Bridge=1
+  select: Select the passages that help answer the question.
+1 reflect select: Pine Bridge=1 Copper Bridge=0 Stone Bridge=0
+  select: Retain both hops: the designer and the birthplace.
+2 reflect answer: Pine Bridge=1 Copper Bridge=1 Stone Bridge=0
+  select: Retain both hops: the designer and the birthplace.
+3 reflect answer: Pine Bridge=0 Copper Bridge=1 Stone Bridge=1
+  select: Select the passages that help answer the question.
+4 reflect select: Pine Bridge=1 Copper Bridge=1 Stone Bridge=1
+  select: Keep every passage the question needs.
+```
+
+Candidate 1 fixes Pine Bridge and breaks Stone Bridge: "Retain both hops"
+drops the opening-hours passage. Its mean equals the baseline mean. GEPA
+still adds it to the pool, and because it has the best score on Pine Bridge it
+stays on the per-case Pareto frontier and can be chosen as a parent. An
+average alone would have hidden that strength. Candidate 4 starts
+from candidate 2 and replaces the two-hop rule with one that works for both
+kinds of question.
+
+The iteration log also records children that did not reach validation.
+
+```elixir
+winner.metadata.notes.iterations
+|> Enum.reject(& &1.accepted?)
+|> Enum.map(&{&1.iteration, &1.parent, &1.component, &1.parent_minibatch, &1.child_minibatch})
+```
+
+Each tuple is `{iteration, parent, component, parent_minibatch, child_minibatch}`:
+
+```text
+[
+  {1, "0", "answer", 1, 1},
+  {4, "2", "answer", 1, nil},
+  {5, "1", "select", 1, nil},
+  {8, "3", "answer", 1, nil}
+]
+```
+
+In iteration 1 the child tied its parent on the minibatch, so it was not
+validated. Here, each `nil` child score means the proposal repeated the current
+instruction, so there was nothing new to score. A `nil` also marks a proposal
+that fails validation or arrives after the budget is spent.
+
+## Next steps
+
+- [Search API](../optimizers.md) describes the `:gepa` options.
+- [Programs](../programs.md) explains `Tune.Program` and `Tune.Execution`.
+- [Risk policy](risk-policy.livemd) tunes a typed value with the same reflective search.

@@ -1,0 +1,228 @@
+# Deploy a Router
+
+This notebook installs a tuned artifact in a small OTP routing service. You
+start a `GenServer` with a baseline router, route one request, tune the
+router, and install the saved artifact while the service runs. Then you try an
+artifact learned for a different router and see that the service keeps the
+last valid program. The router is plain Elixir code tuned with the `:grid`
+strategy, so the notebook runs offline with no credentials and no model calls.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Define the router
+
+The router sends a request to the review queue when its risk score reaches
+the threshold. `new/0` returns fresh router code with the baseline threshold.
+
+```elixir
+defmodule RiskRouter do
+  @moduledoc "Routes requests by risk score."
+
+  defstruct threshold: 0.9, review_queue: "risk-review", standard_queue: "general"
+
+  def new, do: %__MODULE__{}
+
+  def route(router, %{risk: risk}) do
+    if risk >= router.threshold, do: router.review_queue, else: router.standard_queue
+  end
+end
+```
+
+## Define the service
+
+The service state is the current router and a `Task.Supervisor`. Each request
+asks the server for a snapshot of the current router and runs it in a
+supervised task, outside the server process. A slow request does not block
+installs, and an install does not change a request that already holds its
+snapshot.
+
+`install/2` takes artifact JSON. It decodes the artifact with
+`Tune.Artifact.decode/2` and applies it to fresh router code with
+`Tune.load/2`. The server replaces its router only when both steps succeed.
+
+```elixir
+defmodule RouterService do
+  @moduledoc "Serves the current router and installs validated artifacts."
+
+  use GenServer
+
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  def install(server, json), do: GenServer.call(server, {:install, json})
+
+  def route(server, request, timeout \\ 1_000) do
+    {router, tasks} = GenServer.call(server, :snapshot)
+    task = Task.Supervisor.async_nolink(tasks, fn -> RiskRouter.route(router, request) end)
+
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, queue} -> {:ok, queue}
+      {:exit, reason} -> {:error, reason}
+      nil -> {:error, :timeout}
+    end
+  end
+
+  @impl true
+  def init(opts), do: {:ok, {RiskRouter.new(), Keyword.fetch!(opts, :tasks)}}
+
+  @impl true
+  def handle_call(:snapshot, _from, state), do: {:reply, state, state}
+
+  def handle_call({:install, json}, _from, {_router, tasks} = state) do
+    with {:ok, artifact} <- Tune.Artifact.decode(json),
+         {:ok, router} <- Tune.load(artifact, RiskRouter.new()) do
+      {:reply, :ok, {router, tasks}}
+    else
+      {:error, _error} = error -> {:reply, error, state}
+    end
+  end
+end
+```
+
+## Route with the baseline
+
+Start the task supervisor and the service, then route a request with risk
+`0.7`.
+
+```elixir
+{:ok, tasks} = Task.Supervisor.start_link()
+{:ok, service} = RouterService.start_link(tasks: tasks)
+
+RouterService.route(service, %{risk: 0.7})
+```
+
+```text
+{:ok, "general"}
+```
+
+The baseline threshold is `0.9`, so the request goes to the standard queue.
+
+## Tune and save the router
+
+Search three thresholds on validation data. The `:grid` strategy changes the
+`threshold` field of the router struct and keeps the other fields fixed.
+
+```elixir
+routing = fn tune_case, queue -> if queue == tune_case.expected, do: 1, else: 0 end
+
+{:ok, winner} =
+  Tune.new(RiskRouter.new(), run: &RiskRouter.route/2)
+  |> Tune.data(
+    validation: [
+      %{id: "low-risk", input: %{risk: 0.2}, expected: "general"},
+      %{id: "elevated-risk", input: %{risk: 0.7}, expected: "risk-review"}
+    ]
+  )
+  |> Tune.vary(threshold: [0.9, 0.75, 0.6])
+  |> Tune.score(:routing, routing)
+  |> Tune.search(:grid)
+  |> Tune.tune()
+
+{:ok, artifact} = Tune.dump(winner)
+{:ok, json} = Tune.Artifact.encode(artifact)
+
+{artifact.parameters, artifact.provenance["kind"]}
+```
+
+```text
+{%{"threshold" => 0.6}, "generic"}
+```
+
+`Tune.dump/1` builds a `Tune.Artifact` that holds only the learned values,
+a fingerprint of their contract, and safe provenance. `Tune.Artifact.encode/1`
+turns it into canonical JSON that you can store and ship with a release.
+
+## Install the artifact
+
+Install the JSON in the running service and repeat the request.
+
+```elixir
+:ok = RouterService.install(service, json)
+
+RouterService.route(service, %{risk: 0.7})
+```
+
+```text
+{:ok, "risk-review"}
+```
+
+The service decoded the artifact, applied the threshold to a fresh
+`RiskRouter`, and now sends the request to review.
+
+## Reject an incompatible artifact
+
+Another team tuned an older router that stores the threshold as an integer
+percentage. Its artifact has the same parameter name but a different value
+contract.
+
+```elixir
+{:ok, legacy_winner} =
+  Tune.new(%{threshold: 90},
+    run: fn router, %{risk: risk} ->
+      if risk * 100 >= router.threshold, do: "risk-review", else: "general"
+    end
+  )
+  |> Tune.data(validation: [%{id: "elevated-risk", input: %{risk: 0.7}, expected: "risk-review"}])
+  |> Tune.vary(threshold: [90, 60])
+  |> Tune.score(:routing, routing)
+  |> Tune.search(:grid)
+  |> Tune.tune()
+
+{:ok, legacy_artifact} = Tune.dump(legacy_winner)
+{:ok, legacy_json} = Tune.Artifact.encode(legacy_artifact)
+
+{:error, error} = RouterService.install(service, legacy_json)
+Exception.message(error)
+```
+
+```text
+"artifact parameters do not match the fresh target"
+```
+
+`Tune.load/2` compares the artifact fingerprint with the fresh router before
+it changes anything. The install fails, and the service keeps serving the
+last valid router.
+
+```elixir
+RouterService.route(service, %{risk: 0.7})
+```
+
+```text
+{:ok, "risk-review"}
+```
+
+An artifact document with missing fields fails the same way: `Tune.Artifact.decode/2` returns an error,
+and the server state stays unchanged.
+
+```elixir
+{:error, error} = RouterService.install(service, ~s({"version": 1}))
+{Exception.message(error), RouterService.route(service, %{risk: 0.7})}
+```
+
+```text
+{"artifact has unknown or missing fields", {:ok, "risk-review"}}
+```
+
+## Stop the service
+
+```elixir
+GenServer.stop(service)
+Supervisor.stop(tasks)
+```
+
+The service keeps its router in memory. Durable storage, rollout across
+nodes, and when to install a new artifact are host decisions.
+
+## Next steps
+
+- [Artifacts](../artifacts.md) covers artifact contents, encoding, and
+  loading.
+- [Host integration](../host_integration.md) covers supervision, limits, and
+  cancellation in a host application.
+- [Gate a release](../examples/gate-a-release.livemd) decides whether a tuned
+  winner is safe to promote.

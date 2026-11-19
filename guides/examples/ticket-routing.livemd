@@ -1,0 +1,276 @@
+# Ticket Routing
+
+In this notebook you improve a bank support ticket classifier with labeled
+examples. `:labeled_few_shot` copies a seeded sample of training tickets into
+the prompt as demonstrations, and you then compare the original and tuned
+classifier on held-out tickets. The notebook runs offline with no
+credentials: a scripted model stands in for the provider.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"},
+  {:plug, "~> 1.20"}
+])
+```
+
+## Script the model
+
+`Scripted` serves OpenAI-compatible replies through an in-process Plug, so
+ReqLLM runs its real request path without a network call. `options/1` takes a
+function of the decoded request body, which lets the reply depend on what the
+prompt contains. In real use you pass a real model spec and the host's
+credentials instead.
+
+```elixir
+defmodule Scripted do
+  @moduledoc "Serves scripted OpenAI-compatible replies to ReqLLM through an in-process Plug."
+
+  def model, do: %{provider: :openai, id: "gpt-4-turbo", extra: %{wire: %{protocol: "openai_chat"}}}
+
+  def options(reply) when is_function(reply, 1) do
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      respond(conn, reply.(JSON.decode!(body)))
+    end
+
+    [api_key: "scripted", req_http_options: [plug: plug], max_retries: 0]
+  end
+
+  def chat(fields) do
+    Enum.map_join(fields, "\n\n", fn {name, value} -> "[[ ## #{name} ## ]]\n#{value}" end) <>
+      "\n\n[[ ## completed ## ]]"
+  end
+
+  def field(body, name) do
+    text = body["messages"] |> Enum.filter(&(&1["role"] == "user")) |> List.last() |> Map.fetch!("content")
+
+    case Regex.run(~r/\[\[ ## #{name} ## \]\]\n(.*?)(?=\n\n\[\[ ## |\n\nRespond with|\z)/s, text) do
+      [_, value] -> value
+      nil -> nil
+    end
+  end
+
+  def demos?(body), do: Enum.any?(body["messages"], &(&1["role"] == "assistant"))
+
+  defp respond(conn, text) do
+    send_json(conn, 200, %{
+      id: "scripted",
+      model: "gpt-4-turbo",
+      choices: [%{message: %{role: "assistant", content: text}, finish_reason: "stop"}],
+      usage: %{prompt_tokens: 10, completion_tokens: 5, total_tokens: 15}
+    })
+  end
+
+  defp send_json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(status, JSON.encode!(body))
+  end
+end
+```
+
+The scripted router answers `"unrouted"` when the prompt has no
+demonstrations. With demonstrations, it routes by keywords. This mimics a
+model that needs examples to learn the label set.
+
+```elixir
+route = fn ticket ->
+  cond do
+    ticket =~ ~r/lost|missing|find my/i -> "lost_card"
+    ticket =~ ~r/atm|cash/i -> "cash_withdrawal"
+    ticket =~ ~r/fee/i -> "card_payment_fee"
+    true -> "unrouted"
+  end
+end
+
+reply = fn body ->
+  label = if Scripted.demos?(body), do: route.(Scripted.field(body, "ticket")), else: "unrouted"
+  Scripted.chat(label: label)
+end
+
+model = [
+  model: Scripted.model(),
+  adapter: Tune.Adapter.Chat,
+  request_options: Scripted.options(reply)
+]
+```
+
+## Define the classifier and data
+
+The output is a `Zoi.enum/1`, so a reply outside the label set fails
+validation instead of reaching your code.
+
+```elixir
+{:ok, classifier} =
+  Tune.Predictor.new(
+    signature: [
+      instructions: "Route the support ticket.",
+      inputs: [ticket: Zoi.string()],
+      outputs: [label: Zoi.enum(["lost_card", "cash_withdrawal", "card_payment_fee", "unrouted"])]
+    ]
+  )
+
+rows = fn pairs ->
+  Enum.map(pairs, fn {id, ticket, label} ->
+    %{id: id, input: %{ticket: ticket}, expected: %{label: label}}
+  end)
+end
+
+train =
+  rows.([
+    {"train-1", "I lost my debit card on the train", "lost_card"},
+    {"train-2", "My card is missing after a trip", "lost_card"},
+    {"train-3", "The ATM debited me and dispensed no cash", "cash_withdrawal"},
+    {"train-4", "Cash withdrawal failed at the station ATM", "cash_withdrawal"},
+    {"train-5", "There is a fee on my card purchase abroad", "card_payment_fee"},
+    {"train-6", "Why was there a fee on my card payment?", "card_payment_fee"}
+  ])
+
+test =
+  rows.([
+    {"lost-card", "I cannot find my card", "lost_card"},
+    {"no-cash", "The ATM did not give me cash", "cash_withdrawal"},
+    {"purchase-fee", "Why is there a purchase fee?", "card_payment_fee"}
+  ])
+
+:ok
+```
+
+## Build the study
+
+The `:route` score gives 1 for the expected label and 0 otherwise.
+`:labeled_few_shot` with `k: 4` samples four training tickets. The seed fixes
+the sample, so the same seed gives the same demonstrations.
+
+```elixir
+study =
+  Tune.new(classifier, model: model)
+  |> Tune.data(train: train, test: test)
+  |> Tune.score(:route, fn row, output ->
+    if output["label"] == row.expected["label"], do: 1, else: 0
+  end)
+  |> Tune.search(:labeled_few_shot, k: 4)
+  |> Tune.limit(seed: 5, model_calls: 12)
+
+{:ok, original_prompt} = Tune.preview(study, %{ticket: "I cannot find my card"})
+Enum.map(original_prompt.context.messages, & &1.role)
+```
+
+`Tune.preview/2` renders the request without a model call. The original
+prompt has only a system message and the ticket:
+
+```text
+[:system, :user]
+```
+
+## Select demonstrations
+
+```elixir
+{:ok, winner} = Tune.tune(study)
+
+for demo <- winner.value.demos do
+  IO.puts("#{demo.inputs["ticket"]} -> #{demo.outputs["label"]}")
+end
+
+IO.puts("Search model calls: #{Enum.sum(Map.values(winner.calls))}")
+```
+
+```text
+Why was there a fee on my card payment? -> card_payment_fee
+The ATM debited me and dispensed no cash -> cash_withdrawal
+I lost my debit card on the train -> lost_card
+Cash withdrawal failed at the station ATM -> cash_withdrawal
+Search model calls: 0
+```
+
+`:labeled_few_shot` makes no model calls and computes no score during
+search. It only copies complete labeled rows. `winner.calls` is empty, and
+`winner.metadata.notes` records how many demonstrations each predictor
+received.
+
+```elixir
+Enum.sort(winner.metadata.notes)
+```
+
+```text
+[
+  demos: %{"root" => 4},
+  settings: %{"k" => 4, "sample" => true},
+  train_duplicates_removed: 0
+]
+```
+
+Training rows with the same input count once. `train_duplicates_removed`
+reports how many were dropped.
+
+## Inspect the tuned prompt
+
+`winner.value` is the tuned classifier. Preview it with the same model
+configuration. Each demonstration adds one user and one assistant message
+before the ticket.
+
+```elixir
+{:ok, tuned_prompt} = Tune.new(winner.value, model: model) |> Tune.preview(%{ticket: "I cannot find my card"})
+
+Enum.map(tuned_prompt.context.messages, & &1.role)
+```
+
+```text
+[:system, :user, :assistant, :user, :assistant, :user, :assistant, :user,
+ :assistant, :user]
+```
+
+## Compare on held-out tickets
+
+`Tune.compare/3` runs both classifiers on the test split. It pairs the
+results by case ID.
+
+```elixir
+{:ok, comparison} = Tune.compare(study, winner, split: :test)
+
+Enum.sort(comparison.metrics.route)
+```
+
+```text
+[
+  baseline_mean: 0.0,
+  challenger_mean: 1.0,
+  counts: %{improved: 3},
+  delta: 1.0,
+  direction: :maximize,
+  paired_count: 3,
+  status: :improved
+]
+```
+
+Each row holds both observations. The original classifier routed the lost
+card ticket to `"unrouted"`; the tuned one routed it correctly.
+
+```elixir
+row = comparison.rows["lost-card"]
+
+IO.puts("original: #{row.baseline.output["label"]}")
+IO.puts("tuned:    #{row.challenger.output["label"]}")
+row.metrics.route
+```
+
+```text
+original: unrouted
+tuned:    lost_card
+```
+
+```text
+%{status: :improved, delta: 1, baseline: 0, challenger: 1}
+```
+
+The held-out tickets never appear in the prompt. The tuned classifier scores
+1.0 on them because the scripted model needs examples of each label, not
+copies of the test tickets.
+
+## Next steps
+
+- [Search API](../optimizers.md) lists the other demonstration strategies.
+- [Artifacts](../artifacts.md) saves the selected demonstrations.
+- [QA prompts](qa-prompts.livemd) tunes instructions and demonstrations together.

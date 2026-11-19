@@ -1,0 +1,153 @@
+# Batch Settings
+
+In this notebook you tune two settings for a simulated Elixir workload: the
+batch size and the number of workers. Tune tries every combination with grid
+search, picks the configuration with the highest simulated throughput, and
+then checks the winner against the original settings on fresh workloads. The
+notebook runs offline and needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Model the workload
+
+Each workload is a tuple `{ideal_batch_size, ideal_workers}`. The simulator
+starts at 100 and subtracts a penalty for each unit of distance from the ideal
+settings. A wrong worker count costs three times as much as a wrong batch size.
+
+```elixir
+throughput = fn config, {ideal_size, ideal_workers} ->
+  100 - abs(config.batch_size - ideal_size) - 3 * abs(config.workers - ideal_workers)
+end
+
+throughput.(%{batch_size: 1, workers: 1}, {7, 2})
+```
+
+The current settings, a batch size of 1 and one worker, score 91 on a workload
+whose ideal is `{7, 2}`.
+
+## Declare the search space
+
+`Tune.new/2` takes the current settings as the target and the simulator as the
+runner. `Tune.vary/2` names the fields that search may change. Grid search
+needs finite values: an integer range or a list of choices.
+
+```elixir
+study =
+  Tune.new(%{batch_size: 1, workers: 1}, run: throughput)
+  |> Tune.data(validation: [{7, 2}, {7, 2}], test: [{6, 2}, {8, 3}])
+  |> Tune.vary(batch_size: 1..16, workers: [1, 2, 3])
+  |> Tune.score(:throughput, & &1)
+  |> Tune.search(:grid)
+```
+
+The validation split is the data that search scores. The test split stays
+unseen until the final comparison.
+
+Grid search sorts the varied fields by name and walks them in nested order.
+Here `batch_size` is the outer loop and `workers` is the inner loop, so the
+grid holds 16 × 3 = 48 configurations:
+
+```elixir
+for batch_size <- 1..16, workers <- [1, 2, 3] do
+  %{batch_size: batch_size, workers: workers}
+end
+|> Enum.take(4)
+```
+
+```text
+[
+  %{workers: 1, batch_size: 1},
+  %{workers: 2, batch_size: 1},
+  %{workers: 3, batch_size: 1},
+  %{workers: 1, batch_size: 2}
+]
+```
+
+## Search the full grid
+
+`Tune.tune/1` scores every configuration on the same validation workloads and
+returns a `Tune.Result`.
+
+```elixir
+{:ok, winner} = Tune.tune(study)
+
+IO.puts("Evaluated #{length(winner.history)} configurations")
+IO.puts("Selected #{inspect(winner.value)}")
+IO.puts("Mean throughput #{winner.best.evaluation.summaries.throughput.mean}")
+IO.puts("Stop reason #{winner.stop_reason}, complete? #{winner.complete?}")
+```
+
+```text
+Evaluated 48 configurations
+Selected %{workers: 2, batch_size: 7}
+Mean throughput 100.0
+Stop reason completed, complete? true
+```
+
+`winner.history` keeps each configuration in the order grid search tried it.
+`winner.best` is the candidate with the highest mean score.
+
+## Limit the number of evaluations
+
+`Tune.limit/2` caps the work. With `evaluations: 4`, grid search stops after
+the first four configurations and returns the best one it has seen.
+
+```elixir
+{:ok, partial} = study |> Tune.limit(evaluations: 4) |> Tune.tune()
+
+IO.puts("Tried #{inspect(Enum.map(partial.history, & &1.value))}")
+IO.puts("Selected #{inspect(partial.value)}")
+IO.puts("Stop reason #{partial.stop_reason}, complete? #{partial.complete?}")
+```
+
+```text
+Tried [%{workers: 1, batch_size: 1}, %{workers: 2, batch_size: 1}, %{workers: 3, batch_size: 1}, %{workers: 1, batch_size: 2}]
+Selected %{workers: 2, batch_size: 1}
+Stop reason evaluation_limit, complete? false
+```
+
+The limited run never reaches a batch size of 7. Its result marks the search
+as incomplete, so a caller can tell a capped search from a finished one.
+
+## Compare on fresh workloads
+
+`Tune.compare/3` runs the original target and the winner on the same split and
+pairs their scores case by case. Use the test split, which search never saw.
+
+```elixir
+{:ok, comparison} = Tune.compare(study, winner, split: :test)
+
+for id <- comparison.case_ids do
+  change = comparison.rows[id].metrics.throughput
+  IO.puts("Case #{id}: #{change.baseline} -> #{change.challenger} (#{change.status}, +#{change.delta})")
+end
+
+metric = comparison.metrics.throughput
+IO.puts("Mean change #{metric.delta} over #{metric.paired_count} paired cases")
+```
+
+```text
+Case 0: 92 -> 99 (improved, +7)
+Case 1: 87 -> 96 (improved, +9)
+Mean change 8.0 over 2 paired cases
+```
+
+The winner improves both test workloads, even though neither matches the
+validation ideal exactly.
+
+These numbers come from the simulator, not from a running system. A higher
+simulated score says the winner fits this model of the workload. Before you
+change production settings, measure real throughput with the winning
+configuration under representative load.
+
+## Next steps
+
+- [Search API](../optimizers.md) covers the grid and genetic strategies and their limits.
+- [Artifacts](../artifacts.md) shows how to save the winning settings and load them later.
+- [Evolve a Word](evolve-a-word.livemd) uses genetic search when the space is too large to enumerate.

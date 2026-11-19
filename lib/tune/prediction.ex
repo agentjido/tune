@@ -65,7 +65,7 @@ defmodule Tune.Prediction do
 
   def response_model(_response, _configured), do: nil
 
-  @doc "Sums provider-reported token use across all steps."
+  @doc "Sums provider-reported token use across recorded model responses."
   @spec token_totals(t()) :: %{
           input: non_neg_integer(),
           output: non_neg_integer(),

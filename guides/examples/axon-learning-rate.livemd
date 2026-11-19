@@ -1,0 +1,174 @@
+# Axon Learning Rate
+
+In this notebook you pick a learning rate for a small Axon model. Tune tries
+three rates. For each one, your runner trains a fresh model on a fixed batch
+and reports the validation loss. Tune keeps the rate with the lowest loss and
+saves it as an artifact, while the trained model stays in your application.
+The notebook runs on the CPU, offline, and needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"},
+  {:nx, "~> 1.0"},
+  {:axon, "~> 0.9"}
+])
+```
+
+Use the pure Elixir backend so the notebook needs no compiled accelerator:
+
+```elixir
+Nx.default_backend(Nx.BinaryBackend)
+```
+
+## Prepare the data
+
+The model learns `y = 2x`. Training uses one fixed batch of three points.
+Validation uses two points the model does not train on.
+
+```elixir
+train_batches = [{Nx.tensor([[0.0], [1.0], [2.0]]), Nx.tensor([[0.0], [2.0], [4.0]])}]
+validation = {Nx.tensor([[0.5], [1.5]]), Nx.tensor([[1.0], [3.0]])}
+```
+
+## Train inside the runner
+
+The runner receives one configuration and one validation case. It builds a
+fresh one-unit dense model, trains it for five epochs with SGD at the
+configured learning rate, and measures mean squared error on the validation
+points.
+
+The runner returns the loss tensor and the trained model state. Tune treats
+the output as an opaque value: only the score function reads it.
+
+```elixir
+fit = fn config, {features, expected} ->
+  model =
+    Axon.input("features", shape: {nil, 1})
+    |> Axon.dense(1, kernel_initializer: :zeros, bias_initializer: :zeros)
+
+  optimizer = Polaris.Optimizers.sgd(learning_rate: config.learning_rate)
+
+  loop_state =
+    model
+    |> Axon.Loop.trainer(:mean_squared_error, optimizer, seed: 3, log: 0)
+    |> Axon.Loop.run(train_batches, Axon.ModelState.empty(), epochs: 5)
+
+  trained = loop_state.step_state.model_state
+  predicted = Axon.predict(model, trained, features)
+  loss = predicted |> Nx.subtract(expected) |> Nx.pow(2) |> Nx.mean()
+
+  %{loss: loss, trained: trained}
+end
+```
+
+Zero initializers and a fixed loop seed make every run repeatable.
+
+## Search the learning rates
+
+The target `%{learning_rate: 0.02}` is the original setting. `Tune.vary/2`
+lists the rates to try, and grid search tries each one in order.
+
+The score converts the loss tensor to an Elixir float with `Nx.to_number/1`.
+Tune compares plain numbers, not tensors. `direction: :minimize` makes a lower
+loss better.
+
+```elixir
+study =
+  Tune.new(%{learning_rate: 0.02}, run: fit)
+  |> Tune.data(validation: [validation], test: [validation])
+  |> Tune.vary(learning_rate: [0.02, 0.1, 0.2])
+  |> Tune.score(:loss, &Nx.to_number(&1.loss), direction: :minimize)
+  |> Tune.search(:grid)
+
+{:ok, result} = Tune.tune(study)
+
+for candidate <- result.history do
+  loss = candidate.evaluation.summaries.loss.mean
+  IO.puts("learning_rate #{candidate.value.learning_rate}: loss #{Float.round(loss, 4)}")
+end
+
+IO.puts("Selected #{inspect(result.value)}")
+```
+
+```text
+learning_rate 0.02: loss 1.7769
+learning_rate 0.1: loss 0.0918
+learning_rate 0.2: loss 0.0572
+Selected %{learning_rate: 0.2}
+```
+
+With only five epochs, the smallest rate barely moves the weights. The largest
+rate gets closest to `y = 2x`.
+
+The validation split here is tiny and the search picks from it, so the loss is
+optimistic. In real work, keep a separate test split that the search never
+sees.
+
+## Compare with the original rate
+
+`Tune.compare/3` trains a model with the original rate and one with the
+selected rate on the same split, then pairs their losses.
+
+```elixir
+{:ok, comparison} = Tune.compare(study, result, split: :test)
+metric = comparison.metrics.loss
+
+IO.puts("Original loss #{Float.round(metric.baseline_mean, 4)}")
+IO.puts("Selected loss #{Float.round(metric.challenger_mean, 4)}")
+IO.puts("Change #{Float.round(metric.delta, 4)} (#{metric.status})")
+```
+
+```text
+Original loss 1.7769
+Selected loss 0.0572
+Change -1.7196 (improved)
+```
+
+For a minimized score, a negative change is an improvement.
+
+## Save and reload the setting
+
+`Tune.dump/1` builds an artifact from the result. The artifact holds only the
+learned scalar setting. `Tune.load/2` applies it to a fresh target.
+
+```elixir
+{:ok, artifact} = Tune.dump(result)
+{:ok, config} = Tune.load(artifact, %{learning_rate: 0.02})
+
+IO.puts("Artifact parameters #{inspect(artifact.parameters)}")
+IO.puts("Reloaded #{inspect(config)}")
+```
+
+```text
+Artifact parameters %{"learning_rate" => 0.2}
+Reloaded %{learning_rate: 0.2}
+```
+
+## Keep the model in the application
+
+The trained weights stay in the observation output of the best candidate.
+They are not part of the artifact.
+
+```elixir
+[observation] = result.best.evaluation.observations
+IO.puts("Trained state #{inspect(observation.output.trained.__struct__)}")
+IO.puts("Artifact keys #{inspect(Map.keys(artifact.parameters))}")
+```
+
+```text
+Trained state Axon.ModelState
+Artifact keys ["learning_rate"]
+```
+
+Tune refuses to put tensors or model state in artifact parameters. Store and
+version the trained model with your application's own tooling. Use the
+artifact to record which learning rate produced it, and train again with the
+reloaded configuration when you need a fresh model.
+
+## Next steps
+
+- [Batch Settings](batch-settings.livemd) uses the same grid search on a simulated workload.
+- [Artifacts](../artifacts.md) explains what an artifact stores and how loading checks it.
+- [Search API](../optimizers.md) lists the grid and genetic search options.

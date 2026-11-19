@@ -1,0 +1,194 @@
+# Pack a Kit
+
+In this notebook you choose which items to pack in a hiking kit that must
+weigh at most 7 kg. Each candidate is a list of bits, one per item. Genetic
+search rejects any kit over the weight limit and keeps the kit with the
+highest total value. The notebook runs offline and needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Decode a genome
+
+There are four items, each with a weight in kilograms and a value. A genome
+such as `[1, 0, 0, 1]` packs the first and last items.
+
+```elixir
+items = [
+  %{name: :tent, weight: 2, value: 3},
+  %{name: :stove, weight: 3, value: 4},
+  %{name: :water, weight: 4, value: 5},
+  %{name: :first_aid, weight: 5, value: 8}
+]
+
+max_weight = 7
+
+decode = fn bits ->
+  packed = for {1, item} <- Enum.zip(bits, items), do: item
+
+  %{
+    items: Enum.map(packed, & &1.name),
+    weight: Enum.sum_by(packed, & &1.weight),
+    value: Enum.sum_by(packed, & &1.value)
+  }
+end
+
+{decode.([1, 0, 0, 1]), decode.([1, 1, 1, 1])}
+```
+
+```text
+{%{value: 11, items: [:tent, :first_aid], weight: 7},
+ %{value: 20, items: [:tent, :stove, :water, :first_aid], weight: 14}}
+```
+
+Packing everything has the most value, but it weighs 14 kg.
+
+## Build the search
+
+The target `[1, 0, 0, 0]` is the starting kit. With no `Tune.vary/2` call, the
+whole bit list is the genome.
+
+- `valid?` is the weight limit. Tune calls it on every seed and every child
+  before it runs the child.
+- `crossover` joins the front of one parent to the back of the other.
+- `mutate` flips one random bit.
+- Both operators take Tune's random state last and return
+  `{new_bits, new_random_state}`.
+
+The runner decodes the bits, and the score reads the total value.
+
+```elixir
+pack = fn initial_population, generations ->
+  Tune.new(hd(initial_population), run: fn bits, :kit -> decode.(bits) end)
+  |> Tune.data(validation: [:kit])
+  |> Tune.score(:value, & &1.value)
+  |> Tune.search(:genetic,
+    initial_population: initial_population,
+    generations: generations,
+    tournament_size: 2,
+    mutation_rate: 1,
+    crossover_rate: 1,
+    valid?: fn bits -> decode.(bits).weight <= max_weight end,
+    crossover: fn left, right, rng ->
+      {cut, rng} = :rand.uniform_s(3, rng)
+      {Enum.take(left, cut) ++ Enum.drop(right, cut), rng}
+    end,
+    mutate: fn bits, rng ->
+      {position, rng} = :rand.uniform_s(length(bits), rng)
+      {List.update_at(bits, position - 1, &(1 - &1)), rng}
+    end
+  )
+  |> Tune.limit(evaluations: 64, seed: 9)
+  |> Tune.tune()
+end
+```
+
+## Seed only valid kits
+
+Tune checks the starting population against `valid?` before it evaluates
+anything. An overweight seed stops the search with an error.
+
+```elixir
+{:error, error} = pack.([[1, 0, 0, 0], [0, 0, 0, 1], [1, 1, 1, 1], [0, 1, 0, 0]], 3)
+Exception.message(error)
+```
+
+```text
+":genetic: the initial population contains a value outside the declared spaces or validity contract"
+```
+
+Start from four single-item kits instead:
+
+```elixir
+seeds = [[1, 0, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0], [0, 1, 0, 0]]
+{:ok, result} = pack.(seeds, 3)
+
+[observation] = result.best.evaluation.observations
+IO.puts("Selected #{inspect(result.value)}: #{inspect(observation.output)}")
+IO.puts("Stop reason #{result.stop_reason} after #{length(result.history)} evaluations")
+```
+
+```text
+Selected [1, 0, 0, 1]: %{value: 11, items: [:tent, :first_aid], weight: 7}
+Stop reason completed after 16 evaluations
+```
+
+## Inspect the history
+
+Each candidate in `result.history` keeps its evaluation. Print every kit with
+its generation, whether it was eligible to win, and its score.
+
+```elixir
+for candidate <- result.history do
+  evaluation = candidate.evaluation
+  [observation] = evaluation.observations
+  weight = decode.(candidate.value).weight
+
+  status =
+    if evaluation.eligible?,
+      do: "value #{evaluation.selected_score}",
+      else: "rejected: #{Exception.message(observation.error)}"
+
+  IO.puts("g#{candidate.lineage.generation} #{inspect(candidate.value)} #{weight} kg  #{status}")
+end
+
+:ok
+```
+
+```text
+g0 [1, 0, 0, 0] 2 kg  value 3.0
+g0 [0, 0, 0, 1] 5 kg  value 8.0
+g0 [0, 0, 1, 0] 4 kg  value 5.0
+g0 [0, 1, 0, 0] 3 kg  value 4.0
+g1 [0, 0, 0, 1] 5 kg  value 8.0
+g1 [0, 0, 0, 0] 0 kg  value 0.0
+g1 [1, 0, 0, 1] 7 kg  value 11.0
+g1 [1, 0, 0, 1] 7 kg  value 11.0
+g2 [1, 0, 0, 1] 7 kg  value 11.0
+g2 [1, 0, 0, 0] 2 kg  value 3.0
+g2 [1, 0, 0, 0] 2 kg  value 3.0
+g2 [0, 0, 0, 1] 5 kg  value 8.0
+g3 [1, 0, 0, 1] 7 kg  value 11.0
+g3 [0, 0, 1, 0] 4 kg  value 5.0
+g3 [1, 1, 0, 1] 10 kg  rejected: :genetic: variation produced an invalid candidate
+g3 [1, 0, 1, 1] 11 kg  rejected: :genetic: variation produced an invalid candidate
+```
+
+Crossover and mutation did produce overweight kits in generation 3. Tune never
+ran them: each one has an error observation and `eligible?: false`, so it has
+no score to compare. Only eligible candidates can become `result.best` or a
+parent of the next generation.
+
+## Check the known optimum
+
+The fixture has four items, so all 16 kits can be listed and checked directly.
+
+```elixir
+best_possible =
+  for a <- 0..1, b <- 0..1, c <- 0..1, d <- 0..1,
+      kit = decode.([a, b, c, d]),
+      kit.weight <= max_weight,
+      reduce: 0 do
+    best -> max(best, kit.value)
+  end
+
+{best_possible, observation.output.value == best_possible}
+```
+
+```text
+{11, true}
+```
+
+The search found the best feasible kit. A real catalog has too many kits to list,
+so this check only works on small fixtures like this one.
+
+## Next steps
+
+- [Evolve a Word](evolve-a-word.livemd) shows each genetic operator step by step.
+- [Delivery Routes](delivery-routes.livemd) keeps every stop with a permutation-safe crossover.
+- [Search API](../optimizers.md) lists every genetic search option.

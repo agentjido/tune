@@ -1,0 +1,197 @@
+# Build an Eval Suite
+
+This notebook builds an evaluation suite for a small support agent. You define
+three cases with stable IDs, score each run for task success and for correct
+escalation, and print a per-case report that shows coverage and failed rows.
+Then you run the same cases against a second agent configuration. The agent is
+plain Elixir code with fixed replies, so the notebook runs offline with no
+credentials and no model calls.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Define the agent
+
+The agent takes a configuration and one ticket. It escalates the ticket types
+listed in `config.escalate` and resolves the rest. A ticket for the
+`acme-outage` account returns an error, the way a real agent run fails when a
+backend times out.
+
+```elixir
+defmodule SupportAgent do
+  @moduledoc "A support agent with fixed replies for offline evaluation."
+
+  def run(_config, %{account: "acme-outage"}), do: {:error, :inventory_service_timeout}
+
+  def run(config, %{ticket: ticket}) do
+    if ticket in config.escalate do
+      %{action: :escalate, reply: "Escalating to payments"}
+    else
+      %{action: :resolve, reply: reply(ticket)}
+    end
+  end
+
+  defp reply(:password_reset), do: "Reset link sent"
+  defp reply(:order_status), do: "Order shipped"
+  defp reply(_ticket), do: "Ticket closed"
+end
+```
+
+A runner can return a plain value, `{:ok, output}`, or `{:error, reason}`.
+Tune records an error as a failed row and keeps evaluating the other cases.
+
+## Write the cases
+
+Give every case an `id`. Tune uses it to name observations, and paired
+comparisons use it to match rows. Keep IDs stable so reports from different
+runs line up.
+
+```elixir
+cases = [
+  %{
+    id: "password-reset",
+    input: %{ticket: :password_reset, account: "north-bakery"},
+    expected: %{action: :resolve, reply: "Reset link sent"}
+  },
+  %{
+    id: "chargeback",
+    input: %{ticket: :chargeback, account: "lumen-books"},
+    expected: %{action: :escalate, reply: "Escalating to payments"}
+  },
+  %{
+    id: "order-status",
+    input: %{ticket: :order_status, account: "acme-outage"},
+    expected: %{action: :resolve, reply: "Order shipped"}
+  }
+]
+```
+
+The first case is a routine request. The second needs an escalation. The third
+fails because the agent run returns an error.
+
+## Build the suite
+
+`Tune.new/2` takes the configuration to evaluate and a `run:` function.
+`Tune.data/2` adds the cases as the `test` split. Each `Tune.score/4` call adds
+one named metric. A two-argument callback receives the case and the output.
+
+```elixir
+task_success = fn tune_case, output ->
+  if output.reply == tune_case.expected.reply, do: 1, else: 0
+end
+
+correct_escalation = fn tune_case, output ->
+  if output.action == tune_case.expected.action, do: 1, else: 0
+end
+
+suite = fn config ->
+  Tune.new(config, run: &SupportAgent.run/2)
+  |> Tune.data(test: cases)
+  |> Tune.score(:task_success, task_success)
+  |> Tune.score(:correct_escalation, correct_escalation)
+end
+```
+
+The builder calls only return a `%Tune{}` value. Nothing runs until you call
+`Tune.evaluate/2`.
+
+## Run the evaluation
+
+```elixir
+{:ok, evaluation} = Tune.evaluate(suite.(%{escalate: [:chargeback]}))
+
+{evaluation.complete?, length(evaluation.observations)}
+```
+
+```text
+{true, 3}
+```
+
+`Tune.evaluate/2` returns a `Tune.Evaluation`. It holds one `Tune.Observation`
+per case, in dataset order, and one `Tune.Score.Summary` per score.
+`complete?` is `true` because Tune attempted every case, even though one case
+failed.
+
+## Print a per-case report
+
+Write the report as an ordinary function so you can reuse it for every
+configuration.
+
+```elixir
+defmodule SuiteReport do
+  @moduledoc "Prints observations, summaries, and failed rows for one evaluation."
+
+  def print(evaluation, metrics) do
+    Enum.each(evaluation.observations, &print_row(&1, metrics))
+
+    Enum.each(metrics, fn name ->
+      summary = Tune.Evaluation.summary(evaluation, name)
+
+      IO.puts(
+        "#{name}: mean #{summary.mean}, scored #{summary.count} of " <>
+          "#{length(evaluation.observations)}, coverage #{Float.round(summary.coverage, 2)}"
+      )
+    end)
+
+    failed = for %{status: :error} = row <- evaluation.observations, do: {row.id, row.error}
+    IO.puts("failed rows: #{inspect(failed)}")
+  end
+
+  defp print_row(row, metrics) do
+    values = Enum.map_join(metrics, " ", &"#{&1}=#{Map.get(row.scores, &1, "-")}")
+    IO.puts(String.pad_trailing(row.id, 16) <> String.pad_trailing("#{row.status}", 7) <> values)
+  end
+end
+
+SuiteReport.print(evaluation, [:task_success, :correct_escalation])
+```
+
+```text
+password-reset  ok     task_success=1 correct_escalation=1
+chargeback      ok     task_success=1 correct_escalation=1
+order-status    error  task_success=- correct_escalation=-
+task_success: mean 1.0, scored 2 of 3, coverage 0.67
+correct_escalation: mean 1.0, scored 2 of 3, coverage 0.67
+failed rows: [{"order-status", :inventory_service_timeout}]
+```
+
+Read the mean together with the coverage. Both metrics have a mean of `1.0`,
+but they cover only two of the three cases. The failed row has no scores, and
+its `error` field keeps the reason the runner returned.
+
+## Test a second configuration
+
+Run the same suite on a configuration that escalates password resets too. The
+cases and scores stay the same, so the two reports compare row by row.
+
+```elixir
+{:ok, eager} = Tune.evaluate(suite.(%{escalate: [:chargeback, :password_reset]}))
+
+SuiteReport.print(eager, [:task_success, :correct_escalation])
+```
+
+```text
+password-reset  ok     task_success=0 correct_escalation=0
+chargeback      ok     task_success=1 correct_escalation=1
+order-status    error  task_success=- correct_escalation=-
+task_success: mean 0.5, scored 2 of 3, coverage 0.67
+correct_escalation: mean 0.5, scored 2 of 3, coverage 0.67
+failed rows: [{"order-status", :inventory_service_timeout}]
+```
+
+The `password-reset` row shows where the second configuration loses: it
+escalates a routine request. Use `Tune.compare/3` when you need the per-row
+changes and paired coverage as data instead of two printed reports.
+
+## Next steps
+
+- [Gate a release](gate-a-release.livemd) compares a baseline and a search
+  winner on the same held-out cases.
+- [Score transcripts](score-transcripts.livemd) scores ordered agent turns.
+- [Programs and evaluation](../programs.md) covers typed programs and score
+  callbacks.

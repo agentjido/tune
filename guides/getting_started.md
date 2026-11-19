@@ -1,20 +1,37 @@
-# Getting started
+# Quickstart
 
-Use Tune to test a change to an Elixir program and check the result on data
-that the search did not see. This guide uses an existing Mix project and
-runs without provider credentials.
+This guide tunes one setting of a plain Elixir function and checks the new
+setting on cases that the search did not see. It needs no model, no
+provider credentials, and no network access.
 
-Add `{:tune, "~> 0.5.0"}` to your dependencies and run `mix deps.get`.
+Add Tune to your Mix project and fetch it:
+
+```text
+{:tune, "~> 0.5.0"}
+```
+
+```sh
+mix deps.get
+```
+
 The beta test matrix uses Elixir 1.18 with OTP 27 and Elixir 1.20 with OTP 29.
 
-## Search plain Elixir values
+## The problem
 
-A support team sends high-risk tickets to manual review. A threshold of 50
-sends too many tickets to review. Use labeled cases to select a threshold,
-then check it on a separate set.
+A support team sends risky tickets to manual review. A ticket router gives
+each ticket a risk score and sends it to review when the score reaches a
+threshold. The current threshold is 50, and it sends too many tickets to
+review. You have a few labeled tickets and want to know if 60 or 70 works
+better.
 
-Save this code as `tune_threshold.exs` in your Mix project. Run
+Save the code in this guide as `tune_threshold.exs` in your project, then run
 `mix run tune_threshold.exs`.
+
+## Describe the current setting
+
+Start with the current configuration and the function that uses it. Tune
+calls the function once per case with the candidate configuration and the
+case input.
 
 ```elixir
 baseline = %{review_at: 50}
@@ -22,108 +39,124 @@ baseline = %{review_at: 50}
 route = fn config, risk ->
   if risk >= config.review_at, do: :review, else: :standard
 end
+```
 
+Each case has an `id`, an `input`, and an `expected` value. Keep two separate
+splits. The search uses `validation` to pick a winner. The final check uses
+`test`.
+
+```elixir
 validation = [
-  %{input: 40, expected: :standard},
-  %{input: 50, expected: :standard},
-  %{input: 61, expected: :review},
-  %{input: 80, expected: :review}
+  %{id: "t-101", input: 40, expected: :standard},
+  %{id: "t-102", input: 55, expected: :standard},
+  %{id: "t-103", input: 61, expected: :review},
+  %{id: "t-104", input: 80, expected: :review}
 ]
 
 test = [
-  %{input: 34, expected: :standard},
-  %{input: 52, expected: :standard},
-  %{input: 64, expected: :review},
-  %{input: 90, expected: :review}
+  %{id: "t-201", input: 34, expected: :standard},
+  %{id: "t-202", input: 52, expected: :standard},
+  %{id: "t-203", input: 64, expected: :review},
+  %{id: "t-204", input: 90, expected: :review}
 ]
+```
 
+## Build the study
+
+Each builder call returns a new `%Tune{}` value and does no work.
+
+```elixir
 study =
   Tune.new(baseline, run: route)
   |> Tune.data(validation: validation, test: test)
   |> Tune.score(:accuracy, fn row, decision ->
-    if row.expected == decision, do: 1, else: 0
+    if decision == row.expected, do: 1, else: 0
   end)
   |> Tune.vary(review_at: [50, 60, 70])
   |> Tune.search(:grid)
-
-{:ok, winner} = Tune.tune(study)
-{:ok, report} = Tune.compare(study, winner, split: :test)
-
-IO.inspect({winner.value, report.baseline.selected_score, report.challenger.selected_score})
 ```
 
-Expected output:
+- `Tune.new/2` takes the target value and the `:run` function.
+- `Tune.data/2` names the splits. Tune never splits data for you.
+- `Tune.score/4` adds a named score. A two-argument scorer receives the case
+  and the output. Higher scores win by default.
+- `Tune.vary/2` declares which fields a search may change, and to what.
+- `Tune.search/3` picks the strategy. `:grid` tries every combination once.
 
-```text
-{%{review_at: 60}, 0.75, 1.0}
-```
+## Run the search
 
-Tune selects 60 using the validation cases. On the test cases, both settings
-route the three cases with scores of 34, 64, and 90 correctly. The new
-setting also sends the case with a score of 52 to the standard queue.
-
-## Save and reload the selected setting
-
-Append this code to `tune_threshold.exs` and run it again. This step saves the
-selected threshold in `ticket-routing.json` and applies it to a fresh copy
-of the original settings.
+`Tune.tune/1` runs the search on the validation split and returns a
+`%Tune.Result{}`.
 
 ```elixir
-{:ok, artifact} = Tune.dump(winner)
-{:ok, json} = Tune.Artifact.encode(artifact)
-File.write!("ticket-routing.json", json)
+{:ok, result} = Tune.tune(study)
 
-{:ok, saved} = File.read!("ticket-routing.json") |> Tune.Artifact.decode()
-{:ok, config} = Tune.load(saved, baseline)
+IO.inspect(result.value, label: "winner")
+
+for candidate <- result.history do
+  IO.inspect(candidate.evaluation.selected_score, label: "review_at #{candidate.value.review_at}")
+end
+```
+
+```text
+winner: %{review_at: 60}
+review_at 50: 0.75
+review_at 60: 1.0
+review_at 70: 0.75
+```
+
+`result.value` is the original map with the winning setting applied.
+`result.history` holds every evaluated candidate in order. Ties keep the
+earlier candidate.
+
+## Check the winner on held-out cases
+
+A validation score shows which candidate won the search. It does not show how
+the winner does on new tickets. `Tune.compare/3` runs the original setting and
+the winner on the same test cases and pairs the results by case ID.
+
+```elixir
+{:ok, report} = Tune.compare(study, result, split: :test)
+
+accuracy = report.metrics.accuracy
+IO.inspect({accuracy.baseline_mean, accuracy.challenger_mean, accuracy.status})
+IO.inspect(report.rows["t-202"].metrics.accuracy.status, label: "t-202")
+```
+
+```text
+{0.75, 1.0, :improved}
+t-202: :improved
+```
+
+The split is required. Both versions route the tickets with scores 34, 64,
+and 90 correctly. Only the winner sends ticket `t-202`, with a score of 52, to
+the standard queue. Check `accuracy.paired_count` against
+`length(report.case_ids)` to confirm that every case produced a pair.
+
+## Save the setting
+
+`Tune.dump/1` turns the result into a versioned `Tune.Artifact` that holds
+only the learned values. The host application loads it into its own fresh
+configuration.
+
+```elixir
+{:ok, artifact} = Tune.dump(result)
+{:ok, json} = Tune.Artifact.encode(artifact)
+
+{:ok, saved} = Tune.Artifact.decode(json)
+{:ok, config} = Tune.load(saved, %{review_at: 50})
 IO.inspect(config)
 ```
 
-The last line is `%{review_at: 60}`. The host keeps the routing function in
-Elixir. See [artifacts](artifacts.md) for the fields Tune saves and the
-checks it makes when it loads them.
-
-## Preview a prompt and score a saved answer
-
-For a support ticket classifier, preview the messages for one ticket. Then
-score a saved answer. The preview and the saved-answer evaluation both run
-without a model call.
-
-Save this code as `tune_ticket.exs` and run `mix run tune_ticket.exs`.
-
-```elixir
-{:ok, predictor} =
-  Tune.Predictor.new(
-    signature: [
-      instructions: "Classify this support ticket as billing or bug.",
-      inputs: [ticket: Zoi.string()],
-      outputs: [label: Zoi.enum(["billing", "bug"])]
-    ]
-  )
-
-ticket = %{ticket: "I was charged twice for my subscription."}
-model = [model: "openai:gpt-4o", adapter: Tune.Adapter.Chat]
-{:ok, prepared} = Tune.preview(Tune.new(predictor, model: model), ticket)
-IO.inspect(Enum.map(prepared.context.messages, & &1.role))
-
-saved_answers = [
-  %{id: "ticket-1042", input: ticket, output: %{"label" => "billing"}, expected: %{"label" => "billing"}},
-  %{
-    id: "ticket-1043",
-    input: %{ticket: "The app closes when I attach a PDF."},
-    output: %{"label" => "billing"},
-    expected: %{"label" => "bug"}
-  }
-]
-
-{:ok, evaluation} =
-  Tune.replay(saved_answers)
-  |> Tune.score(:exact_match, fn row, output -> if output == row.expected, do: 1, else: 0 end)
-  |> Tune.evaluate(:test)
-
-IO.inspect(evaluation.selected_score)
+```text
+%{review_at: 60}
 ```
 
-The final score is `0.5`. Open `evaluation.observations` to inspect each
-ticket's output and score. Use [programs and evaluation](programs.md) to
-evaluate fresh answers or add another metric. Use the
-[workbench guide](ui.md) for the browser workflow.
+Write `json` to a file or a database row to keep it between deploys. The
+routing function stays in your code.
+
+## Next steps
+
+- [Search API](optimizers.md) covers limits, objectives, and the other strategies.
+- [Artifacts](artifacts.md) explains what Tune saves and the checks it makes on load.
+- [Programs](programs.md) shows how to tune typed LLM programs with the same pipeline.

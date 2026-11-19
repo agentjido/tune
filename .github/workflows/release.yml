@@ -4,13 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Check a tag, publish through Hex, or record an existing Hex release
+        description: Prepare a tag, check it, publish through Hex, or record an existing Hex release
         type: choice
         default: dry-run
         options:
           - dry-run
+          - prepare
           - publish
           - finalize
+      tag_name:
+        description: Version tag to check or create when running from main (for example v0.5.1)
+        type: string
 
 concurrency:
   group: tune-hex-release
@@ -28,7 +32,7 @@ env:
 
 jobs:
   verify:
-    name: Verify release tag
+    name: Verify release source and package
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
@@ -36,6 +40,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.tag.outputs.version }}
+      commit: ${{ steps.tag.outputs.commit }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -45,13 +50,24 @@ jobs:
         id: tag
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_OPERATION: ${{ inputs.operation }}
+          REQUESTED_TAG: ${{ inputs.tag_name }}
         run: |
-          if [[ "$GITHUB_REF_TYPE" != tag || ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Dispatch this workflow from a vMAJOR.MINOR.PATCH tag." >&2
+          if [[ "$GITHUB_REF" == refs/heads/main && ("$RELEASE_OPERATION" == prepare || "$RELEASE_OPERATION" == dry-run) ]]; then
+            tag="$REQUESTED_TAG"
+          elif [[ "$RELEASE_OPERATION" != prepare && "$GITHUB_REF_TYPE" == tag ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            echo "Run prepare from main with a tag name. Run dry-run the same way or from a release tag. Run publish and finalize from a release tag." >&2
             exit 1
           fi
 
-          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Use a vMAJOR.MINOR.PATCH release tag." >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
           commit="$(git rev-parse HEAD)"
           git merge-base --is-ancestor "$commit" origin/main
           grep -Fxq "  @version \"$version\"" mix.exs
@@ -59,14 +75,14 @@ jobs:
 
           if ! conclusion="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main \
             --commit "$commit" --event push --limit 1 --json conclusion --jq '.[0].conclusion // ""')"; then
-            echo "Could not verify CI for the tagged commit." >&2
+            echo "Could not verify CI for the release commit." >&2
             exit 1
           fi
           if [[ "$conclusion" != success ]]; then
-            echo "The latest CI run from a push to main for the tagged commit must pass." >&2
+            echo "The latest CI run from a push to main for the release commit must pass." >&2
             exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\ncommit=%s\n' "$version" "$commit" >> "$GITHUB_OUTPUT"
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           otp-version: "29"
@@ -82,6 +98,38 @@ jobs:
           name: tune-hex
           path: ${{ runner.temp }}/tune-hex
 
+  prepare:
+    name: Create release tag
+    if: ${{ inputs.operation == 'prepare' }}
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.verify.outputs.commit }}
+          fetch-depth: 0
+      - name: Push the annotated version tag
+        env:
+          TAG: v${{ needs.verify.outputs.version }}
+          COMMIT: ${{ needs.verify.outputs.commit }}
+        run: |
+          ref="refs/tags/$TAG"
+          if git show-ref --verify --quiet "$ref"; then
+            if [[ "$(git cat-file -t "$ref")" != tag || "$(git rev-parse "$ref^{commit}")" != "$COMMIT" ]]; then
+              echo "$TAG already exists as a different tag." >&2
+              exit 1
+            fi
+            echo "$TAG already points to $COMMIT."
+            exit 0
+          fi
+
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            tag -a "$TAG" -m "Release $TAG" "$COMMIT"
+          git push origin "$ref:$ref"
+
   publish:
     name: Publish to Hex
     if: ${{ inputs.operation == 'publish' }}
@@ -92,6 +140,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ needs.verify.outputs.commit }}
           persist-credentials: false
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
@@ -142,6 +191,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ needs.verify.outputs.commit }}
           persist-credentials: false
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
@@ -160,8 +210,12 @@ jobs:
             echo "The published Hex checksum differs from the package built from this tag." >&2
             exit 1
           fi
+          archive="$RUNNER_TEMP/tune-published.tar"
+          curl -fsS --retry 5 --retry-all-errors -o "$archive" "https://repo.hex.pm/tarballs/tune-$VERSION.tar"
+          printf '%s  %s\n' "$expected" "$archive" | shasum -a 256 --check
           curl -fsS --retry 5 --retry-all-errors -o /dev/null "https://hexdocs.pm/tune/$VERSION/"
       - run: bash .github/scripts/smoke-consumer.sh "$VERSION" core
+      - run: bash .github/scripts/smoke-consumer.sh "$VERSION" workbench
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

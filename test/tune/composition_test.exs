@@ -42,6 +42,7 @@ defmodule Tune.CompositionTest do
       assert Enum.map(result.steps, & &1.name) == ["extract", "answer"]
       assert Enum.map(result.steps, & &1.role) == [:target, :target]
       assert result.calls == %{target: 2}
+      assert result.usage == %{input: 20, output: 10, total: 30}
 
       [extract, answer] = result.steps
       assert extract.inputs["question"] == "Where is the Eiffel Tower?"
@@ -68,6 +69,7 @@ defmodule Tune.CompositionTest do
       assert [%{name: "extract"}] = result.steps
       assert [%{name: "answer", role: :target, error: ^cause}] = result.failures
       assert result.calls == %{target: 2}
+      assert result.usage == %{input: 20, output: 10, total: 30}
     end
 
     test "learned lessons reach the answering prompt through application code" do

@@ -13,8 +13,8 @@ defmodule Tune.Optimizers.Anything do
 
   Options: `:parameter` (required name), `:objective` (text describing what
   the value is for; defaults to the parameter description), and the
-  Reflective options `:max_iterations`, `:minibatch_size`, `:use_merge`,
-  `:merge_every`.
+  reflective options `:max_iterations` and `:minibatch_size`. This strategy
+  searches a single component, so merging is disabled.
 
   Differences from `gepa.optimize_anything`: the value is evaluated through
   a normal parameterized program and metric rather than a separate
@@ -36,7 +36,11 @@ defmodule Tune.Optimizers.Anything do
   ]
 
   @impl true
-  def init(opts), do: Shared.options(Reflective.options(@fields), opts)
+  def init(opts) do
+    with {:ok, config} <- Shared.options(Reflective.options(@fields), opts) do
+      {:ok, %{config | use_merge: false}}
+    end
+  end
 
   @impl true
   def requirements(_config),
@@ -46,7 +50,7 @@ defmodule Tune.Optimizers.Anything do
   def compile(config, program, %Context{} = ctx) do
     case Map.new(Shared.values(program)) |> Map.fetch(config.parameter) do
       {:ok, %Parameter{} = parameter} ->
-        Reflective.run(%{config | use_merge: false}, program, [component(config, parameter)], ctx)
+        Reflective.run(config, program, [component(config, parameter)], ctx)
 
       :error ->
         {:error,

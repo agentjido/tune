@@ -1,0 +1,255 @@
+# Score Retrieval
+
+This notebook scores one saved answer from a retrieval-augmented application.
+`Tune.Scores.Faithfulness` checks whether the retrieved passages support the
+answer's claims. `Tune.Scores.ContextPrecision` checks whether the relevant
+passages were ranked first. Both scores call a model judge; here the judge
+replies are scripted, so the notebook runs offline with no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"},
+  {:plug, "~> 1.20"}
+])
+```
+
+## Script the judge
+
+The `Scripted` module serves OpenAI-compatible replies to ReqLLM through an
+in-process Plug. It stands in for the provider so the notebook runs offline.
+In real use you pass a real model spec and the host's credentials instead.
+
+Judge scores request structured objects. With
+`openai_structured_output_mode: :tool_strict`, ReqLLM asks for the object as
+a tool call, so a `{:tool, json}` reply returns the object's JSON. A
+`{:http_error, status, body}` reply makes the judge request fail.
+
+```elixir
+defmodule Scripted do
+  @moduledoc "Serves scripted OpenAI-compatible judge replies to ReqLLM through an in-process Plug."
+
+  def model, do: %{provider: :openai, id: "gpt-4-turbo", extra: %{wire: %{protocol: "openai_chat"}}}
+
+  def judge(replies) do
+    {:ok, queue} = Agent.start_link(fn -> replies end)
+
+    plug = fn conn ->
+      reply = Agent.get_and_update(queue, fn [next | rest] -> {next, rest}; [] -> {nil, []} end)
+      respond(conn, reply)
+    end
+
+    [
+      model: model(),
+      request_options: [
+        api_key: "scripted",
+        req_http_options: [plug: plug],
+        max_retries: 0,
+        openai_structured_output_mode: :tool_strict
+      ]
+    ]
+  end
+
+  defp respond(conn, nil), do: send_json(conn, 500, %{error: %{message: "no scripted reply left"}})
+
+  defp respond(conn, {:http_error, status, body}), do: send_json(conn, status, body)
+
+  defp respond(conn, {:tool, arguments}) do
+    send_json(conn, 200, %{
+      id: "scripted",
+      model: "gpt-4-turbo",
+      choices: [
+        %{
+          message: %{
+            role: "assistant",
+            tool_calls: [
+              %{
+                id: "call_1",
+                type: "function",
+                function: %{name: "structured_output", arguments: arguments}
+              }
+            ]
+          },
+          finish_reason: "tool_calls"
+        }
+      ],
+      usage: %{prompt_tokens: 10, completion_tokens: 5, total_tokens: 15}
+    })
+  end
+
+  defp send_json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(status, JSON.encode!(body))
+  end
+end
+```
+
+## Save the answer and its retrieval results
+
+The saved row puts the question and the ordered passages in `input`. The
+first passage is irrelevant, and the two relevant passages follow it. The
+answer is in `output`, and the reference answer is in `expected`.
+
+```elixir
+rows = [
+  %{
+    id: "paris",
+    input: %{
+      user_input: "Where is Paris?",
+      retrieved_contexts: [
+        "A bicycle has two wheels.",
+        "Paris is in France.",
+        "Paris is its capital."
+      ]
+    },
+    output: "Paris is in France.",
+    expected: "Paris is in France."
+  }
+]
+```
+
+## Build the two scores
+
+Faithfulness makes one judge call to extract the answer's claims, then one
+call per claim to check support. This script extracts one claim and supports
+it, so faithfulness uses two calls.
+
+Context precision makes one judge call per passage, in passage order.
+`concurrency: 1` keeps the calls in order, so the scripted replies line up
+with the passages.
+
+```elixir
+relevance = fn relevant, reasoning ->
+  {:tool, JSON.encode!(%{relevant: relevant, reasoning: reasoning})}
+end
+
+support_replies = [
+  {:tool, ~s({"statements":[{"text":"Paris is in France."}]})},
+  {:tool, ~s({"supported":true,"reasoning":"A retrieved passage supports the answer."})}
+]
+
+precision_replies = [
+  relevance.(false, "The passage is unrelated."),
+  relevance.(true, "The passage locates Paris."),
+  relevance.(true, "The passage identifies the country.")
+]
+
+{:ok, faithfulness} = Tune.Scores.Faithfulness.new(Scripted.judge(support_replies))
+
+{:ok, precision} =
+  Tune.Scores.ContextPrecision.new(Scripted.judge(precision_replies) ++ [concurrency: 1])
+```
+
+## Evaluate
+
+Pass both scores to `Tune.score/4` and bound the judge work with
+`model_calls: 5`, the two faithfulness calls plus three precision calls.
+
+```elixir
+{:ok, report} =
+  rows
+  |> Tune.replay()
+  |> Tune.score(:faithfulness, faithfulness)
+  |> Tune.score(:precision, precision)
+  |> Tune.limit(model_calls: 5)
+  |> Tune.evaluate()
+
+IO.puts("faithfulness: #{report.summaries.faithfulness.mean}")
+IO.puts("precision: #{Float.round(report.summaries.precision.mean, 4)}")
+IO.puts("judge calls: #{inspect(report.calls)}")
+```
+
+```text
+faithfulness: 1.0
+precision: 0.5833
+judge calls: %{judge: 5}
+```
+
+The answer is fully supported, but precision is below 1.0 because an
+irrelevant passage came first. Precision averages the precision at each
+relevant position: (1/2 + 2/3) / 2.
+
+## Read the evidence
+
+Each observation keeps the score feedback. The details for each score are in
+`metadata.scores`.
+
+```elixir
+[observation] = report.observations
+IO.puts("faithfulness: #{observation.feedback.faithfulness}")
+IO.puts("precision: #{observation.feedback.precision}")
+
+evidence = observation.metadata.scores
+
+for statement <- evidence.faithfulness.details.statements do
+  IO.puts("claim: #{statement.text} supported: #{statement.supported}")
+end
+
+for context <- evidence.precision.details.contexts do
+  IO.puts("#{context.index} relevant: #{context.relevant} - #{context.reasoning}")
+end
+```
+
+```text
+faithfulness: 1/1 statements supported
+precision: 2/3 contexts relevant
+claim: Paris is in France. supported: true
+0 relevant: false - The passage is unrelated.
+1 relevant: true - The passage locates Paris.
+2 relevant: true - The passage identifies the country.
+```
+
+`metadata.scores` also holds `judge_calls`, one entry per judge request with
+its model, usage, and latency.
+
+## Keep one score when the other judge fails
+
+Script the first precision request to fail. Faithfulness gets fresh replies.
+
+```elixir
+failure = {:http_error, 422, %{error: %{message: "scripted ranking failure"}}}
+supported = relevance.(true, "The passage supports the answer.")
+
+{:ok, faithfulness} = Tune.Scores.Faithfulness.new(Scripted.judge(support_replies))
+
+{:ok, precision} =
+  Tune.Scores.ContextPrecision.new(
+    Scripted.judge([failure, supported, supported]) ++ [concurrency: 1]
+  )
+
+{:ok, report} =
+  rows
+  |> Tune.replay()
+  |> Tune.score(:faithfulness, faithfulness)
+  |> Tune.score(:precision, precision)
+  |> Tune.limit(model_calls: 5)
+  |> Tune.evaluate()
+
+[observation] = report.observations
+
+IO.puts("status: #{observation.status}")
+IO.puts("scores: #{inspect(observation.scores)}")
+IO.puts("failed scores: #{inspect(Map.keys(observation.score_errors))}")
+IO.puts("precision count: #{report.summaries.precision.count}")
+IO.puts("judge calls: #{inspect(report.calls)}")
+```
+
+```text
+status: error
+scores: %{faithfulness: 1.0}
+failed scores: [:precision]
+precision count: 0
+judge calls: %{judge: 5}
+```
+
+The row is marked `:error`, but the faithfulness score stays available. Every
+issued request counts against `model_calls`, including the failed one.
+
+## Next steps
+
+- [Replay JSONL](replay-jsonl.livemd) loads saved rows from a file.
+- [Score transcripts](score-transcripts.livemd) scores multi-turn
+  conversations with independent scorers.
+- [Search API](../optimizers.md) uses scores to compare candidates.

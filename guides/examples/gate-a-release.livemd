@@ -1,0 +1,226 @@
+# Gate a Release
+
+This notebook decides whether to promote a tuned routing policy. You search
+for a winner, run the baseline and the winner on the same held-out cases with
+`Tune.compare/3`, and apply a release rule that requires evidence for one
+critical case. The fixture is built so the aggregate score rises while the
+critical case regresses. The router is plain Elixir code, so the notebook runs
+offline with no credentials and no model calls.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Define the router
+
+The configuration selects a routing policy. The baseline sends card fraud to
+`risk-review` and everything else to `general`. The tuned policy sends routine
+tickets to `billing`, but it also sends card fraud to `general`.
+
+```elixir
+defmodule Router do
+  @moduledoc "Routes support tickets with a configurable policy."
+
+  def route(%{policy: :baseline}, :card_fraud), do: "risk-review"
+  def route(%{policy: :baseline}, _ticket), do: "general"
+  def route(%{policy: :tuned}, :card_fraud), do: "general"
+  def route(%{policy: :tuned}, _ticket), do: "billing"
+end
+```
+
+## Find a search winner
+
+Search the policy with the `:grid` strategy on validation data. The validation
+split holds only a routine ticket, so the tuned policy wins.
+
+```elixir
+route_score = fn tune_case, output -> if output == tune_case.expected, do: 1, else: 0 end
+baseline = %{policy: :baseline}
+
+{:ok, winner} =
+  Tune.new(baseline, run: &Router.route/2)
+  |> Tune.data(validation: [%{id: "invoice", input: :invoice_copy, expected: "billing"}])
+  |> Tune.vary(policy: [:baseline, :tuned])
+  |> Tune.score(:route, route_score)
+  |> Tune.search(:grid)
+  |> Tune.tune()
+
+winner.value
+```
+
+```text
+%{policy: :tuned}
+```
+
+## Compare on held-out cases
+
+Build a second pipeline for the held-out cases. Give each case a unique `id`:
+`Tune.compare/3` pairs rows by ID and rejects duplicate or blank IDs before it
+runs either target.
+
+```elixir
+holdout = [
+  %{id: "card-fraud", input: :card_fraud, expected: "risk-review"},
+  %{id: "refund", input: :refund, expected: "billing"},
+  %{id: "invoice-copy", input: :invoice_copy, expected: "billing"}
+]
+
+paired_study = fn run, cases ->
+  Tune.new(baseline, run: run)
+  |> Tune.data(test: cases)
+  |> Tune.score(:route, route_score)
+end
+
+{:ok, paired} = Tune.compare(paired_study.(&Router.route/2, holdout), winner, split: :test)
+
+route = paired.metrics.route
+
+IO.puts(
+  "#{route.status}: #{Float.round(route.baseline_mean, 2)} -> " <>
+    "#{Float.round(route.challenger_mean, 2)}, paired #{route.paired_count} of " <>
+    "#{length(paired.case_ids)}, complete #{paired.complete?}"
+)
+```
+
+```text
+improved: 0.33 -> 0.67, paired 3 of 3, complete true
+```
+
+`Tune.compare/3` runs the original target and the winner on the same split.
+The result is a `Tune.Comparison`. `paired_count` counts rows where both
+targets have a score. Compare it with the length of `case_ids` to check
+coverage. The aggregate improved by one third.
+
+## Inspect the critical row
+
+`rows` is keyed by case ID. Each metric has the baseline score, the challenger
+score, the delta, and a status.
+
+```elixir
+paired.rows["card-fraud"].metrics.route
+```
+
+```text
+%{status: :regressed, delta: -1, baseline: 1, challenger: 0}
+```
+
+The winner sends card fraud to the wrong queue. A rule that reads only the
+aggregate would promote it.
+
+## Write the release rule
+
+The release rule is application code. This one holds the release when the
+comparison is incomplete, when the critical row regresses, or when the
+critical row has no paired score. It promotes only when the critical row is
+tied or improved and the aggregate improved.
+
+```elixir
+defmodule ReleaseRule do
+  @moduledoc "Requires paired evidence for a critical case before promotion."
+
+  def decide(%{complete?: false}, _critical_id), do: :hold_incomplete
+
+  def decide(paired, critical_id) do
+    case get_in(paired.rows, [critical_id, :metrics, :route, :status]) do
+      :regressed -> :hold_critical_regression
+      status when status in [:tied, :improved] -> aggregate(paired)
+      _missing -> :hold_missing_critical_evidence
+    end
+  end
+
+  defp aggregate(paired) do
+    if paired.metrics.route.status == :improved, do: :promote, else: :hold
+  end
+end
+
+ReleaseRule.decide(paired, "card-fraud")
+```
+
+```text
+:hold_critical_regression
+```
+
+## Handle missing and failed evidence
+
+A critical row can lack evidence in three ways. The rule holds the release in
+each case.
+
+When the winner's run fails on the critical case, the row status is `:error`.
+The other rows still pair, so the aggregate looks better than before.
+
+```elixir
+failing = fn
+  %{policy: :tuned}, :card_fraud -> {:error, :rules_service_unavailable}
+  config, ticket -> Router.route(config, ticket)
+end
+
+{:ok, failed} = Tune.compare(paired_study.(failing, holdout), winner, split: :test)
+
+{failed.rows["card-fraud"].metrics.route.status, failed.metrics.route.delta,
+ failed.metrics.route.paired_count, ReleaseRule.decide(failed, "card-fraud")}
+```
+
+```text
+{:error, 1.0, 2, :hold_missing_critical_evidence}
+```
+
+When the held-out set leaves out the critical case, every supplied row pairs,
+but the rule finds no row for `card-fraud`.
+
+```elixir
+[_critical | routine] = holdout
+{:ok, partial} = Tune.compare(paired_study.(&Router.route/2, routine), winner, split: :test)
+
+{partial.metrics.route.paired_count, length(partial.case_ids),
+ ReleaseRule.decide(partial, "card-fraud")}
+```
+
+```text
+{2, 2, :hold_missing_critical_evidence}
+```
+
+When a limit stops the comparison, `complete?` is `false`. A deadline of zero
+stops it before Tune reads the cases.
+
+```elixir
+expired = paired_study.(&Router.route/2, holdout) |> Tune.limit(deadline: 0)
+{:ok, stopped} = Tune.compare(expired, winner, split: :test)
+
+{stopped.case_ids, stopped.complete?, ReleaseRule.decide(stopped, "card-fraud")}
+```
+
+```text
+{[], false, :hold_incomplete}
+```
+
+## Promote a safe winner
+
+A winner that keeps card fraud in `risk-review` and improves routine tickets
+passes the rule.
+
+```elixir
+safe = fn
+  %{policy: :tuned}, :card_fraud -> "risk-review"
+  config, ticket -> Router.route(config, ticket)
+end
+
+{:ok, passing} = Tune.compare(paired_study.(safe, holdout), winner, split: :test)
+
+{passing.rows["card-fraud"].metrics.route.status, ReleaseRule.decide(passing, "card-fraud")}
+```
+
+```text
+{:tied, :promote}
+```
+
+## Next steps
+
+- [Build an eval suite](build-an-eval-suite.livemd) scores and reports one
+  configuration at a time.
+- [Deploy a router](../integration/deploy-a-router.livemd) installs a tuned
+  artifact in an OTP service.
+- [Search API](../optimizers.md) covers search strategies and limits.

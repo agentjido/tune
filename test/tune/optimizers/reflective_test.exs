@@ -291,8 +291,10 @@ defmodule Tune.Optimizers.ReflectiveTest do
     end
 
     test "the optimized value reloads into the same application code" do
-      {{:ok, _best, report}, _} = anything(Styled.new(), ["Be formal."])
+      {{:ok, _best, report}, _} = anything(Styled.new(), ["Be formal."], use_merge: true)
       {:ok, artifact} = Tune.dump(report)
+      assert report.metadata.notes.settings["use_merge"] == false
+      assert artifact.provenance["settings"]["use_merge"] == false
       {:ok, loaded} = Tune.load(artifact, Styled.new())
       assert loaded.style.value == "Be formal."
     end

@@ -1,0 +1,192 @@
+# Dispatch Policies
+
+In this notebook you evolve a dispatch policy for a small job queue. A
+simulator runs the queue under each policy and counts the jobs that finish by
+their deadline. Genetic search reports each generation as it finishes. You run
+one search until it stops improving, then cancel a second search partway
+through a generation and read what the result keeps. The notebook runs offline
+and needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Simulate the queue
+
+Each job has a duration, a due time, and a priority. A policy decides the order
+in which one worker runs the jobs.
+
+- `:fifo` runs jobs in arrival order.
+- `:priority` runs the highest priority first.
+- `:deadline` runs the earliest due time first.
+
+```elixir
+queue = [
+  %{id: :report, duration: 4, due: 10, priority: 4},
+  %{id: :payment, duration: 1, due: 1, priority: 3},
+  %{id: :confirm, duration: 2, due: 3, priority: 2},
+  %{id: :archive, duration: 1, due: 8, priority: 1}
+]
+
+simulate = fn policy, queue ->
+  ordered =
+    case policy do
+      :fifo -> queue
+      :priority -> Enum.sort_by(queue, & &1.priority, :desc)
+      :deadline -> Enum.sort_by(queue, & &1.due)
+    end
+
+  {trace, _elapsed} =
+    Enum.map_reduce(ordered, 0, fn job, elapsed ->
+      finished = elapsed + job.duration
+      {{job.id, finished <= job.due}, finished}
+    end)
+
+  %{order: Enum.map(trace, &elem(&1, 0)), on_time: Enum.count(trace, &elem(&1, 1))}
+end
+
+Enum.map([:fifo, :priority, :deadline], &{&1, simulate.(&1, queue)})
+```
+
+```text
+[
+  fifo: %{order: [:report, :payment, :confirm, :archive], on_time: 2},
+  priority: %{order: [:report, :payment, :confirm, :archive], on_time: 2},
+  deadline: %{order: [:payment, :confirm, :archive, :report], on_time: 4}
+]
+```
+
+The arrival order already matches priority order here, so `:fifo` and
+`:priority` tie at two on-time jobs. `:deadline` finishes all four on time.
+
+## Build the search
+
+The genome is a policy atom. The starting population holds `:fifo` and
+`:priority`, and the mutation always proposes `:deadline`. With
+`mutation_rate: 1`, every child is mutated. `elitism: 0` keeps no parent
+unchanged, so each generation is all new children.
+
+`patience: 1` stops the search after one generation with no new best.
+`on_progress` receives events while the search runs. This one prints a line
+after each generation and ignores the per-case and per-candidate events.
+
+```elixir
+report = fn
+  %{event: :generation_evaluated} = snapshot ->
+    policies = Enum.map(snapshot.population, & &1.value)
+
+    IO.puts(
+      "Generation #{snapshot.generation} #{inspect(policies)} complete? #{snapshot.complete?}, " <>
+        "best #{snapshot.best.value} (#{snapshot.best.evaluation.selected_score})"
+    )
+
+  _event ->
+    :ok
+end
+
+dispatch = fn runner, opts ->
+  Tune.new(:fifo, run: runner, on_progress: report)
+  |> Tune.data(validation: [queue])
+  |> Tune.score(:on_time, & &1.on_time)
+  |> Tune.search(
+    :genetic,
+    [
+      initial_population: [:fifo, :priority, :fifo],
+      mutate: fn _policy, rng -> {:deadline, rng} end,
+      mutation_rate: 1,
+      elitism: 0,
+      generations: 5,
+      patience: 1
+    ] ++ opts
+  )
+  |> Tune.limit(evaluations: 9, seed: 12)
+  |> Tune.tune()
+end
+```
+
+## Run to the patience limit
+
+```elixir
+{:ok, winner} = dispatch.(simulate, [])
+
+IO.puts("Selected #{winner.value}. Stop reason #{winner.stop_reason}, complete? #{winner.complete?}")
+```
+
+```text
+Generation 0 [:fifo, :priority, :fifo] complete? true, best fifo (2.0)
+Generation 1 [:deadline, :deadline, :deadline] complete? true, best deadline (4.0)
+Generation 2 [:deadline, :deadline, :deadline] complete? true, best deadline (4.0)
+Selected deadline. Stop reason patience, complete? true
+```
+
+Generation 1 finds `:deadline`. Generation 2 does not beat it, so `patience: 1`
+ends the search. A patience stop counts as a complete search.
+
+## Cancel a generation
+
+Pass a zero-argument `cancel` function to stop a search from outside. Tune
+checks it during the search. Here a counter tracks runner calls, and `cancel`
+returns `true` once the fifth simulation has run. That point falls in the
+middle of generation 1.
+
+```elixir
+runs = :counters.new(1, [])
+
+counted = fn policy, queue ->
+  :counters.add(runs, 1, 1)
+  simulate.(policy, queue)
+end
+
+{:ok, cancelled} = dispatch.(counted, cancel: fn -> :counters.get(runs, 1) >= 5 end)
+
+IO.puts("Selected #{cancelled.value}. Stop reason #{cancelled.stop_reason}, complete? #{cancelled.complete?}")
+```
+
+```text
+Generation 0 [:fifo, :priority, :fifo] complete? true, best fifo (2.0)
+Generation 1 [:deadline, :deadline] complete? false, best fifo (2.0)
+Selected fifo. Stop reason cancelled, complete? false
+```
+
+The snapshot for generation 1 has `complete?: false` and only two of its three
+members. The result keeps `:fifo`, the best candidate found before the interrupted generation.
+
+## Read the interrupted generation
+
+The history shows what happened inside generation 1:
+
+```elixir
+for candidate <- cancelled.history do
+  evaluation = candidate.evaluation
+
+  IO.puts(
+    "#{candidate.id} g#{candidate.lineage.generation} #{candidate.value}: " <>
+      "eligible? #{evaluation.eligible?}, stop #{evaluation.stop_reason}"
+  )
+end
+
+:ok
+```
+
+```text
+0 g0 fifo: eligible? true, stop completed
+1 g0 priority: eligible? true, stop completed
+2 g0 fifo: eligible? true, stop completed
+3 g1 deadline: eligible? true, stop completed
+4 g1 deadline: eligible? false, stop cancelled
+```
+
+Candidate `"3"` finished and scored 4, more than `:fifo`. Candidate `"4"` was
+cancelled, so it is not eligible. Tune does not promote a winner from a
+generation it could not finish. It returns the best candidate found before the
+interrupted generation, and the full history stays in the result for review.
+
+## Next steps
+
+- [Evolve a Word](evolve-a-word.livemd) shows each genetic operator step by step.
+- [Delivery Routes](delivery-routes.livemd) supplies a custom parent selector.
+- [Host integration](../host_integration.md) covers deadlines and cancellation in an application.

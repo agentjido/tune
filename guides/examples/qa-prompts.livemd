@@ -1,0 +1,328 @@
+# QA Prompts
+
+In this notebook you tune the instruction and the demonstrations of a small
+question-answering predictor in one search. `:mipro_v2` asks a proposal model
+for new instructions, asks a teacher model for demonstrations, and searches
+their combinations on training minibatches. Only full validation results can
+win. The notebook runs offline with no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"},
+  {:plug, "~> 1.20"}
+])
+```
+
+## Script the models
+
+`Scripted` serves OpenAI-compatible replies through an in-process Plug, so
+ReqLLM runs its real request path without a network call. Each role gets its
+own reply function of the decoded request body. In real use you pass a real
+model spec and the host's credentials for each role instead.
+
+```elixir
+defmodule Scripted do
+  @moduledoc "Serves scripted OpenAI-compatible replies to ReqLLM through an in-process Plug."
+
+  def model, do: %{provider: :openai, id: "gpt-4-turbo", extra: %{wire: %{protocol: "openai_chat"}}}
+
+  def options(reply) when is_function(reply, 1) do
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      respond(conn, reply.(JSON.decode!(body)))
+    end
+
+    [api_key: "scripted", req_http_options: [plug: plug], max_retries: 0]
+  end
+
+  def role(reply), do: [model: model(), adapter: Tune.Adapter.Chat, request_options: options(reply)]
+
+  def chat(fields) do
+    Enum.map_join(fields, "\n\n", fn {name, value} ->
+      text = if is_binary(value), do: value, else: JSON.encode!(value)
+      "[[ ## #{name} ## ]]\n#{text}"
+    end) <> "\n\n[[ ## completed ## ]]"
+  end
+
+  def system(body), do: hd(body["messages"])["content"]
+
+  def field(body, name) do
+    text = body["messages"] |> Enum.filter(&(&1["role"] == "user")) |> List.last() |> Map.fetch!("content")
+
+    case Regex.run(~r/\[\[ ## #{name} ## \]\]\n(.*?)(?=\n\n\[\[ ## |\n\nRespond with|\z)/s, text) do
+      [_, value] -> value
+      nil -> nil
+    end
+  end
+
+  def demos?(body), do: Enum.any?(body["messages"], &(&1["role"] == "assistant"))
+
+  defp respond(conn, text) do
+    send_json(conn, 200, %{
+      id: "scripted",
+      model: "gpt-4-turbo",
+      choices: [%{message: %{role: "assistant", content: text}, finish_reason: "stop"}],
+      usage: %{prompt_tokens: 10, completion_tokens: 5, total_tokens: 15}
+    })
+  end
+
+  defp send_json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(status, JSON.encode!(body))
+  end
+end
+```
+
+## Define the predictor and data
+
+Each case gives a short context and a question. The score is 1.0 for the
+exact expected answer.
+
+```elixir
+{:ok, qa} =
+  Tune.Predictor.new(
+    signature: [
+      instructions: "Answer the question.",
+      inputs: [context: Zoi.string(), question: Zoi.string()],
+      outputs: [answer: Zoi.string()]
+    ]
+  )
+
+rows = fn items ->
+  Enum.map(items, fn {id, question, subject, answer} ->
+    %{
+      id: id,
+      input: %{context: "About #{subject}: #{answer}. An unrelated note.", question: question},
+      expected: %{answer: answer}
+    }
+  end)
+end
+
+train =
+  rows.([
+    {"tower", "Which city is home to the Eiffel Tower?", "the Eiffel Tower", "Paris"},
+    {"novel", "Who wrote Pride and Prejudice?", "Pride and Prejudice", "Jane Austen"},
+    {"plants", "Which gas do plants absorb?", "plants", "carbon dioxide"},
+    {"planet", "Which planet is called the red planet?", "the red planet", "Mars"}
+  ])
+
+validation =
+  rows.([
+    {"ocean", "What is the largest ocean?", "oceans", "Pacific"},
+    {"metal", "Which metal is liquid at room temperature?", "metals", "mercury"},
+    {"river", "Which river flows through Cairo?", "Cairo", "the Nile"}
+  ])
+
+test =
+  rows.([
+    {"bridge", "Which city has the Golden Gate Bridge?", "the Golden Gate Bridge", "San Francisco"},
+    {"painter", "Who painted the Mona Lisa?", "the Mona Lisa", "Leonardo da Vinci"}
+  ])
+
+:ok
+```
+
+## Configure three roles
+
+Target, teacher, and proposal are separate model configurations.
+
+- The target answers in a full sentence by default. Under an instruction
+  containing "Memorize", it recalls training answers and knows nothing else.
+  Under an instruction containing "Quote" with at least one demonstration,
+  it quotes the answer from the context.
+- The teacher quotes the answer from the context. Its replies become
+  bootstrapped demonstrations.
+- The proposal model returns two new instructions.
+
+```elixir
+remembered = Map.new(train, &{&1.input.question, &1.expected.answer})
+
+quote_answer = fn body ->
+  [_, answer] = Regex.run(~r/: (.*?)\./, Scripted.field(body, "context"))
+  answer
+end
+
+target = fn body ->
+  instruction = Scripted.system(body)
+
+  answer =
+    cond do
+      instruction =~ "Memorize" -> Map.get(remembered, Scripted.field(body, "question"), "unknown")
+      instruction =~ "Quote" and Scripted.demos?(body) -> quote_answer.(body)
+      true -> "I believe the answer is #{quote_answer.(body)}."
+    end
+
+  Scripted.chat(answer: answer)
+end
+
+teacher = fn body -> Scripted.chat(answer: quote_answer.(body)) end
+
+proposal = fn _body ->
+  Scripted.chat(
+    instructions: ["Memorize the answers to past questions.", "Quote the shortest answer from the context."]
+  )
+end
+
+:ok
+```
+
+## Run the search
+
+`num_candidates: 3` gives three instructions (the original plus two
+proposals) and three demonstration sets (none plus two bootstrapped sets).
+The seed fixes minibatch sampling and the sampler, and `model_calls: 60`
+caps target, teacher, and proposal calls together.
+
+```elixir
+study =
+  Tune.new(qa, model: Scripted.role(target), teacher: Scripted.role(teacher), proposal: Scripted.role(proposal))
+  |> Tune.data(train: train, validation: validation, test: test)
+  |> Tune.score(:answer, fn row, output ->
+    if output["answer"] == row.expected["answer"], do: 1.0, else: 0.0
+  end)
+  |> Tune.search(:mipro_v2,
+    accept_score: 1.0,
+    num_candidates: 3,
+    num_trials: 10,
+    minibatch_size: 2,
+    minibatch_full_eval_steps: 3,
+    n_startup: 3,
+    max_labeled_demos: 0,
+    max_bootstrapped_demos: 1
+  )
+  |> Tune.limit(seed: 5, model_calls: 60)
+
+{:ok, winner} = Tune.tune(study)
+
+IO.inspect(winner.calls, label: "calls")
+IO.inspect(winner.stop_reason, label: "stop")
+```
+
+```text
+calls: %{target: 35, teacher: 2, proposal: 1}
+stop: :completed
+```
+
+## Find the overfit candidate
+
+`winner.metadata.notes.instructions` lists the instruction choices by index.
+Each trial scores one choice on a two-case training minibatch.
+
+```elixir
+instructions = winner.metadata.notes.instructions["root"]
+Enum.with_index(instructions, fn text, index -> IO.puts("#{index}: #{text}") end)
+
+for trial <- winner.metadata.notes.trials do
+  IO.puts(
+    "trial #{trial.trial}: instruction #{trial.choice["root.instruction"]}, " <>
+      "demos #{trial.choice["root.demos"]}, minibatch #{trial.score}"
+  )
+end
+
+:ok
+```
+
+```text
+0: Answer the question.
+1: Memorize the answers to past questions.
+2: Quote the shortest answer from the context.
+trial 1: instruction 1, demos 1, minibatch 1.0
+trial 2: instruction 2, demos 2, minibatch 1.0
+trial 3: instruction 1, demos 0, minibatch 1.0
+trial 4: instruction 0, demos 1, minibatch 0.0
+trial 5: instruction 1, demos 1, minibatch 1.0
+trial 6: instruction 1, demos 1, minibatch 1.0
+trial 7: instruction 1, demos 1, minibatch 1.0
+trial 8: instruction 1, demos 1, minibatch 1.0
+trial 9: instruction 0, demos 0, minibatch 0.0
+trial 10: instruction 1, demos 1, minibatch 1.0
+```
+
+The memorizing instruction scores 1.0 on every training minibatch. Every
+`minibatch_full_eval_steps` trials, the best unpromoted choice gets a full
+validation pass. `winner.history` holds those validated candidates.
+
+```elixir
+for candidate <- winner.history do
+  IO.puts(
+    "#{candidate.metadata.label} #{inspect(candidate.metadata[:choice])} " <>
+      "validation #{candidate.evaluation.selected_score}"
+  )
+end
+
+:ok
+```
+
+```text
+baseline nil validation 0.0
+trial %{"root.demos" => 0, "root.instruction" => 1} validation 0.0
+trial %{"root.demos" => 1, "root.instruction" => 1} validation 0.0
+trial %{"root.demos" => 2, "root.instruction" => 2} validation 1.0
+trial %{"root.demos" => 1, "root.instruction" => 0} validation 0.0
+```
+
+Both memorizing candidates looked perfect on training minibatches and score
+0.0 on validation, because the validation questions were never in training.
+Minibatch scores only guide the sampler; they never become the result.
+
+## Inspect the winner
+
+`winner.value` is the tuned predictor. It keeps the quoting instruction and
+one bootstrapped demonstration from the teacher.
+
+```elixir
+IO.puts(winner.value.signature.instructions)
+
+for demo <- winner.value.demos do
+  IO.puts("#{demo.inputs["question"]} -> #{demo.outputs["answer"]}")
+end
+```
+
+```text
+Quote the shortest answer from the context.
+Which gas do plants absorb? -> carbon dioxide
+```
+
+## Compare on the test cases
+
+```elixir
+{:ok, comparison} = Tune.compare(study, winner, split: :test)
+
+for id <- comparison.case_ids do
+  row = comparison.rows[id]
+  IO.puts("#{id}: #{inspect(row.baseline.output["answer"])} -> #{inspect(row.challenger.output["answer"])}")
+end
+
+Enum.sort(comparison.metrics.answer)
+```
+
+```text
+bridge: "I believe the answer is San Francisco." -> "San Francisco"
+painter: "I believe the answer is Leonardo da Vinci." -> "Leonardo da Vinci"
+```
+
+```text
+[
+  baseline_mean: 0.0,
+  challenger_mean: 1.0,
+  counts: %{improved: 2},
+  delta: 1.0,
+  direction: :maximize,
+  paired_count: 2,
+  status: :improved
+]
+```
+
+A smaller `model_calls` limit stops the search early. The result then has
+`complete?: false` and `stop_reason: :budget_exhausted`, and holds the best
+fully validated candidate so far. With `model_calls: 25` here, that is still
+the baseline instruction.
+
+## Next steps
+
+- [Search API](../optimizers.md) describes the `:mipro_v2` options.
+- [Ticket routing](ticket-routing.livemd) selects labeled demonstrations without model calls.
+- [Artifacts](../artifacts.md) saves the tuned instruction and demonstrations.

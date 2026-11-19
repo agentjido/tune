@@ -1,7 +1,7 @@
 defmodule Tune.MixProject do
   use Mix.Project
 
-  @version "0.5.0"
+  @version "0.5.1"
   @source_url "https://github.com/agentjido/tune"
   @description "Evaluation and search pipelines for Elixir"
 
@@ -24,22 +24,82 @@ defmodule Tune.MixProject do
   end
 
   defp docs do
+    published_guides =
+      guide_toc()
+      |> Enum.map(fn {section, guides} ->
+        {section, Enum.filter(guides, fn {_title, path} -> File.regular?(path) end)}
+      end)
+      |> Enum.reject(fn {_section, guides} -> guides == [] end)
+
+    guide_extras =
+      for {_section, guides} <- published_guides,
+          {title, path} <- guides,
+          do: {path, title: title}
+
+    guide_groups =
+      for {section, guides} <- published_guides, do: {section, Enum.map(guides, &elem(&1, 1))}
+
+    project_pages = ["CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md"]
+
     [
       main: "readme",
       source_ref: "v#{@version}",
-      extras: [
-        "README.md",
-        "guides/getting_started.md",
-        "guides/programs.md",
-        "guides/optimizers.md",
-        "guides/compatibility.md",
-        "guides/artifacts.md",
-        "guides/host_integration.md",
-        "guides/ui.md",
-        "CHANGELOG.md",
-        "CONTRIBUTING.md",
-        "SECURITY.md"
-      ]
+      extra_section: "Guides",
+      extras: ["README.md" | guide_extras] ++ project_pages,
+      groups_for_extras: guide_groups ++ [Project: project_pages]
+    ]
+  end
+
+  # Add a guide at its listed path to include it in ExDoc.
+  defp guide_toc do
+    [
+      {"API Basics",
+       [
+         {"Quickstart", "guides/getting_started.md"},
+         {"Evaluate a Function", "guides/api/evaluate-a-function.livemd"},
+         {"Programs", "guides/programs.md"},
+         {"Typed Predictors", "guides/api/typed-predictors.livemd"},
+         {"Search API", "guides/optimizers.md"},
+         {"Artifacts", "guides/artifacts.md"}
+       ]},
+      {"Elixir Tuning",
+       [
+         {"Batch Settings", "guides/examples/batch-settings.livemd"},
+         {"Axon Learning Rate", "guides/examples/axon-learning-rate.livemd"}
+       ]},
+      {"Genetic Evolution",
+       [
+         {"Evolve a Word", "guides/examples/evolve-a-word.livemd"},
+         {"Pack a Kit", "guides/examples/pack-a-kit.livemd"},
+         {"Delivery Routes", "guides/examples/delivery-routes.livemd"},
+         {"Dispatch Policies", "guides/examples/dispatch-policies.livemd"}
+       ]},
+      {"LLM Tuning",
+       [
+         {"Ticket Routing", "guides/examples/ticket-routing.livemd"},
+         {"QA Prompts", "guides/examples/qa-prompts.livemd"},
+         {"Multi-Hop QA", "guides/examples/multi-hop-qa.livemd"},
+         {"Risk Policy", "guides/examples/risk-policy.livemd"}
+       ]},
+      {"Evaluation",
+       [
+         {"Replay JSONL", "guides/examples/replay-jsonl.livemd"},
+         {"Score Retrieval", "guides/examples/score-retrieval.livemd"}
+       ]},
+      {"Agentic Eval Suites",
+       [
+         {"Build an Eval Suite", "guides/examples/build-an-eval-suite.livemd"},
+         {"Score Tool Calls", "guides/examples/score-tool-calls.livemd"},
+         {"Score Transcripts", "guides/examples/score-transcripts.livemd"},
+         {"Gate a Release", "guides/examples/gate-a-release.livemd"}
+       ]},
+      {"Integration",
+       [
+         {"Host Integration", "guides/host_integration.md"},
+         {"Deploy a Router", "guides/integration/deploy-a-router.livemd"},
+         {"Local Workbench", "guides/ui.md"},
+         {"Compatibility", "guides/compatibility.md"}
+       ]}
     ]
   end
 

@@ -1,265 +1,323 @@
-# Programs and evaluation
+# Programs
 
-Use a typed predictor when your application expects named inputs and outputs
-from a model. Start with the runnable
-[support ticket example](getting_started.md#preview-a-prompt-and-score-a-saved-answer)
-to check your prompt and metric with saved answers before you evaluate a live
-model.
+A Tune program is an application struct that implements `Tune.Program`. It
+names the predictors and values that a search may change. Its control flow is
+ordinary Elixir code. This guide builds a two-step support program, runs it,
+reads the recorded steps, and updates one predictor the way a search does.
 
-## Typed predictors
+Every model call in this guide goes to a scripted transport, so the code runs
+offline with no credentials. Add `{:plug, "~> 1.20 and >= 1.20.4"}` to your
+project's dependencies to run the scripted examples.
 
-A `Tune.Predictor` has one typed signature. The signature declares ordered
-input fields, ordered output fields, and instructions.
+## Define the program
 
-```elixir
-{:ok, predictor} =
-  Tune.Predictor.new(
-    signature: [
-      instructions: "Classify the support ticket.",
-      inputs: [ticket: Zoi.string()],
-      outputs: [
-        label: Zoi.enum(["billing", "bug", "other"]),
-        confidence: Zoi.float()
-      ]
-    ]
-  )
-```
-
-Fields use JSON-compatible Zoi schemas. Tune normalizes field names once. A
-validated output is a string-keyed map.
-
-## Model configuration
-
-Each tuning run has one fixed target model configuration. A search can also
-have separate teacher and proposal configurations.
+The program answers a refund question in two steps. `extract` picks the policy
+facts that matter. `answer` writes the reply from those facts.
 
 ```elixir
-{:ok, target} =
-  Tune.ModelConfig.new(
-    model: "openai:gpt-4o-mini",
-    adapter: Tune.Adapter.JSON,
-    adapter_options: [mode: :structured],
-    request_options: [temperature: 0.0]
-  )
-```
+defmodule RefundAnswer do
+  @moduledoc "Answers a refund question from the facts in a policy."
 
-The model configuration selects the adapter. Tune does not change the target
-model or adapter during a search. ReqLLM owns the provider request and transport
-retries.
+  @behaviour Tune.Program
 
-Chat, JSON, and XML adapters only render a prompt and parse a reply. They do not
-retry, repair, or call a model. Repair and extraction must be explicit program
-steps.
+  alias Tune.Execution
 
-## Prompt inspection
+  defstruct [:extract, :answer]
 
-`Tune.preview/2` prepares one request and makes no model call.
+  def new do
+    {:ok, extract} =
+      Tune.Predictor.new(
+        signature: [
+          instructions: "List the policy facts that answer the question.",
+          inputs: [question: Zoi.string(), policy: Zoi.string()],
+          outputs: [facts: Zoi.array(Zoi.string())]
+        ]
+      )
 
-```elixir
-{:ok, prepared} =
-  predictor
-  |> Tune.new(model: target)
-  |> Tune.preview(%{ticket: "I was charged twice."})
+    {:ok, answer} =
+      Tune.Predictor.new(
+        signature: [
+          instructions: "Answer the customer using only the facts.",
+          inputs: [question: Zoi.string(), facts: Zoi.array(Zoi.string())],
+          outputs: [answer: Zoi.string()]
+        ]
+      )
 
-Enum.each(prepared.context.messages, &IO.inspect/1)
-```
+    %__MODULE__{extract: extract, answer: answer}
+  end
 
-For a composed program, give the predictor name with its inputs:
+  @impl true
+  def signature(_program) do
+    {:ok, signature} =
+      Tune.Signature.new(
+        inputs: [question: Zoi.string(), policy: Zoi.string()],
+        outputs: [answer: Zoi.string()]
+      )
 
-```elixir
-Tune.preview(pipeline, {"answer", %{question: question, facts: facts}})
-```
+    signature
+  end
 
-## Composed programs
+  @impl true
+  def parameters(program), do: %{"extract" => program.extract, "answer" => program.answer}
 
-A composed program is an application struct that implements `Tune.Program`.
-Its control flow is normal Elixir code.
+  @impl true
+  def put_parameters(program, parameters),
+    do: %{program | extract: parameters["extract"], answer: parameters["answer"]}
 
-```elixir
-@behaviour Tune.Program
-
-def call(_program, inputs, execution) do
-  with {:ok, %{"facts" => facts}, execution} <-
-         Tune.Execution.predict(execution, "extract", inputs) do
-    Tune.Execution.predict(execution, "answer", %{
-      "question" => inputs["question"],
-      "facts" => facts
-    })
+  @impl true
+  def call(_program, inputs, execution) do
+    with {:ok, %{"facts" => facts}, execution} <-
+           Execution.predict(execution, "extract", inputs) do
+      Execution.predict(execution, "answer", %{
+        "question" => inputs["question"],
+        "facts" => facts
+      })
+    end
   end
 end
 ```
 
-The application declares its predictors and learned values through the other
-`Tune.Program` callbacks. Tune can then update those values without changing
-the program code. Make managed calls from the process running the program.
-Use evaluation concurrency for parallel calls across cases.
+Each callback has one job:
 
-## Data and scores
+- `signature/1` declares the program's own inputs and outputs. Tune validates
+  inputs before `call/3` and the final output after it.
+- `parameters/1` returns every tunable part under a stable string name. A
+  value is a `Tune.Predictor` or a `Tune.Parameter`.
+- `put_parameters/2` puts a full map of parameters back into the struct.
+- `call/3` runs the steps. `Tune.Execution.predict/3` calls the predictor by
+  name and returns `{:ok, outputs, execution}` or `{:error, reason, execution}`.
+  Return the last `execution` you received.
 
-`Tune.data/2` accepts `:train`, `:validation`, and `:test` data. A value can be
-an Enumerable or a zero-arity function that returns an Enumerable. Tune reads
-each search split once per run. Each candidate uses the same validation cases.
-Set `cases` for an infinite source. An evaluation count limits candidate work
-and does not limit data ingestion. With `cases: 0`, Tune leaves the source
-unopened.
+Inputs reach `call/3` with string keys. Validated outputs are string-keyed
+maps, so the `extract` result matches `%{"facts" => facts}`.
 
-```elixir
-pipeline =
-  Tune.new(program, model: target)
-  |> Tune.data(test: fn -> File.stream!("cases.jsonl") |> Stream.map(&decode/1) end)
-  |> Tune.score(:correct, &correct?/2, failure_score: 0.0)
-  |> Tune.limit(cases: 1_000, concurrency: 4, row_timeout: 30_000)
+## Script the model replies
 
-{:ok, evaluation} = Tune.evaluate(pipeline)
-```
-
-A program row is a `%Tune.Case{}` or a map with `:input`, optional
-`:expected`, and optional `:id`. Expected values go only to the score callback.
-
-Each `Tune.score/4` call adds one named score. A score returns a number or a map
-with `:score` and optional `:feedback`. A one-argument function receives the
-output. A two-argument scorer receives `(case, output)` for every target.
-Set `argument: :prediction` to inspect program steps or usage. Higher values
-win by default.
-Use `direction: :minimize` for a loss or cost.
-
-Without `failure_score`, a failed row makes the evaluation ineligible. With a
-failure score, the row error stays in the result and the candidate can remain
-eligible.
-
-Evaluation can report several scores without a selector. Each observation
-retains successful scores and records failures in `score_errors`. Search with
-several scores requires a selector:
+This module stands in for the provider. It serves fixed OpenAI-compatible
+replies to ReqLLM through an in-process Plug, so the guide runs offline. In
+your application, pass a real model spec and let the host supply the
+credentials.
 
 ```elixir
-pipeline
-|> Tune.score(:quality, &quality/2, range: {0.0, 1.0})
-|> Tune.score(:cost, &cost/2, direction: :minimize, range: {0.0, 10.0})
-|> Tune.select(weighted: [quality: 0.8, cost: 0.2])
+defmodule Scripted do
+  @moduledoc "Serves scripted OpenAI-compatible replies to ReqLLM through an in-process Plug."
+
+  def model, do: %{provider: :openai, id: "gpt-4-turbo", extra: %{wire: %{protocol: "openai_chat"}}}
+
+  def options(replies) do
+    {:ok, queue} = Agent.start_link(fn -> replies end)
+
+    plug = fn conn ->
+      reply = Agent.get_and_update(queue, fn [next | rest] -> {next, rest}; [] -> {nil, []} end)
+      respond(conn, reply)
+    end
+
+    [api_key: "scripted", req_http_options: [plug: plug], max_retries: 0]
+  end
+
+  def chat(fields) do
+    Enum.map_join(fields, "\n\n", fn {name, value} -> "[[ ## #{name} ## ]]\n#{value}" end) <>
+      "\n\n[[ ## completed ## ]]"
+  end
+
+  defp respond(conn, nil), do: send_json(conn, 500, %{error: %{message: "no scripted reply left"}})
+
+  defp respond(conn, text) do
+    send_json(conn, 200, %{
+      id: "scripted",
+      model: "gpt-4-turbo",
+      choices: [%{message: %{role: "assistant", content: text}, finish_reason: "stop"}],
+      usage: %{prompt_tokens: 10, completion_tokens: 5, total_tokens: 15}
+    })
+  end
+
+  defp send_json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(status, JSON.encode!(body))
+  end
+end
 ```
 
-A weighted selector needs an explicit range for every selected score. Raw
-scores stay unchanged in each `%Tune.Observation{}`. Tune normalizes only the
-selection value.
+## Run the program
 
-## Replay saved responses
-
-Use `Tune.replay/1` with an Enumerable or a data factory. Each row has
-`input` and `output`. Add `id` and `expected` when available. JSON string
-keys and Elixir atom keys both work.
+`Tune.Runtime.run/3` runs one input and returns a `%Tune.Prediction{}`. The
+`:model` option is required. It holds the model spec, the adapter, and the
+ReqLLM request options.
 
 ```elixir
-study =
-  [%{id: "one", input: %{question: "What is 2 + 2?"}, output: 4, expected: 4}]
-  |> Tune.replay()
-  |> Tune.score(:exact_match, fn row, output ->
-    if row.expected == output, do: 1, else: 0
-  end)
+replies = [
+  Scripted.chat(facts: ~s(["Refunds are allowed within 30 days.", "Refunds go to the original card."])),
+  Scripted.chat(answer: "Yes. You can get a refund within 30 days, paid back to your original card.")
+]
 
-{:ok, evaluation} = Tune.evaluate(study)
+model = [
+  model: Scripted.model(),
+  adapter: Tune.Adapter.Chat,
+  request_options: Scripted.options(replies)
+]
+
+ticket = %{
+  question: "Can I get a refund after two weeks?",
+  policy: "Refunds are allowed within 30 days of purchase. Refunds go to the original card."
+}
+
+{:ok, prediction} = Tune.Runtime.run(RefundAnswer.new(), ticket, model: model)
+
+IO.inspect(prediction.output)
+IO.inspect(prediction.calls)
+
+for step <- prediction.steps do
+  IO.inspect({step.name, step.role, step.outputs})
+end
 ```
 
-A row for a retrieval judge can put `user_input` and `retrieved_contexts`
-inside `input`. Put the saved response in `output` and, if available, the
-reference answer in `expected`. The following example reads that row format
-from JSONL:
+```text
+%{
+  "answer" => "Yes. You can get a refund within 30 days, paid back to your original card."
+}
+%{target: 2}
+{"extract", :target,
+ %{
+   "facts" => ["Refunds are allowed within 30 days.",
+    "Refunds go to the original card."]
+ }}
+{"answer", :target,
+ %{
+   "answer" => "Yes. You can get a refund within 30 days, paid back to your original card."
+ }}
+```
+
+`prediction.steps` lists each completed predictor call in order. A
+`%Tune.Step{}` keeps its name, role, signature, actual inputs, validated
+outputs, and the unchanged `ReqLLM.Response`. `prediction.calls` counts the
+attempted model calls for each role.
+
+## Where model configuration comes from
+
+The program struct holds no model, adapter, or credentials. They arrive at
+run time:
+
+- `Tune.Runtime.run/3` takes them as `:model`, and optionally `:teacher` and
+  `:proposal`.
+- `Tune.new/2` takes the same keys for evaluation and search.
+
+Each value is a keyword list or a `Tune.ModelConfig` with `:model`,
+`:adapter`, `:adapter_options`, and `:request_options`. Steps run with the
+`:target` configuration unless a search runs them as `:teacher`. The target
+model and adapter stay fixed for a whole search. Keep API keys in the host's
+`request_options` or ReqLLM configuration. Search results and artifacts
+describe a model only by its name, adapter, and adapter options.
+
+Bound one run with `:max_model_calls`, `:max_steps` (default 32), and
+`:timeout` in milliseconds (default 60,000). Make every
+`Tune.Execution.predict/3` call from the process that runs `call/3`. For
+parallel work, run several cases with evaluation concurrency.
+
+## Handle a failed step
+
+When a step fails, `Tune.Runtime.run/3` returns `Tune.Error.Execution.Failed`.
+The error names the failed step and keeps the partial prediction. Here the
+script holds only one reply, so the `answer` call fails.
 
 ```elixir
-rows = fn -> File.stream!("answers.jsonl") |> Stream.map(&JSON.decode!/1) end
-{:ok, faithfulness} = Tune.Scores.Faithfulness.new(model: judge_model)
-{:ok, precision} = Tune.Scores.ContextPrecision.new(model: judge_model)
+model = [
+  model: Scripted.model(),
+  adapter: Tune.Adapter.Chat,
+  request_options: Scripted.options([Scripted.chat(facts: ~s(["Refunds are allowed within 30 days."]))])
+]
 
-pipeline =
-  Tune.replay(rows, on_progress: fn event -> send(observer, event) end)
-  |> Tune.score(:faithfulness, faithfulness)
-  |> Tune.score(:context_precision, precision)
-  |> Tune.limit(cases: 500, model_calls: 1_000)
+{:error, error} = Tune.Runtime.run(RefundAnswer.new(), ticket, model: model)
 
-task = Tune.Evaluation.start(my_task_supervisor, pipeline)
-{:ok, evaluation} = Task.await(task, :infinity)
+IO.inspect(error.step)
+IO.inspect(Enum.map(error.result.steps, & &1.name))
+IO.inspect(error.result.calls)
 ```
 
-The replay runner uses the saved answer. Only configured judges make model
-calls. Progress events identify each batch's row IDs and statuses. A host can
-write these events and the final evaluation to a report or store. To stop a
-run, pass a zero-arity `cancel` predicate in the same options as
-`on_progress`. Tune checks it while waiting for row workers.
+```text
+"answer"
+["extract"]
+%{target: 2}
+```
 
-## Compare on a held-out split
+The failed call still counts. Tune counts each call before dispatch.
+
+## Update a declared parameter
+
+A search changes a program only through its declared parameters. It builds a
+new predictor, then calls `Tune.Program.replace_parameters/2`. You can do the
+same by hand, and preview the new prompt with `Tune.preview/2`. A preview
+makes no model call. For a composed program, pass the predictor name with its
+inputs.
 
 ```elixir
-{:ok, winner} = Tune.tune(study)
-{:ok, report} = Tune.compare(study, winner, split: :test)
+program = RefundAnswer.new()
+
+{:ok, answer} =
+  Tune.Predictor.put_instructions(program.answer, "Answer in one sentence. Use only the facts.")
+
+{:ok, updated} = Tune.Program.replace_parameters(program, %{"answer" => answer})
+
+{:ok, prepared} =
+  updated
+  |> Tune.new(model: [model: Scripted.model(), adapter: Tune.Adapter.Chat])
+  |> Tune.preview({"answer", %{question: "Can I get a refund?", facts: ["Refunds are allowed within 30 days."]}})
+
+IO.inspect(prepared.signature.instructions)
+IO.inspect(Enum.map(prepared.context.messages, & &1.role))
 ```
 
-Choose the split explicitly. Tune reads it once and gives both versions the
-same ordered cases. Explicit case IDs must be unique non-empty strings. An
-omitted ID uses the row's zero-based position as a string.
+```text
+"Answer in one sentence. Use only the facts."
+[:system, :user]
+```
 
-Use `report.metrics` for paired mean changes and outcome counts. Use
-`report.rows[id].metrics` to find regressions, improvements, ties, failed
-scores, and unpaired results. A positive delta means that the winner's
-numeric score increased. The score direction determines whether that is an
-improvement. Means in the comparison use only cases with a score from each
-version. Check each metric's `paired_count` against `length(report.case_ids)`.
-The underlying evaluations keep all observed scores, errors, model calls,
-and token use. Use `Tune.evaluate/1` to score saved responses.
-
-Tune checks both typed targets before running either one. They must have
-matching input and output fields. The deadline covers reading the shared
-dataset and evaluating both versions.
-The baseline runs first. Both passes share one model-call budget. If a limit
-stops the comparison, the report keeps the available evidence and sets
-`complete?` to false. A case limit defines the size of the shared snapshot.
-
-With a total `model_calls` limit, Tune runs rows one at a time unless you set
-`row_calls`. Set `row_calls` to the maximum calls per row to run concurrent
-rows under that budget. Concurrent workers reserve the full amount per row.
-If the remaining budget is smaller, Tune runs one row with the remaining
-calls. When a row reaches its own cap and the shared budget still has calls,
-Tune records a row error and continues. When cancellation or the deadline
-stops an active row, its observation has status `:interrupted` and records
-the stop reason. A row that reached its own timeout is a row error.
-
-A complete comparison can contain failed or unpaired metrics. Require a
-valid pair on each critical case before making a release decision.
-
-## Evaluation results
-
-`Tune.evaluate/2` uses test data by default. Pass `:train`, `:validation`, or
-`:test` to select another role.
-If a data factory or stream raises an exception, evaluation, comparison, and
-search return a `Tune.Error.Invalid.Dataset` with the split and original
-exception. If a deadline or cancellation stops a streaming evaluation,
-the evaluation keeps the rows it already scored.
-
-Tune reads datasets in a worker. A factory should open any process-owned
-resources inside the factory so the same worker can read from them.
-Invalid saved rows that Tune can read still appear as individual row errors.
-
-It returns `%Tune.Evaluation{}` with:
-
-- every `%Tune.Observation{}`, including row errors;
-- one `%Tune.Score.Summary{}` for each score;
-- one higher-is-better selected score;
-- eligibility and completion flags;
-- call and usage totals;
-- a stop reason.
-
-Evaluation is an eager terminal. It consumes the source once and returns a
-complete value. Test evaluation is separate from candidate search.
-
-## Generic runners
-
-For a non-program target, give `Tune.new/2` a one-arity or two-arity `:run`
-function. A one-arity runner receives the target. A two-arity runner receives
-the target and one case input.
+A replacement must keep its kind and its fields. Instructions and
+demonstrations can change. Field names and schemas cannot.
 
 ```elixir
-Tune.new(config, run: fn candidate, batch -> MyBenchmark.run(candidate, batch) end)
-|> Tune.score(:quality, fn _case, output -> output.quality end)
+{:ok, other} =
+  Tune.Predictor.new(signature: [inputs: [q: Zoi.string()], outputs: [answer: Zoi.string()]])
+
+{:error, error} = Tune.Program.replace_parameters(program, %{"answer" => other})
+IO.puts(Exception.message(error))
 ```
 
-Tune treats runner values as opaque Elixir terms. This permits Nx tensors,
-Axon models, and application structs. The score callback must convert its final
-value to a finite Elixir number.
+```text
+predictor "answer" changes its declared fields
+```
+
+## Declare a tunable value
+
+Use `Tune.Parameter` for a JSON value that the program reads, such as a list
+of lessons or a routing policy. Its Zoi schema stays in code, and every new
+value is checked against it.
+
+```elixir
+{:ok, lessons} =
+  Tune.Parameter.new(
+    schema: Zoi.array(Zoi.string()),
+    value: [],
+    description: "Lessons learned from earlier tickets"
+  )
+
+{:ok, lessons} = Tune.Parameter.put_value(lessons, ["Quote the refund window."])
+IO.inspect(lessons.value)
+IO.inspect(match?({:error, _}, Tune.Parameter.put_value(lessons, [1])))
+```
+
+```text
+["Quote the refund window."]
+true
+```
+
+Return the parameter from `parameters/1` under a name such as `"lessons"`.
+Inside `call/3`, read it with `Tune.Execution.value(execution, "lessons")` and
+pass it to a predictor as an ordinary input. Strategies such as `:playbook`
+and `:anything` change only the named value.
+
+## Next steps
+
+- [Search API](optimizers.md) lists the strategies that update these parameters.
+- [Artifacts](artifacts.md) saves the learned parameters and loads them into fresh code.
+- [Typed predictors](api/typed-predictors.livemd) covers signatures, adapters, and previews in more depth.

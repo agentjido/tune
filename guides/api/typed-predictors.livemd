@@ -1,0 +1,318 @@
+# Typed Predictors
+
+In this notebook you build a predictor that reads a support ticket and returns
+a typed category and confidence. You preview the prompt in the Chat, JSON, and
+XML formats, then run the predictor against scripted model replies and see
+both a validated output and a rejected one. The notebook runs offline and
+needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"},
+  {:plug, "~> 1.20"}
+])
+```
+
+## Script the model replies
+
+The `Scripted` module below is a Plug that stands in for the provider. ReqLLM
+sends each request to it, and it answers with the next scripted reply, so the
+notebook runs offline. In your application, pass a real model spec and the
+host's credentials instead.
+
+```elixir
+defmodule Scripted do
+  @moduledoc "Serves scripted OpenAI-compatible replies to ReqLLM through an in-process Plug."
+
+  def model, do: %{provider: :openai, id: "gpt-4-turbo", extra: %{wire: %{protocol: "openai_chat"}}}
+
+  def options(replies) do
+    {:ok, queue} = Agent.start_link(fn -> replies end)
+
+    plug = fn conn ->
+      reply = Agent.get_and_update(queue, fn [next | rest] -> {next, rest}; [] -> {nil, []} end)
+      respond(conn, reply)
+    end
+
+    [api_key: "scripted", req_http_options: [plug: plug], max_retries: 0]
+  end
+
+  def chat(fields) do
+    Enum.map_join(fields, "\n\n", fn {name, value} -> "[[ ## #{name} ## ]]\n#{value}" end) <>
+      "\n\n[[ ## completed ## ]]"
+  end
+
+  defp respond(conn, nil), do: send_json(conn, 500, %{error: %{message: "no scripted reply left"}})
+
+  defp respond(conn, text) do
+    send_json(conn, 200, %{
+      id: "scripted",
+      model: "gpt-4-turbo",
+      choices: [%{message: %{role: "assistant", content: text}, finish_reason: "stop"}],
+      usage: %{prompt_tokens: 10, completion_tokens: 5, total_tokens: 15}
+    })
+  end
+
+  defp send_json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(status, JSON.encode!(body))
+  end
+end
+```
+
+## Declare the predictor
+
+A predictor pairs a signature with optional demonstrations. The signature
+lists the instructions, the input fields, and the output fields. Each field
+has a Zoi schema. Here `label` must be one of two strings, and `confidence`
+must be a float.
+
+```elixir
+{:ok, predictor} =
+  Tune.Predictor.new(
+    signature: [
+      instructions: "Extract the ticket category and confidence.",
+      inputs: [ticket: Zoi.string()],
+      outputs: [label: Zoi.enum(["billing", "bug"]), confidence: Zoi.float()]
+    ]
+  )
+
+ticket = %{ticket: "I was charged twice for my card purchase"}
+
+Enum.map(predictor.signature.outputs, & &1.name)
+```
+
+```text
+["label", "confidence"]
+```
+
+## Preview the prompt in three formats
+
+The adapter decides how Tune renders the prompt and parses the reply. The
+target model configuration names the adapter. Make one configuration per
+format so that each preview is independent. `Tune.Adapter.JSON` requires a
+`:mode` option; `:text` asks for a plain-text JSON object.
+
+```elixir
+configs = %{
+  chat: [model: Scripted.model(), adapter: Tune.Adapter.Chat],
+  json: [model: Scripted.model(), adapter: Tune.Adapter.JSON, adapter_options: [mode: :text]],
+  xml: [model: Scripted.model(), adapter: Tune.Adapter.XML]
+}
+
+show = fn format ->
+  {:ok, prepared} =
+    predictor
+    |> Tune.new(model: Map.fetch!(configs, format))
+    |> Tune.preview(ticket)
+
+  for message <- prepared.context.messages do
+    IO.puts("--- #{message.role}")
+    IO.puts(Enum.map_join(message.content, "", & &1.text))
+  end
+
+  :ok
+end
+```
+
+`Tune.preview/2` returns a `Tune.Prepared` struct. It holds the rendered
+ReqLLM context and the output descriptor. It makes no model call, so these
+configurations need no request options.
+
+The Chat format marks each field with `[[ ## name ## ]]`:
+
+```elixir
+show.(:chat)
+```
+
+```text
+--- system
+Your input fields are:
+1. `ticket` (string)
+Your output fields are:
+1. `label` (enum)
+2. `confidence` (number)
+All interactions will be structured in the following way, with the appropriate values filled in.
+
+[[ ## ticket ## ]]
+{ticket}
+
+[[ ## label ## ]]
+{label}        # note: the value you produce must exactly match (no extra characters) one of: billing; bug
+
+[[ ## confidence ## ]]
+{confidence}        # note: the value you produce must adhere to the JSON schema: {"type":"number"}
+
+[[ ## completed ## ]]
+In adhering to this structure, your objective is:
+        Extract the ticket category and confidence.
+--- user
+[[ ## ticket ## ]]
+I was charged twice for my card purchase
+
+Respond with the corresponding output fields, starting with the field `[[ ## label ## ]]`, then `[[ ## confidence ## ]]` (must be formatted as valid JSON: number), and then ending with the marker for `[[ ## completed ## ]]`.
+```
+
+The JSON format keeps the marked inputs and asks for one JSON object:
+
+```elixir
+show.(:json)
+```
+
+```text
+--- system
+Your input fields are:
+1. `ticket` (string)
+Your output fields are:
+1. `label` (enum)
+2. `confidence` (number)
+All interactions will be structured in the following way, with the appropriate values filled in.
+
+Inputs will have the following structure:
+
+[[ ## ticket ## ]]
+{ticket}
+
+Outputs will be a JSON object with the following fields.
+
+{
+  "label": "{label}",        # note: the value you produce must exactly match (no extra characters) one of: billing; bug
+  "confidence": "{confidence}"        # note: the value you produce must adhere to the JSON schema: {"type":"number"}
+}
+In adhering to this structure, your objective is:
+        Extract the ticket category and confidence.
+--- user
+[[ ## ticket ## ]]
+I was charged twice for my card purchase
+
+Respond with a JSON object in the following order of fields: `label`, then `confidence` (must be formatted as valid JSON: number).
+```
+
+The XML format wraps every field in an element:
+
+```elixir
+show.(:xml)
+```
+
+```text
+--- system
+Your input fields are:
+1. `ticket` (string)
+Your output fields are:
+1. `label` (enum)
+2. `confidence` (number)
+All interactions will be structured in the following way, with the appropriate values filled in.
+
+<ticket>
+{ticket}
+</ticket>
+
+<label>
+{label}        # note: the value you produce must exactly match (no extra characters) one of: billing; bug
+</label>
+
+<confidence>
+{confidence}        # note: the value you produce must adhere to the JSON schema: {"type":"number"}
+</confidence>
+In adhering to this structure, your objective is:
+        Extract the ticket category and confidence.
+--- user
+<ticket>
+I was charged twice for my card purchase
+</ticket>
+
+Respond with the corresponding output fields wrapped in XML tags, starting with `<label>`, then `<confidence>`.
+```
+
+The signature is the same in all three. Only the adapter changed.
+
+## Run with a valid reply
+
+`Tune.Runtime.run/3` renders the prompt, sends it through ReqLLM, parses the
+reply, and validates every output field against its schema. Add
+`request_options` to the model configuration so the request reaches the
+scripted Plug.
+
+```elixir
+run = fn format, reply ->
+  model = Map.fetch!(configs, format) ++ [request_options: Scripted.options([reply])]
+  Tune.Runtime.run(predictor, ticket, model: model)
+end
+
+{:ok, prediction} = run.(:chat, Scripted.chat(label: "billing", confidence: "0.8"))
+
+{prediction.output, prediction.calls}
+```
+
+```text
+{%{"confidence" => 0.8, "label" => "billing"}, %{target: 1}}
+```
+
+The result is a `Tune.Prediction`. Its `output` map uses string keys and holds
+values that passed the Zoi schemas. `calls` counts one target model call.
+
+The same predictor parses a reply in each adapter's own format:
+
+```elixir
+{:ok, from_json} = run.(:json, ~s({"label": "bug", "confidence": 0.6}))
+{:ok, from_xml} = run.(:xml, "<label>bug</label>\n<confidence>0.7</confidence>")
+
+{from_json.output, from_xml.output}
+```
+
+```text
+{%{"confidence" => 0.6, "label" => "bug"},
+ %{"confidence" => 0.7, "label" => "bug"}}
+```
+
+## Run with an invalid field
+
+Now the model answers with a label outside the enum. Tune parses the reply,
+then rejects it during validation. It does not repair the value or retry.
+
+```elixir
+{:error, error} = run.(:chat, Scripted.chat(label: "refund", confidence: "0.8"))
+
+{error.__struct__, error.cause.__struct__, error.cause.message}
+```
+
+```text
+{Tune.Error.Execution.Failed, Tune.Error.Output.Invalid,
+ "invalid outputs: label: invalid enum value: expected one of billing, bug"}
+```
+
+The error keeps the evidence you need to debug the reply. `error.cause.value`
+holds the parsed values, and `error.result` holds the partial prediction with
+its call count.
+
+```elixir
+{error.cause.value, error.result.calls}
+```
+
+```text
+{%{"confidence" => 0.8, "label" => "refund"}, %{target: 1}}
+```
+
+A reply that cannot be parsed fails earlier with `Tune.Error.Output.Parse`.
+Here `confidence` is not a JSON number:
+
+```elixir
+{:error, parse_error} = run.(:chat, Scripted.chat(label: "billing", confidence: "high"))
+
+{parse_error.cause.__struct__, parse_error.cause.message}
+```
+
+```text
+{Tune.Error.Output.Parse, "field \"confidence\" is not valid JSON"}
+```
+
+## Next steps
+
+- [Evaluate a Function](evaluate-a-function.livemd) shows how to score outputs
+  over labeled cases.
+- [Programs](../programs.md) composes predictors into multi-step programs.
+- [Host Integration](../host_integration.md) shows how a host sends the
+  prepared request through its own inference path.

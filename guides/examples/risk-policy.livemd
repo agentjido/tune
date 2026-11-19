@@ -1,0 +1,311 @@
+# Risk Policy
+
+In this notebook you tune one typed risk policy that plain Elixir routing
+code reads. `:anything` asks a proposal model for new policy values,
+validates each one against the policy schema, and keeps the value that
+routes validation cases correctly. You then save the winner as an artifact
+and load it into a fresh program. The notebook runs offline with no
+credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"},
+  {:plug, "~> 1.20"}
+])
+```
+
+## Script the models
+
+`Scripted` serves OpenAI-compatible replies through an in-process Plug, so
+ReqLLM runs its real request path without a network call. Each role gets a
+reply function of the decoded request body. In real use you pass a real
+model spec and the host's credentials instead.
+
+```elixir
+defmodule Scripted do
+  @moduledoc "Serves scripted OpenAI-compatible replies to ReqLLM through an in-process Plug."
+
+  def model, do: %{provider: :openai, id: "gpt-4-turbo", extra: %{wire: %{protocol: "openai_chat"}}}
+
+  def options(reply) when is_function(reply, 1) do
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      respond(conn, reply.(JSON.decode!(body)))
+    end
+
+    [api_key: "scripted", req_http_options: [plug: plug], max_retries: 0]
+  end
+
+  def role(reply), do: [model: model(), adapter: Tune.Adapter.Chat, request_options: options(reply)]
+
+  def chat(fields) do
+    Enum.map_join(fields, "\n\n", fn {name, value} -> "[[ ## #{name} ## ]]\n#{value}" end) <>
+      "\n\n[[ ## completed ## ]]"
+  end
+
+  def field(body, name) do
+    text = body["messages"] |> Enum.filter(&(&1["role"] == "user")) |> List.last() |> Map.fetch!("content")
+
+    case Regex.run(~r/\[\[ ## #{name} ## \]\]\n(.*?)(?=\n\n\[\[ ## |\n\nRespond with|\z)/s, text) do
+      [_, value] -> value
+      nil -> nil
+    end
+  end
+
+  defp respond(conn, text) do
+    send_json(conn, 200, %{
+      id: "scripted",
+      model: "gpt-4-turbo",
+      choices: [%{message: %{role: "assistant", content: text}, finish_reason: "stop"}],
+      usage: %{prompt_tokens: 10, completion_tokens: 5, total_tokens: 15}
+    })
+  end
+
+  defp send_json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(status, JSON.encode!(body))
+  end
+end
+```
+
+## Define the policy and the router
+
+`RiskRouter` implements `Tune.Program` without any predictor. It declares
+two `Tune.Parameter` values: `"policy"`, with a review threshold and a
+queue, and `"standard_queue"`. `call/3` reads both with
+`Tune.Execution.value/2` and routes in plain Elixir.
+
+```elixir
+defmodule RiskRouter do
+  @moduledoc "Routes a risk score to a queue with a typed, tunable policy."
+  @behaviour Tune.Program
+
+  alias Tune.{Execution, Parameter, Signature}
+
+  defstruct [:policy, :standard_queue]
+
+  def new do
+    schema = Zoi.object(%{"threshold" => Zoi.float(), "queue" => Zoi.string()})
+
+    {:ok, policy} =
+      Parameter.new(
+        schema: schema,
+        value: %{"threshold" => 0.9, "queue" => "risk-review"},
+        description: "Risk routing policy"
+      )
+
+    {:ok, standard_queue} = Parameter.new(schema: Zoi.string(), value: "general")
+    %__MODULE__{policy: policy, standard_queue: standard_queue}
+  end
+
+  @impl true
+  def signature(_program) do
+    {:ok, signature} = Signature.new(inputs: [risk: Zoi.float()], outputs: [queue: Zoi.string()])
+    signature
+  end
+
+  @impl true
+  def parameters(program), do: %{"policy" => program.policy, "standard_queue" => program.standard_queue}
+
+  @impl true
+  def put_parameters(program, parameters),
+    do: %{program | policy: parameters["policy"], standard_queue: parameters["standard_queue"]}
+
+  @impl true
+  def call(_program, %{"risk" => risk}, execution) do
+    {:ok, policy} = Execution.value(execution, "policy")
+    {:ok, standard} = Execution.value(execution, "standard_queue")
+    queue = if risk >= policy["threshold"], do: policy["queue"], else: standard
+    {:ok, %{"queue" => queue}, execution}
+  end
+end
+```
+
+The schema guards every new value. A string threshold fails validation:
+
+```elixir
+{:error, error} =
+  Tune.Parameter.put_value(RiskRouter.new().policy, %{"threshold" => "high", "queue" => "risk-review"})
+
+Exception.message(error)
+```
+
+```text
+"invalid parameter value: threshold: invalid type: expected float"
+```
+
+## Run one case with the original policy
+
+The router makes no model calls, but `Tune.Runtime.run/3` still requires a
+target model configuration. This one raises if it is ever called.
+
+```elixir
+never = Scripted.role(fn _body -> raise "the router makes no model calls" end)
+
+{:ok, prediction} = Tune.Runtime.run(RiskRouter.new(), %{risk: 0.7}, model: never)
+prediction.output
+```
+
+```text
+%{"queue" => "general"}
+```
+
+A risk of 0.7 should go to review, but the original threshold of 0.9 sends
+it to the general queue.
+
+## Script the proposals
+
+The proposal model returns two values in order: first a value with a string
+threshold, then a valid value with a lower threshold. Each value is JSON
+text in the `new_value` field.
+
+```elixir
+{:ok, queue} =
+  Agent.start_link(fn ->
+    [
+      %{"threshold" => "high", "queue" => "risk-review"},
+      %{"threshold" => 0.6, "queue" => "risk-review"}
+    ]
+  end)
+
+{:ok, requests} = Agent.start_link(fn -> [] end)
+
+proposal = fn body ->
+  Agent.update(requests, &(&1 ++ [body]))
+  value = Agent.get_and_update(queue, fn [next | rest] -> {next, rest} end)
+  Scripted.chat(new_value: JSON.encode!(value))
+end
+
+:ok
+```
+
+## Tune the policy
+
+The metric returns a score and feedback that names the expected queue.
+`parameter: "policy"` limits the search to that one value, so
+`"standard_queue"` stays fixed.
+
+```elixir
+row = fn id, risk, queue -> %{id: id, input: %{risk: risk}, expected: %{queue: queue}} end
+
+study =
+  Tune.new(RiskRouter.new(), model: never, proposal: Scripted.role(proposal))
+  |> Tune.data(
+    train: [row.("low", 0.2, "general"), row.("elevated", 0.7, "risk-review")],
+    validation: [row.("moderate", 0.4, "general"), row.("high", 0.8, "risk-review")]
+  )
+  |> Tune.score(:routing, fn row, output ->
+    if output == row.expected,
+      do: %{score: 1, feedback: "correct queue"},
+      else: %{score: 0, feedback: "expected #{row.expected["queue"]} at risk #{row.input["risk"]}"}
+  end)
+  |> Tune.search(:anything, parameter: "policy", max_iterations: 2, minibatch_size: 2)
+  |> Tune.limit(seed: 2, model_calls: 6)
+
+{:ok, winner} = Tune.tune(study)
+
+IO.inspect(winner.value.policy.value, label: "policy")
+IO.inspect(winner.best.evaluation.selected_score, label: "validation score")
+IO.inspect(winner.calls, label: "calls")
+```
+
+```text
+policy: %{"queue" => "risk-review", "threshold" => 0.6}
+validation score: 1.0
+calls: %{proposal: 2}
+```
+
+The proposal request includes the value's JSON Schema and the training
+trajectories with their feedback:
+
+```elixir
+first = requests |> Agent.get(&hd/1)
+schema = first |> Scripted.field("json_schema") |> JSON.decode!()
+types = for {name, property} <- schema["properties"], do: {name, property["type"]}
+IO.inspect({schema["type"], Enum.sort(schema["required"]), Enum.sort(types)})
+IO.puts(Scripted.field(first, "examples_with_feedback"))
+```
+
+```text
+{"object", ["queue", "threshold"], [{"queue", "string"}, {"threshold", "number"}]}
+inputs: {"risk":0.2}
+
+score: 1
+feedback: correct queue
+
+inputs: {"risk":0.7}
+
+score: 0
+feedback: expected risk-review at risk 0.7
+```
+
+The iteration log shows what happened to each proposal:
+
+```elixir
+Enum.map(
+  winner.metadata.notes.iterations,
+  &{&1.iteration, &1.accepted?, &1.parent_minibatch, &1.child_minibatch}
+)
+```
+
+Each tuple is `{iteration, accepted?, parent_minibatch, child_minibatch}`:
+
+```text
+[{1, false, 1, nil}, {2, true, 1, 2}]
+```
+
+The first proposal failed schema validation, so it was discarded without a
+minibatch run (`child_minibatch: nil`). The second routed both training
+cases correctly, beat its parent, and then scored 1.0 on validation.
+
+## Save and reload the winner
+
+`Tune.dump/1` builds a versioned `Tune.Artifact`. `Tune.Artifact.encode/1`
+turns it into canonical JSON that you can store anywhere.
+
+```elixir
+{:ok, artifact} = Tune.dump(winner)
+{:ok, json} = Tune.Artifact.encode(artifact)
+
+path = Path.join(System.tmp_dir!(), "risk_policy.json")
+File.write!(path, json)
+
+{:ok, saved} = path |> File.read!() |> Tune.Artifact.decode()
+{:ok, loaded} = Tune.load(saved, RiskRouter.new())
+
+loaded.policy.value
+```
+
+```text
+%{"queue" => "risk-review", "threshold" => 0.6}
+```
+
+`Tune.load/2` checks that the artifact was learned for the same program
+contract as the fresh `RiskRouter`, validates each value against its schema,
+and returns the updated program. The routing code stays in your module; the
+artifact carries the parameter values, a target fingerprint, and
+provenance such as the optimizer, seed, and call counts.
+
+## Run the same case after loading
+
+```elixir
+{:ok, before} = Tune.Runtime.run(RiskRouter.new(), %{risk: 0.7}, model: never)
+{:ok, after_load} = Tune.Runtime.run(loaded, %{risk: 0.7}, model: never)
+
+IO.puts("before: #{before.output["queue"]}")
+IO.puts("after:  #{after_load.output["queue"]}")
+```
+
+```text
+before: general
+after:  risk-review
+```
+
+## Next steps
+
+- [Artifacts](../artifacts.md) covers saving, loading, and provenance.
+- [Programs](../programs.md) explains `Tune.Parameter` and `Tune.Execution`.
+- [Multi-hop QA](multi-hop-qa.livemd) uses the same reflective search on instructions.

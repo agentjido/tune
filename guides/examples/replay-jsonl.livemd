@@ -1,0 +1,140 @@
+# Replay JSONL
+
+This notebook scores answers that an application already saved to a JSONL
+file. Tune reads the file lazily, turns each line into a case, and scores the
+saved output without calling the original program or any model. It runs
+offline and needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Write the saved answers
+
+Each line is one saved row. `input` and `output` are required. `id` names the
+row in the report, and `expected` holds the reference answer for scorers. The
+third row has no `output`, and the fourth row exists to show that the case
+limit stops reading early.
+
+```elixir
+path = Path.join(System.tmp_dir!(), "tune_saved_answers.jsonl")
+
+File.write!(path, """
+{"id":"paris","input":"Where is Paris?","output":"France","expected":"France"}
+{"id":"rome","input":"Where is Rome?","output":"Spain","expected":"Italy"}
+{"id":"madrid","input":"Where is Madrid?","expected":"Spain"}
+{"id":"lisbon","input":"Where is Lisbon?","output":"Portugal","expected":"Portugal"}
+""")
+
+path
+|> File.stream!()
+|> Enum.count()
+```
+
+```text
+4
+```
+
+## Build the replay study
+
+Pass `Tune.replay/1` a zero-arity factory. Tune calls the factory once, when
+the evaluation starts, so the file is not opened while you build the pipeline.
+Each line is decoded with `JSON.decode!/1`; string keys are accepted.
+
+```elixir
+rows = fn ->
+  path
+  |> File.stream!()
+  |> Stream.map(&JSON.decode!/1)
+end
+```
+
+A two-argument scorer receives the case and the saved output. The case
+carries the row's `id`, `input`, and `expected` values. This scorer compares
+the saved answer with `expected` and uses `id` in its feedback.
+
+```elixir
+exact = fn row, output ->
+  if output == row.expected do
+    %{score: 1, feedback: "#{row.id}: matches #{row.expected}"}
+  else
+    %{score: 0, feedback: "#{row.id}: expected #{row.expected}, saved #{output}"}
+  end
+end
+
+study =
+  rows
+  |> Tune.replay()
+  |> Tune.score(:exact, exact)
+  |> Tune.limit(cases: 3)
+```
+
+`Tune.limit/2` with `cases: 3` bounds the run to the first three rows, so the
+`lisbon` row is not evaluated.
+
+## Evaluate the saved rows
+
+```elixir
+{:ok, report} = Tune.evaluate(study)
+
+summary = report.summaries.exact
+IO.puts("mean: #{summary.mean}, count: #{summary.count}, coverage: #{Float.round(summary.coverage, 3)}")
+IO.puts("stop reason: #{inspect(report.stop_reason)}")
+IO.puts("model calls: #{inspect(report.calls)}")
+```
+
+```text
+mean: 0.5, count: 2, coverage: 0.667
+stop reason: :case_limit
+model calls: %{}
+```
+
+The mean covers only rows that produced a score. `coverage` is the share of
+evaluated rows that have a score, so the invalid row lowers coverage instead
+of counting as zero. `report.calls` is empty because replay makes no target or
+model calls.
+
+## Inspect each row
+
+Every attempted row becomes a `Tune.Observation`. Valid rows carry their
+score and feedback.
+
+```elixir
+for observation <- report.observations do
+  IO.puts("#{observation.id} #{observation.status} #{inspect(observation.scores)} #{inspect(observation.feedback)}")
+end
+```
+
+```text
+paris ok %{exact: 1} %{exact: "paris: matches France"}
+rome ok %{exact: 0} %{exact: "rome: expected Italy, saved Spain"}
+madrid error %{} %{}
+```
+
+The `madrid` row keeps its id even though it failed validation. Its `error`
+explains what the row is missing. The case input in `metadata.case` holds
+the raw row, so you can trace it back to the file.
+
+```elixir
+invalid = Enum.find(report.observations, &(&1.id == "madrid"))
+
+IO.puts(Exception.message(invalid.error))
+IO.inspect(invalid.metadata.case.input)
+```
+
+```text
+saved row: output is required
+%{"expected" => "Spain", "id" => "madrid", "input" => "Where is Madrid?"}
+```
+
+## Next steps
+
+- [Score transcripts](score-transcripts.livemd) replays multi-turn
+  conversations with two independent scorers.
+- [Score retrieval](score-retrieval.livemd) adds model-judged scores to a
+  saved answer.
+- [Artifacts](../artifacts.md) covers saving and loading tuned results.

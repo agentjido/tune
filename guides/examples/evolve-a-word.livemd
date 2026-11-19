@@ -1,0 +1,229 @@
+# Evolve a Word
+
+In this notebook you evolve the four-letter word `"TUNE"` from a population of
+wrong guesses. The fitness function and the genetic operators are small enough
+to read in full, so you can watch each part of a genetic search: the starting
+population, crossover, mutation, generation winners, seeding, and the target
+score that ends the run. The notebook runs offline and needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Score a word
+
+A candidate is a plain string. Its score is the number of positions that match
+the target word.
+
+```elixir
+letters = ~c"TUNE"
+
+score = fn word ->
+  word
+  |> String.to_charlist()
+  |> Enum.zip(letters)
+  |> Enum.count(fn {a, b} -> a == b end)
+end
+
+Enum.map(["TTTT", "TUNT", "TUNE"], score)
+```
+
+```text
+[1, 3, 4]
+```
+
+## Write the operators
+
+Genetic search over a plain value needs two functions from you. Each one takes
+a random state as its last argument and returns `{new_genome, new_random_state}`.
+Tune owns the random state and threads it through every call, so a fixed seed
+gives a repeatable search.
+
+`crossover` takes two parents and joins the front of one to the back of the
+other at a random cut. `mutate` replaces one random position with one of the
+target's letters.
+
+```elixir
+crossover = fn left, right, rng ->
+  {cut, rng} = :rand.uniform_s(3, rng)
+  {String.slice(left, 0, cut) <> String.slice(right, cut, 4 - cut), rng}
+end
+
+mutate = fn word, rng ->
+  {position, rng} = :rand.uniform_s(4, rng)
+  {letter, rng} = :rand.uniform_s(4, rng)
+
+  new_word =
+    word
+    |> String.to_charlist()
+    |> List.replace_at(position - 1, Enum.at(letters, letter - 1))
+    |> List.to_string()
+
+  {new_word, rng}
+end
+```
+
+Call them by hand with a seeded `:rand` state to see one step of each:
+
+```elixir
+rng = :rand.seed_s(:exsss, 4)
+{child, rng} = crossover.("TTTT", "UUUU", rng)
+{mutant, _rng} = mutate.("NNNN", rng)
+{child, mutant}
+```
+
+```text
+{"TTUU", "NNNT"}
+```
+
+## Build the search
+
+The target `"TTTT"` is the starting value. With no `Tune.vary/2` call, genetic
+search treats the whole value as the genome and uses your operators.
+
+- `initial_population` fixes generation zero. Its length sets the population
+  size. Duplicates stay, so `"TTTT"` appears twice.
+- `mutation_rate: 1` and `crossover_rate: 1` apply both operators to every
+  child.
+- `target_score: 4` stops the search once a candidate matches all four letters.
+- `Tune.limit/2` must set an evaluation limit for genetic search. `seed` fixes
+  the random state.
+
+The single validation case `:spell` is a placeholder: the runner `& &1`
+returns the candidate word itself, which the score then reads.
+
+```elixir
+spelling = fn seed, opts ->
+  Tune.new("TTTT", run: & &1, on_progress: Keyword.get(opts, :on_progress))
+  |> Tune.data(validation: [:spell])
+  |> Tune.score(:matching_positions, score)
+  |> Tune.search(:genetic,
+    initial_population: ["TTTT", "UUUU", "NNNN", "EEEE", "TTTT"],
+    generations: 25,
+    mutation_rate: 1,
+    crossover_rate: 1,
+    crossover: crossover,
+    mutate: mutate,
+    target_score: Keyword.get(opts, :target_score, 4)
+  )
+  |> Tune.limit(evaluations: 130, seed: seed)
+  |> Tune.tune()
+end
+```
+
+## Watch each generation
+
+The `on_progress` callback receives a `:generation_evaluated` event after each
+generation. The event carries the whole population and the best candidate so
+far.
+
+```elixir
+report = fn
+  %{event: :generation_evaluated} = event ->
+    words = Enum.map(event.population, & &1.value)
+    IO.puts("Generation #{event.generation}: best #{event.best.value} #{inspect(words)}")
+
+  _event ->
+    :ok
+end
+
+{:ok, winner} = spelling.(3, on_progress: report)
+
+IO.puts("Selected #{winner.value} after #{length(winner.history)} evaluations")
+IO.puts("Stop reason #{winner.stop_reason}")
+```
+
+```text
+Generation 0: best TTTT ["TTTT", "UUUU", "NNNN", "EEEE", "TTTT"]
+Generation 1: best UUNT ["TTTT", "TTTT", "TTTN", "UUNT", "NNNN"]
+Generation 2: best TUNT ["UUNT", "EUTT", "TUNT", "UTTE", "UTTN"]
+Generation 3: best TUNE ["TUNT", "NUTT", "TUNE", "TUUT", "UUNT"]
+Selected TUNE after 20 evaluations
+Stop reason target_score
+```
+
+The first member of each later generation is an elite: the previous
+generation's best candidate, copied unchanged. The default `elitism: 1` keeps
+one. The other members are offspring of two parents chosen by tournament.
+
+## Trace the lineage
+
+Every candidate in `winner.history` records its kind, generation, and parents.
+
+```elixir
+winner.history
+|> Enum.take(6)
+|> Enum.map(&{&1.id, &1.value, &1.lineage})
+```
+
+```text
+[
+  {"0", "TTTT", %{kind: :initial, generation: 0}},
+  {"1", "UUUU", %{kind: :initial, generation: 0}},
+  {"2", "NNNN", %{kind: :initial, generation: 0}},
+  {"3", "EEEE", %{kind: :initial, generation: 0}},
+  {"4", "TTTT", %{kind: :initial, generation: 0}},
+  {"5", "TTTT", %{kind: :elite, parents: ["0"], generation: 1}}
+]
+```
+
+```elixir
+winner.best.lineage
+```
+
+```text
+%{kind: :offspring, parents: ["12", "13"], generation: 3}
+```
+
+The two `"TTTT"` seeds keep separate IDs, `"0"` and `"4"`. The winner is the
+child of candidates `"12"` and `"13"` from generation 2.
+
+## Repeat a run with the same seed
+
+The operators draw every random number from the state Tune passes in, so the
+same seed gives the same history.
+
+```elixir
+{:ok, again} = spelling.(3, [])
+{:ok, other} = spelling.(5, [])
+
+IO.puts("Same history with seed 3: #{Enum.map(winner.history, & &1.value) == Enum.map(again.history, & &1.value)}")
+IO.puts("Seed 5 found #{other.value} after #{length(other.history)} evaluations")
+```
+
+```text
+Same history with seed 3: true
+Seed 5 found TUNE after 125 evaluations
+```
+
+A different seed finds the same word along a longer path.
+
+## Run without a target score
+
+Without `target_score`, the search keeps going until it runs all 25
+generations, even though it found the answer in generation 3.
+
+```elixir
+{:ok, full} = spelling.(3, target_score: nil)
+
+IO.puts("Selected #{full.value} after #{length(full.history)} evaluations")
+IO.puts("Stop reason #{full.stop_reason}")
+```
+
+```text
+Selected TUNE after 130 evaluations
+Stop reason completed
+```
+
+Set `target_score` when you know the best possible score. It saves the
+remaining evaluations.
+
+## Next steps
+
+- [Pack a Kit](pack-a-kit.livemd) adds a validity rule to a binary genome.
+- [Delivery Routes](delivery-routes.livemd) minimizes a score and supplies a custom parent selector.
+- [Search API](../optimizers.md) lists every genetic search option.

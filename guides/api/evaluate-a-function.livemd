@@ -1,0 +1,197 @@
+# Evaluate a Function
+
+In this notebook you measure a plain Elixir function against labeled cases.
+You write a shipping-price function, give Tune three test rows, add two
+scores, and read the per-case results and the score summaries. The notebook
+makes no model calls and needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Write the function under test
+
+The function prices a parcel from its weight and delivery zone. It is ordinary
+Elixir code. Tune does not need to know anything about it.
+
+```elixir
+defmodule Shipping do
+  @rates %{"local" => 5.0, "national" => 9.0}
+
+  def quote(%{weight_kg: weight, zone: zone}) do
+    %{price: Map.get(@rates, zone, 12.0) + weight * 1.5}
+  end
+end
+
+Shipping.quote(%{weight_kg: 1, zone: "local"})
+```
+
+```text
+%{price: 6.5}
+```
+
+## Describe the test cases
+
+Each row has an `id`, an `input`, and an optional `expected` value. Tune passes
+only `input` to the function. Scores see the whole case, so labels never reach
+the code under test.
+
+The third row has no `expected` value. You use it to see how Tune reports a
+score that fails on one case.
+
+```elixir
+rows = [
+  %{id: "small-local", input: %{weight_kg: 1, zone: "local"}, expected: %{price: 6.5}},
+  %{id: "heavy-national", input: %{weight_kg: 10, zone: "national"}, expected: %{price: 24.0}},
+  %{id: "unlabeled", input: %{weight_kg: 2, zone: "local"}}
+]
+
+length(rows)
+```
+
+```text
+3
+```
+
+## Build the pipeline
+
+`Tune.new/2` takes the target and a runner. The runner receives the target and
+one case input, and returns the output. Here the target is the `Shipping`
+module, and the runner calls `quote/1`. In your own code, pass the function you
+already use in production.
+
+`Tune.data/2` attaches the rows as the `:test` role. Tune reads them only when
+the pipeline runs.
+
+Add two independent scores with `Tune.score/4`:
+
+- `:exact` is a two-argument scorer. It reads the case and the output, and
+  compares the price with the label.
+- `:under_20` is a one-argument scorer. It reads only the output.
+
+With more than one score, `Tune.select/2` names the score that decides the
+headline value.
+
+```elixir
+pipeline =
+  Shipping
+  |> Tune.new(run: fn shipping, input -> shipping.quote(input) end)
+  |> Tune.data(test: rows)
+  |> Tune.score(:exact, fn tune_case, output ->
+    if output.price == tune_case.expected.price, do: 1, else: 0
+  end)
+  |> Tune.score(:under_20, fn output -> if output.price < 20, do: 1, else: 0 end)
+  |> Tune.select(:under_20)
+
+pipeline.scores |> Enum.map(& &1.name)
+```
+
+```text
+[:exact, :under_20]
+```
+
+Building the pipeline runs nothing. Each builder call returns a new `%Tune{}`
+value.
+
+## Run the evaluation
+
+`Tune.evaluate/2` runs the function on every `:test` row and scores each
+output. It returns `{:ok, %Tune.Evaluation{}}`.
+
+```elixir
+{:ok, evaluation} = Tune.evaluate(pipeline)
+
+{evaluation.complete?, evaluation.eligible?, evaluation.stop_reason}
+```
+
+```text
+{true, true, :completed}
+```
+
+## Inspect each case
+
+`evaluation.observations` keeps one `Tune.Observation` per case, in row order.
+Each observation holds the case `id`, its `status`, the `output`, the numeric
+`scores`, and any `score_errors`.
+
+```elixir
+for observation <- evaluation.observations do
+  IO.puts(
+    "#{observation.id}: #{observation.status} " <>
+      "price=#{observation.output.price} " <>
+      "scores=#{inspect(observation.scores)} " <>
+      "score_errors=#{inspect(Map.keys(observation.score_errors))}"
+  )
+end
+
+:ok
+```
+
+```text
+small-local: ok price=6.5 scores=%{exact: 1, under_20: 1} score_errors=[]
+heavy-national: ok price=24.0 scores=%{exact: 1, under_20: 0} score_errors=[]
+unlabeled: error price=8.0 scores=%{under_20: 1} score_errors=[:exact]
+```
+
+The function produced an output for `unlabeled`, but the `:exact` scorer
+raised because the row has no `expected` map. Tune records that as a score
+error on the case and marks the observation `:error`. The `:under_20` score for
+the same case still counts.
+
+Read the error to see what went wrong:
+
+```elixir
+unlabeled = List.last(evaluation.observations)
+Exception.message(unlabeled.score_errors.exact)
+```
+
+```text
+"the score raised: expected a map, got:\n\n    nil\n"
+```
+
+The error is a `Tune.Error.Execution.Callback`. A score that raises, exits, or
+returns something other than a number or `%{score: number, feedback: text}`
+produces this error. The evaluation itself still returns `{:ok, evaluation}`.
+
+## Read the score summaries
+
+`evaluation.summaries` holds one `Tune.Score.Summary` per score.
+`Tune.Evaluation.summary/2` returns one by name. `count` is the number of
+scored cases, and `coverage` is the share of cases that produced that score.
+
+```elixir
+for name <- [:exact, :under_20] do
+  summary = Tune.Evaluation.summary(evaluation, name)
+  IO.puts("#{name}: mean=#{summary.mean} count=#{summary.count} coverage=#{Float.round(summary.coverage, 2)}")
+end
+
+evaluation.selected_score
+```
+
+```text
+exact: mean=1.0 count=2 coverage=0.67
+under_20: mean=0.6666666666666666 count=3 coverage=1.0
+0.6666666666666666
+```
+
+The `:exact` mean is 1.0, but it covers only two of three cases. Always read a
+mean together with its coverage. `selected_score` is the mean of the selected
+score, `:under_20`.
+
+The evaluation stays eligible because the selected score covers every case. If
+`:exact` were the selected score, the missing case would make the evaluation
+ineligible and `selected_score` would be `nil`. Pass `failure_score:` to
+`Tune.score/4` when a failed case should count as a fixed value instead.
+
+## Next steps
+
+- [Programs](../programs.md) shows how to evaluate typed LLM programs with the
+  same pipeline.
+- [Typed Predictors](typed-predictors.livemd) builds a predictor that you can
+  pass to `Tune.new/2` as the target.
+- [Search API](../optimizers.md) varies values and searches for a better
+  configuration.

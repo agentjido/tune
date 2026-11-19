@@ -194,13 +194,15 @@ defmodule Tune.Execution do
   @doc false
   @spec prediction(t(), map() | nil) :: Prediction.t()
   def prediction(%__MODULE__{} = execution, output) do
-    %Prediction{
+    prediction = %Prediction{
       output: output,
       steps: steps(execution),
       failures: execution |> trace(:failures) |> Enum.reverse(),
       calls: trace(execution, :calls),
       metadata: %{responses: execution |> trace(:responses) |> Enum.reverse()}
     }
+
+    %{prediction | usage: Prediction.token_totals(prediction)}
   end
 
   @doc false

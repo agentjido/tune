@@ -1,0 +1,200 @@
+# Delivery Routes
+
+In this notebook you find a short delivery route. A van leaves the depot,
+visits four stops once each, and returns. Each candidate is an ordering of the
+stops. Genetic search minimizes the round-trip distance with operators that
+never drop or repeat a stop, and a parent selector that you supply. The
+notebook runs offline and needs no credentials.
+
+## Setup
+
+```elixir
+Mix.install([
+  {:tune, "~> 0.5.0"}
+])
+```
+
+## Measure a route
+
+Stops sit on a street grid, so the distance between two points is the number
+of blocks across plus the number of blocks up or down.
+
+```elixir
+stops = %{depot: {0, 0}, a: {0, 2}, b: {2, 2}, c: {2, 0}, d: {1, 0}}
+
+distance = fn route ->
+  [:depot | route ++ [:depot]]
+  |> Enum.chunk_every(2, 1, :discard)
+  |> Enum.sum_by(fn [from, to] ->
+    {x, y} = stops[from]
+    {u, v} = stops[to]
+    abs(x - u) + abs(y - v)
+  end)
+end
+
+routes = [[:a, :c, :b, :d], [:b, :a, :d, :c], [:d, :b, :a, :c], [:c, :d, :a, :b]]
+Enum.map(routes, &{&1, distance.(&1)})
+```
+
+```text
+[
+  {[:a, :c, :b, :d], 12},
+  {[:b, :a, :d, :c], 12},
+  {[:d, :b, :a, :c], 12},
+  {[:c, :d, :a, :b], 12}
+]
+```
+
+The four starting routes all cover 12 blocks.
+
+## Write permutation-safe operators
+
+A route is a permutation: every stop appears exactly once. Ordinary operators
+can break that rule. Joining the front of one route to the back of another can
+repeat a stop and lose another.
+
+This crossover keeps a prefix of the left parent, then appends the right
+parent's remaining stops in their order. This mutation swaps two positions.
+Both take Tune's random state last and return `{new_route, new_random_state}`.
+
+```elixir
+crossover = fn left, right, rng ->
+  {cut, rng} = :rand.uniform_s(3, rng)
+  prefix = Enum.take(left, cut)
+  {prefix ++ (right -- prefix), rng}
+end
+
+mutate = fn route, rng ->
+  {i, rng} = :rand.uniform_s(length(route), rng)
+  {j, rng} = :rand.uniform_s(length(route), rng)
+  first = Enum.at(route, i - 1)
+  second = Enum.at(route, j - 1)
+  {route |> List.replace_at(i - 1, second) |> List.replace_at(j - 1, first), rng}
+end
+
+rng = :rand.seed_s(:exsss, 3)
+{child, rng} = crossover.([:a, :c, :b, :d], [:d, :b, :a, :c], rng)
+{swapped, _rng} = mutate.([:a, :b, :c, :d], rng)
+{child, swapped}
+```
+
+```text
+{[:a, :d, :b, :c], [:a, :d, :c, :b]}
+```
+
+The child keeps `:a` from the left parent, then takes `:d`, `:b`, and `:c` in
+the right parent's order.
+
+## Choose parents with your own policy
+
+By default, genetic search picks each parent by tournament. Pass
+`select_parent` to apply your own policy. Tune calls it with the eligible
+candidates of the current generation and its random state. It must return
+`{candidate_id, new_random_state}`.
+
+This selector always picks the candidate with the best score:
+
+```elixir
+strongest = fn candidates, rng ->
+  {Enum.max_by(candidates, & &1.evaluation.selected_score).id, rng}
+end
+```
+
+`selected_score` is always higher-is-better. For a score with
+`direction: :minimize`, Tune stores the negated value, so the shortest route
+has the largest `selected_score`.
+
+## Run the search
+
+- `direction: :minimize` makes a shorter route a better route.
+- `valid?` rejects any child that is not a permutation of the four stops.
+- `target_score: 8` is in the score's own units: stop at 8 blocks or fewer.
+
+```elixir
+study =
+  Tune.new(hd(routes), run: fn route, :roundtrip -> distance.(route) end)
+  |> Tune.data(validation: [:roundtrip])
+  |> Tune.score(:distance, & &1, direction: :minimize)
+  |> Tune.search(:genetic,
+    initial_population: routes,
+    generations: 12,
+    valid?: &(Enum.sort(&1) == [:a, :b, :c, :d]),
+    select_parent: strongest,
+    crossover_rate: 1,
+    mutation_rate: 1,
+    crossover: crossover,
+    mutate: mutate,
+    target_score: 8
+  )
+  |> Tune.limit(evaluations: 52, seed: 7)
+
+{:ok, winner} = Tune.tune(study)
+
+IO.puts("Selected #{inspect(winner.value)}")
+IO.puts("Round-trip distance #{winner.best.evaluation.summaries.distance.mean}")
+IO.puts("Stop reason #{winner.stop_reason} after #{length(winner.history)} evaluations")
+```
+
+```text
+Selected [:d, :c, :b, :a]
+Round-trip distance 8.0
+Stop reason target_score after 8 evaluations
+```
+
+The winner goes depot, `:d`, `:c`, `:b`, `:a`, depot: 1 + 1 + 2 + 2 + 2 = 8
+blocks, the perimeter of the grid.
+
+Call the selector on generation zero to see what it receives and returns:
+
+```elixir
+generation_zero = Enum.filter(winner.history, &(&1.lineage.generation == 0))
+
+IO.inspect(Enum.map(generation_zero, &{&1.id, &1.evaluation.selected_score}))
+{id, _rng} = strongest.(generation_zero, :rand.seed_s(:exsss, 1))
+id
+```
+
+```text
+[{"0", -12.0}, {"1", -12.0}, {"2", -12.0}, {"3", -12.0}]
+"0"
+```
+
+All four routes tie, so `Enum.max_by/2` returns the first one. Every candidate
+in generation 1 comes from route `"0"`, and the swap mutation supplies the
+variety. A different policy, such as breaking ties at random, changes which
+routes breed.
+
+## Compare with the starting route
+
+`Tune.compare/3` runs the starting route and the winner on the same cases.
+
+```elixir
+{:ok, comparison} = Tune.compare(study, winner, split: :validation)
+metric = comparison.metrics.distance
+
+IO.puts("#{metric.baseline_mean} -> #{metric.challenger_mean} blocks (#{metric.status}, #{metric.delta})")
+```
+
+```text
+12.0 -> 8.0 blocks (improved, -4.0)
+```
+
+For a minimized score, a negative delta is an improvement.
+
+## Check every route is a permutation
+
+Confirm that no candidate in the history lost or repeated a stop.
+
+```elixir
+Enum.all?(winner.history, &(Enum.sort(&1.value) == [:a, :b, :c, :d]))
+```
+
+```text
+true
+```
+
+## Next steps
+
+- [Evolve a Word](evolve-a-word.livemd) shows each genetic operator step by step.
+- [Dispatch Policies](dispatch-policies.livemd) watches generations and stops a search early.
+- [Search API](../optimizers.md) lists every genetic search option.
