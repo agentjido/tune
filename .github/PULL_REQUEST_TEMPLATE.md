@@ -6,3 +6,4 @@ Describe the behavior that changes and who uses it.
 
 - [ ] Ran the relevant offline tests and recorded the results.
 - [ ] Updated any affected public docs or examples.
+- [ ] Used Conventional Commits and left changelog generation to GitOps.

@@ -71,7 +71,10 @@ jobs:
           commit="$(git rev-parse HEAD)"
           git merge-base --is-ancestor "$commit" origin/main
           grep -Fxq "  @version \"$version\"" mix.exs
-          grep -Fxq "## $version" CHANGELOG.md
+          if ! bash .github/scripts/release-notes.sh "$version" > /dev/null; then
+            echo "The changelog has no release entry for $version." >&2
+            exit 1
+          fi
 
           if ! conclusion="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main \
             --commit "$commit" --event push --limit 1 --json conclusion --jq '.[0].conclusion // ""')"; then
@@ -90,9 +93,7 @@ jobs:
           install-hex: false
       - run: mix local.hex "$HEX_VERSION" --force
       - run: mix deps.get
-      - run: mix hex.audit
-      - run: bash .github/scripts/check-package.sh "$RUNNER_TEMP/tune-hex"
-      - run: mix hex.publish --dry-run --yes
+      - run: bash .github/scripts/release-preflight.sh "$RUNNER_TEMP/tune-hex"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: tune-hex
@@ -224,11 +225,7 @@ jobs:
             exit 0
           fi
           notes="$RUNNER_TEMP/tune-release-notes"
-          awk -v heading="## $VERSION" '
-            $0 == heading { found = 1; next }
-            found && /^## / { exit }
-            found { print }
-          ' CHANGELOG.md > "$notes"
+          bash .github/scripts/release-notes.sh "$VERSION" > "$notes"
           {
             printf '\n[Hex](https://hex.pm/packages/tune/%s) · [HexDocs](https://hexdocs.pm/tune/%s/)\n' "$VERSION" "$VERSION"
             printf '\nHex checksum: `%s`\n' "$(cat "$RUNNER_TEMP/tune-hex-checksum")"

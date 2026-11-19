@@ -1,7 +1,7 @@
 defmodule Tune.MixProject do
   use Mix.Project
 
-  @version "0.5.1"
+  @version "0.5.0"
   @source_url "https://github.com/agentjido/tune"
   @description "Evaluation and search pipelines for Elixir"
 
@@ -140,6 +140,8 @@ defmodule Tune.MixProject do
       {:nx, "~> 1.0", only: :test},
       {:axon, "~> 0.9", only: :test},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
+      {:git_hooks, "~> 0.9.0", only: :dev, runtime: false},
+      {:git_ops, "~> 2.12.4", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
@@ -148,6 +150,7 @@ defmodule Tune.MixProject do
   defp aliases do
     [
       setup: ["deps.get"],
+      install_hooks: ["git_hooks.install"],
       "test.examples": ["test --only example"],
       quality: [
         "format --check-formatted",

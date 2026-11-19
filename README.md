@@ -1,90 +1,191 @@
 # Tune
 
-Tune is an Elixir library for evaluating programs and searching for better
-configurations. Use it to measure a baseline, tune a configuration or prompt,
-and compare the result on the same held-out cases.
+[![Hex.pm](https://img.shields.io/hexpm/v/tune.svg)](https://hex.pm/packages/tune)
+[![Hex Docs](https://img.shields.io/badge/hex-docs-lightgreen.svg)](https://hexdocs.pm/tune/)
+[![CI](https://github.com/agentjido/tune/actions/workflows/ci.yml/badge.svg)](https://github.com/agentjido/tune/actions/workflows/ci.yml)
+[![License](https://img.shields.io/hexpm/l/tune.svg)](https://github.com/agentjido/tune/blob/main/LICENSE)
+[![Website](https://img.shields.io/badge/website-jido.run-0f172a.svg)](https://jido.run)
+[![Ecosystem](https://img.shields.io/badge/ecosystem-jido.run-0ea5e9.svg)](https://jido.run/ecosystem)
+[![Discord](https://img.shields.io/badge/discord-join-5865F2.svg?logo=discord&logoColor=white)](https://jido.run/discord)
 
-Tune is in beta. The core runs in an Elixir application. The
-optional local workbench is experimental.
+> **Join the community!** Come chat about building AI tools with Elixir in
+> [The Swarm: Elixir AI Collective](https://jido.run/discord) Discord server.
 
-## Install
+Tune measures and improves Elixir code, including LLM prompts.
 
-Add Tune to the dependencies in your Mix project and run `mix deps.get`.
+You give Tune a function or an LLM program, some labeled examples, and a
+score. Tune runs your code on the examples, searches for a better setting or
+prompt, and then checks the winner against your current version on examples
+the search did not see.
+
+> **Status:** Tune is in beta. The API can change before 1.0.
+
+## Why Tune?
+
+Changing a threshold, a model setting, or a prompt is easy. Knowing whether
+the change made things better is hard. Tune gives you one workflow for that
+question:
+
+1. **Measure** the current version on labeled cases.
+2. **Search** for a better setting, prompt, or set of examples.
+3. **Compare** the winner with the current version on held-out cases.
+4. **Save** the learned values as JSON and load them into your application.
+
+Tune is plain Elixir. It needs no Python and no workflow engine. LLM calls go
+through [ReqLLM](https://github.com/agentjido/req_llm), and your application
+keeps control of credentials, tools, and deployment.
+
+## Installation
+
+Add `tune` to your list of dependencies in `mix.exs`:
 
 ```elixir
-{:tune, "~> 0.5.0"}
+def deps do
+  [
+    {:tune, "~> 0.5.0"}
+  ]
+end
 ```
 
-The [getting started guide](guides/getting_started.md) walks through a ticket
-routing example, from selecting a threshold to saving it for the host app.
-It also shows how to preview a prompt and score saved model answers.
-Both examples run without provider credentials.
+Then run:
 
-## Main capabilities
+```bash
+mix deps.get
+```
 
-- Run Elixir functions or typed LLM programs against labeled cases.
-- Score saved outputs without rerunning the program that produced them.
-- Compare a search winner with its baseline on a held-out split.
-- Search Elixir values with grid or genetic search. For structured prompts,
-  search instructions and demonstrations with separate model-call limits.
-- Preview Chat, JSON, and XML prompts. Export learned values as JSON artifacts.
+Tune is tested with Elixir 1.18 on OTP 27 and Elixir 1.20 on OTP 29.
 
-## Architecture
+## Quick Start
+
+This example picks a review threshold for a ticket router. It runs offline and
+needs no model or credentials.
+
+```elixir
+route = fn config, risk ->
+  if risk >= config.review_at, do: :review, else: :standard
+end
+
+validation = [
+  %{id: "v1", input: 40, expected: :standard},
+  %{id: "v2", input: 55, expected: :standard},
+  %{id: "v3", input: 61, expected: :review},
+  %{id: "v4", input: 80, expected: :review}
+]
+
+test = [
+  %{id: "t1", input: 34, expected: :standard},
+  %{id: "t2", input: 52, expected: :standard},
+  %{id: "t3", input: 64, expected: :review},
+  %{id: "t4", input: 90, expected: :review}
+]
+
+study =
+  Tune.new(%{review_at: 50}, run: route)
+  |> Tune.data(validation: validation, test: test)
+  |> Tune.score(:accuracy, fn row, decision ->
+    if decision == row.expected, do: 1, else: 0
+  end)
+  |> Tune.vary(review_at: [50, 60, 70])
+  |> Tune.search(:grid)
+
+{:ok, result} = Tune.tune(study)
+result.value
+#=> %{review_at: 60}
+
+{:ok, report} = Tune.compare(study, result, split: :test)
+Map.take(report.metrics.accuracy, [:baseline_mean, :challenger_mean, :status])
+#=> %{status: :improved, baseline_mean: 0.75, challenger_mean: 1.0}
+
+{:ok, artifact} = Tune.dump(result)
+{:ok, json} = Tune.Artifact.encode(artifact)
+```
+
+Builder calls such as `Tune.data/2` and `Tune.vary/2` only return a new
+`%Tune{}` value. Work happens in `Tune.evaluate/2`, `Tune.tune/1`, and
+`Tune.compare/3`. The [getting started guide](guides/getting_started.md)
+walks through each step and shows how to load the saved JSON.
+
+## Features
+
+- **Evaluate** Elixir functions, typed LLM programs, or saved outputs against
+  labeled cases with named scores.
+- **Search** Elixir values with grid or genetic search.
+- **Tune prompts** by searching instructions and few-shot demonstrations under
+  an explicit model-call limit. Teacher and proposal models stay separate from
+  the model you are tuning.
+- **Compare** a search winner with its baseline on a held-out split, case by
+  case.
+- **Preview** the exact Chat, JSON, or XML prompt before any model call.
+- **Export** learned values as versioned JSON artifacts.
+- **Experiment** in an optional local workbench with `mix tune.ui`
+  (experimental).
+
+## How it fits together
 
 Tune prepares prompts, runs cases, scores outputs, and selects candidates.
-ReqLLM handles model requests and transport retries. The host application
-controls credentials, tools, side effects, and deployment.
+ReqLLM sends model requests and handles transport retries. The host
+application owns credentials, tools, side effects, and deployment. Tune has no
+Jido dependency; a [Jido](https://github.com/agentjido/jido) host passes its
+own run function to Tune.
 
-Tune uses Elixir throughout. An application can pass Nx or Axon values
-through a runner. Exported learned values must be JSON-compatible.
+## Documentation
 
-## Start here
+- [Getting started](guides/getting_started.md) — tune one setting and save it
+- [Programs](guides/programs.md) — build and tune typed LLM programs
+- [Search strategies](guides/optimizers.md) — strategies, limits, and objectives
+- [Artifacts](guides/artifacts.md) — what Tune saves and checks on load
+- [Host integration](guides/host_integration.md) — use Tune inside your application
+- [Compatibility](guides/compatibility.md) — how DSPy, GEPA, and Jido workflows map to Tune
+- [Local workbench](guides/ui.md) — the experimental browser workbench
 
-- [Getting started](guides/getting_started.md)
-- [Programs and evaluation](guides/programs.md)
-- [Search strategies](guides/optimizers.md)
-- [Compatibility and boundaries](guides/compatibility.md)
-- [Artifacts](guides/artifacts.md)
-- [Host integration](guides/host_integration.md)
-- [Optional local workbench](guides/ui.md)
+[HexDocs](https://hexdocs.pm/tune/) also has Livebook guides for genetic
+search, prompt tuning, retrieval scoring, and agent evaluation suites.
 
-For a longer offline demo, run this command from a Tune source checkout
-after `mix deps.get`.
+## Examples
 
-```sh
+The source repository has numbered examples that run offline with local
+fixtures or scripted ReqLLM replies:
+
+- [All offline examples](https://github.com/agentjido/tune/tree/v0.5.0/examples)
+- [Typed prompt inspection](https://github.com/agentjido/tune/tree/v0.5.0/examples/01_dspy/01_01_extract_ticket)
+- [Grid search with paired comparison](https://github.com/agentjido/tune/tree/v0.5.0/examples/03_evolution/03_01_batch_grid)
+
+From a source checkout, this demo tunes a question-answering prompt and
+reports held-out accuracy and model calls:
+
+```bash
 MIX_ENV=test mix run examples/01_dspy/01_03_bootstrap_qa/compare_demo.exs
 ```
 
-This demo tunes a question-answering program using scripted ReqLLM replies.
-It reports held-out accuracy, improved and regressed rows, and model calls.
+## Development
 
-See the [numbered offline examples](https://github.com/agentjido/tune/tree/v0.5.1/examples),
-[typed prompt inspection](https://github.com/agentjido/tune/tree/v0.5.1/examples/01_dspy/01_01_extract_ticket),
-and [grid search with paired comparison](https://github.com/agentjido/tune/tree/v0.5.1/examples/03_evolution/03_01_batch_grid).
-
-## Experimental local workbench
-
-Add Phoenix Playground to your Mix project and run `mix tune.ui`.
-The workbench opens on the local machine. It keeps studies, runs, and
-artifacts in memory and can preview a prompt with zero model calls.
-Follow the [workbench guide](guides/ui.md) to try a study.
-
-## Local checks
-
-Run these commands from a Tune source checkout. The tests use scripted
-responses.
-
-```sh
+```bash
+# Install dependencies
 mix deps.get
+
+# Run tests (scripted responses, no credentials)
 mix test
+
+# Run the offline examples
+mix test.examples
+
+# Run quality checks (format, compile warnings, credo, dialyzer)
 mix quality
+
+# Generate documentation
 mix docs
 ```
 
-See [Contributing](CONTRIBUTING.md) and the [security policy](SECURITY.md)
-for changes and reports.
+## Contributing
+
+Bug reports and pull requests are welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) before you open a pull request. Report
+security issues as described in [SECURITY.md](SECURITY.md). See the
+[changelog](CHANGELOG.md) for release changes.
 
 ## License
 
-Tune uses [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
-See the [changelog](CHANGELOG.md) for release changes.
+Copyright 2026 Mike Hostetler
+
+Licensed under the Apache License, Version 2.0.
+[License text](https://github.com/agentjido/tune/blob/main/LICENSE).

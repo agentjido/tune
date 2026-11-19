@@ -8,7 +8,7 @@ sequences, and it runs no Python.
 The "Tested by" column names the offline lesson whose tests exercise that
 workflow with scripted replies or local fixtures. Codes such as `01_01` refer to
 the numbered lessons under
-[`examples/`](https://github.com/agentjido/tune/tree/v0.5.1/examples) in the
+[`examples/`](https://github.com/agentjido/tune/tree/v0.5.0/examples) in the
 source repository; they are not part of the Hex package. A workflow is
 listed as available only when a lesson or contract test covers it.
 

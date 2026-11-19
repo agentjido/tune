@@ -22,8 +22,38 @@ jobs:
       quality_otp_version: "29"
       quality_elixir_version: "1.20.4"
       test_matrix: '[{"otp":"27","elixir":"1.18.4"},{"otp":"29","elixir":"1.20.4"}]'
-      changelog_guard: false
+      changelog_guard: ${{ github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'git-ops/release/tune-v') }}
       docs_command: mix docs && bash .github/scripts/check-docs.sh
+
+  commits:
+    name: Conventional commits
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20.4"
+      - run: mix deps.get
+      - name: Check new commit messages
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          message="$(mktemp)"
+          trap 'rm -f "$message"' EXIT
+          commits="$(git log --no-merges --format=%H "$BASE..$HEAD_COMMIT")"
+          for commit in $commits; do
+            git show -s --format=%B "$commit" > "$message"
+            echo "Checking $commit"
+            mix git_ops.check_message "$message"
+          done
 
   package:
     name: Package install

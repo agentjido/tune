@@ -34,8 +34,12 @@ to verify the full GitHub-to-Hex publish path.
 
 ## Publish a version
 
-1. Update `@version` in `mix.exs` and add the matching changelog entry in a
-   pull request. Check that the docs and examples use the release version.
+1. Run **Plan release** on `main`. GitOps reads Conventional Commits since
+   the latest version tag. It generates the version, changelog, and
+   versioned example links. GitHub runs the Hex dry run on those files.
+   Review the `tune-gitops-plan` and `tune-hex` artifacts. Set `propose=true`
+   to push the generated branch after the checks pass. Use the link in
+   the run summary to open its pull request.
 2. Merge the PR and wait for CI on `main`. Use `dry-run` on `main` with
    the intended `tag_name` to check a release candidate before tagging.
 3. Run the Release workflow on `main` with operation `prepare` and enter
@@ -56,6 +60,14 @@ to verify the full GitHub-to-Hex publish path.
 For example, use these commands for `v0.5.1`.
 
 ```sh
+gh workflow run plan-release.yml -R agentjido/tune --ref main
+gh workflow run plan-release.yml -R agentjido/tune --ref main -f propose=true
+```
+
+After the generated release pull request merges and CI passes, run the
+release checks for the version in that pull request.
+
+```sh
 gh workflow run release.yml -R agentjido/tune --ref main -f operation=dry-run -f tag_name=v0.5.1
 gh workflow run release.yml -R agentjido/tune --ref main -f operation=prepare -f tag_name=v0.5.1
 gh workflow run release.yml -R agentjido/tune --ref v0.5.1 -f operation=dry-run
@@ -73,4 +85,5 @@ Hex Workload Identity can replace the API key after the package exists
 and the Jido projects are ready to make that change.
 
 [Hex publishing](https://hex.pm/docs/publish) ·
+[Jido release standards](https://jido.run/docs/contributors/package-quality-standards#release-workflow) ·
 [Hex Workload Identity](https://hex.pm/docs/workload-identity)

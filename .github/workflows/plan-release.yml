@@ -1,0 +1,120 @@
+name: Plan release
+
+on:
+  workflow_dispatch:
+    inputs:
+      propose:
+        description: Push the generated release branch for review
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tune-hex-release
+  cancel-in-progress: false
+
+env:
+  HEX_VERSION: "2.7.0"
+
+jobs:
+  generate:
+    name: Generate and check the Hex candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      version: ${{ steps.files.outputs.version }}
+    steps:
+      - name: Require main
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20.4"
+          install-hex: false
+      - run: mix local.hex "$HEX_VERSION" --force
+      - run: mix deps.get
+      - name: Plan the release with GitOps
+        shell: bash
+        run: |
+          version="$(sed -nE 's/^  @version "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' mix.exs)"
+          test -n "$version"
+          if git show-ref --verify --quiet "refs/tags/v$version"; then
+            mix git_ops.release --dry-run --output "$RUNNER_TEMP/git-ops-release"
+          else
+            echo "Version $version is already prepared. Use the Release workflow to check and tag it."
+          fi
+      - name: Verify the generated files
+        id: files
+        shell: bash
+        run: |
+          files="$RUNNER_TEMP/git-ops-release/release"
+          if [[ ! -d "$files" ]]; then
+            echo "No new release files to review."
+            exit 0
+          fi
+
+          version="$(sed -nE 's/^  @version "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' "$files/mix.exs")"
+          test -n "$version"
+          test -s "$files/PR_BODY.md"
+          test -s "$files/README.md"
+          test -s "$files/guides__compatibility.md"
+          bash .github/scripts/release-notes.sh "$version" "$files/CHANGELOG.md" > /dev/null
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Run the Hex release dry run
+        if: ${{ steps.files.outputs.version != '' }}
+        run: |
+          bash .github/scripts/apply-release-plan.sh "$RUNNER_TEMP/git-ops-release/release"
+          bash .github/scripts/release-preflight.sh "$RUNNER_TEMP/tune-hex"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ steps.files.outputs.version != '' }}
+        with:
+          name: tune-gitops-plan
+          path: ${{ runner.temp }}/git-ops-release/release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ steps.files.outputs.version != '' }}
+        with:
+          name: tune-hex
+          path: ${{ runner.temp }}/tune-hex
+
+  propose:
+    name: Push the release branch
+    needs: generate
+    if: ${{ inputs.propose && needs.generate.outputs.version != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tune-gitops-plan
+          path: ${{ runner.temp }}/git-ops-release
+      - name: Push the generated release files for review
+        shell: bash
+        env:
+          VERSION: ${{ needs.generate.outputs.version }}
+        run: |
+          branch="git-ops/release/tune-v$VERSION-${GITHUB_SHA:0:12}"
+          git ls-remote --exit-code origin refs/heads/main | cut -f1 | grep -Fxq "$GITHUB_SHA"
+          bash .github/scripts/apply-release-plan.sh "$RUNNER_TEMP/git-ops-release"
+
+          if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+            git diff --exit-code "refs/remotes/origin/$branch" -- mix.exs CHANGELOG.md README.md guides/compatibility.md
+          else
+            git add -- mix.exs CHANGELOG.md README.md guides/compatibility.md
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "chore: release v$VERSION"
+            git push origin "HEAD:refs/heads/$branch"
+          fi
+
+          printf '[Open the release pull request](%s/%s/compare/main...%s?expand=1)\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$branch" >> "$GITHUB_STEP_SUMMARY"

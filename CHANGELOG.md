@@ -1,13 +1,6 @@
 # Changelog
 
-## 0.5.1
-
-Second public beta of Tune.
-
-- Add 19 Livebooks and update seven Markdown guides. The examples cover API use, tuning, genetic search, retrieval, and agent evaluations.
-- Record `use_merge: false` in `:anything` reports and artifacts to match the optimizer's behavior.
-- Fill `prediction.usage` with the provider token counts from all recorded model replies, including replies that fail parsing.
-- Remove Tune's direct Req dependency.
+<!-- changelog -->
 
 ## 0.5.0
 
