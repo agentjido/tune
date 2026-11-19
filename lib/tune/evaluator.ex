@@ -7,6 +7,7 @@ defmodule Tune.Evaluator do
   alias Tune.Evaluation
   alias Tune.Observation
   alias Tune.Prediction
+  alias Tune.RunLimits
   alias Tune.Score
   alias Tune.Score.Selector
   alias Tune.Score.Summary
@@ -19,11 +20,18 @@ defmodule Tune.Evaluator do
           dataset: {list(), [Case.t()]} | nil
         }
 
-  @spec evaluate(Enumerable.t(), (Case.t() -> term()), [Score.t()], term(), map()) ::
+  @spec evaluate(
+          Enumerable.t() | {:dataset, (-> Enumerable.t()), atom()},
+          (Case.t() -> term()),
+          [Score.t()],
+          term(),
+          map()
+        ) ::
           Evaluation.t()
   def evaluate(source, runner, scores, selector, limits) do
-    expires_at = limits[:expires_at] || expiration(limits[:deadline])
-    concurrency = Map.get(limits, :concurrency, 1)
+    expires_at = limits[:expires_at] || RunLimits.expiration(limits[:deadline])
+    limits = Map.put(limits, :expires_at, expires_at)
+    concurrency = row_concurrency(limits)
     {:ok, supervisor} = Task.Supervisor.start_link()
     reason = stop_reason(expires_at, limits)
 
@@ -40,13 +48,8 @@ defmodule Tune.Evaluator do
     }
 
     try do
-      source = if state.stop_reason, do: [], else: source
-
       source
-      |> Dataset.lookahead(case_limit(limits))
-      |> Stream.with_index()
-      |> Stream.chunk_every(concurrency)
-      |> Dataset.reduce_while(state, limits[:dataset_split], fn chunk, state ->
+      |> reduce_source(state, limits, concurrency, fn chunk, state ->
         reduce_chunk(chunk, state, supervisor, runner, scores, limits)
       end)
       |> mark_truncation(limits)
@@ -54,6 +57,34 @@ defmodule Tune.Evaluator do
       |> summarize(scores, selector, limits)
     after
       Supervisor.stop(supervisor)
+    end
+  end
+
+  defp reduce_source(_source, %{stop_reason: reason} = state, _limits, _concurrency, _reduce)
+       when not is_nil(reason),
+       do: state
+
+  defp reduce_source(_source, state, %{cases: 0} = limits, _concurrency, _reduce)
+       when not is_map_key(limits, :source_truncated?),
+       do: %{state | stop_reason: :case_limit}
+
+  defp reduce_source(source, state, limits, concurrency, reduce) do
+    prepare = fn rows ->
+      rows
+      |> Dataset.lookahead(case_limit(limits))
+      |> Stream.with_index()
+      |> Stream.chunk_every(concurrency)
+    end
+
+    case source do
+      {:dataset, factory, split} ->
+        case Dataset.reduce(factory, split, limits, prepare, state, reduce) do
+          {:ok, state} -> state
+          {:stopped, reason, state} -> %{state | stop_reason: state.stop_reason || reason}
+        end
+
+      rows ->
+        rows |> prepare.() |> Enum.reduce_while(state, reduce)
     end
   end
 
@@ -74,6 +105,12 @@ defmodule Tune.Evaluator do
 
   defp case_limit(%{source_truncated?: _}), do: nil
   defp case_limit(limits), do: limits[:cases]
+
+  defp row_concurrency(%{model_calls: budget} = limits) when is_integer(budget) do
+    if limits[:row_calls], do: Map.get(limits, :concurrency, 1), else: 1
+  end
+
+  defp row_concurrency(limits), do: Map.get(limits, :concurrency, 1)
 
   defp reduce_chunk(entries, state, supervisor, runner, scores, limits) do
     {entries, limited?} = Dataset.split_chunk(entries, case_limit(limits))
@@ -104,6 +141,7 @@ defmodule Tune.Evaluator do
     {admitted, deferred} = admit(chunk, state.budget, limits[:row_calls])
     {observations, worker_stop} = run_chunk(admitted, supervisor, runner, scores, state, limits)
     state = account(state, observations)
+    observations = settle_row_limits(observations, worker_stop, state.budget)
     collected = Enum.reverse(observations, collected)
 
     reason =
@@ -128,6 +166,15 @@ defmodule Tune.Evaluator do
         evaluate_chunk(deferred, state, supervisor, runner, scores, limits, collected)
     end
   end
+
+  defp settle_row_limits(observations, nil, budget) when budget != 0 do
+    Enum.map(observations, fn
+      %{status: :interrupted} = observation -> %{observation | status: :error}
+      observation -> observation
+    end)
+  end
+
+  defp settle_row_limits(observations, _stop, _budget), do: observations
 
   defp collect_dataset(%{dataset: nil} = state, _entries, _chunk), do: state
 
@@ -159,7 +206,7 @@ defmodule Tune.Evaluator do
         {task, tune_case, allowance}
       end)
 
-    row_expires = expiration(Map.get(limits, :row_timeout, 120_000))
+    row_expires = RunLimits.expiration(Map.get(limits, :row_timeout, 120_000))
 
     {replies, reason} =
       await_tasks(Enum.map(tasks, &elem(&1, 0)), %{}, row_expires, state.expires_at, limits)
@@ -177,12 +224,12 @@ defmodule Tune.Evaluator do
 
   defp await_tasks(tasks, replies, row_expires, expires_at, limits) do
     reason = stop_reason(expires_at, limits)
-    timeout = min(remaining_ms(row_expires), remaining_ms(expires_at))
+    timeout = min(RunLimits.remaining(row_expires), RunLimits.remaining(expires_at))
 
     if reason || timeout == 0 do
       {replies, reason}
     else
-      interval = if limits[:cancel], do: min(20, timeout), else: timeout
+      interval = RunLimits.wait_interval(timeout, limits[:cancel])
 
       {pending, replies} =
         tasks
@@ -307,7 +354,7 @@ defmodule Tune.Evaluator do
     %Evaluation{
       observations: observations,
       summaries: summaries,
-      selected_score: if(eligible?, do: selected_mean(observations, scores, selector)),
+      selected_score: if(eligible?, do: selected_mean(observations)),
       eligible?: eligible?,
       complete?: complete?,
       stop_reason: state.stop_reason || :completed,
@@ -361,7 +408,7 @@ defmodule Tune.Evaluator do
   defp all_attempted?(observations),
     do: Enum.all?(observations, &(&1.status in [:ok, :error]))
 
-  defp selected_mean(observations, _scores, _selector) do
+  defp selected_mean(observations) do
     observations |> Enum.map(& &1.metadata.selected_score) |> mean()
   end
 
@@ -448,20 +495,12 @@ defmodule Tune.Evaluator do
     {[{row, allowance}], []}
   end
 
+  defp admit([row | rest], budget, row_calls) when budget < row_calls,
+    do: {[{row, budget}], rest}
+
   defp admit(chunk, budget, row_calls) do
-    per_row = row_calls || 1
-
-    {admitted, skipped, _left} =
-      Enum.reduce(chunk, {[], [], budget}, fn row, {admitted, skipped, left} ->
-        if left > 0 do
-          allowance = min(per_row, left)
-          {[{row, allowance} | admitted], skipped, left - allowance}
-        else
-          {admitted, [row | skipped], left}
-        end
-      end)
-
-    {Enum.reverse(admitted), Enum.reverse(skipped)}
+    {admitted, deferred} = Enum.split(chunk, div(budget, row_calls))
+    {Enum.map(admitted, &{&1, row_calls}), deferred}
   end
 
   defp append(state, observations),
@@ -511,20 +550,7 @@ defmodule Tune.Evaluator do
 
   defp judge_calls(_metadata), do: []
 
-  defp stop_reason(expires_at, limits) do
-    cond do
-      limits[:cancel] && limits.cancel.() -> :cancelled
-      remaining_ms(expires_at) == 0 -> :deadline
-      true -> nil
-    end
-  end
-
-  defp expiration(timeout) when is_integer(timeout), do: now() + timeout
-  defp expiration(_timeout), do: nil
-
-  defp remaining_ms(nil), do: :infinity
-  defp remaining_ms(expires_at), do: max(expires_at - now(), 0)
-  defp now, do: System.monotonic_time(:millisecond)
+  defp stop_reason(expires_at, limits), do: RunLimits.stop_reason(expires_at, limits[:cancel])
 
   defp extrema([], _), do: nil
   defp extrema(values, :min), do: Enum.min(values)

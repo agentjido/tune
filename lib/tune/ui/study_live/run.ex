@@ -24,7 +24,12 @@ if Code.ensure_loaded?(PhoenixPlayground) do
     end
 
     def handle_event("compare", %{"split" => split}, socket) do
-      case Tune.UI.Runner.start(socket.assigns.study, :compare, split: split) do
+      source = socket.assigns.preflight.comparison
+
+      case Tune.UI.Runner.start(socket.assigns.study, :compare,
+             split: split,
+             from: source && source.source_id
+           ) do
         {:ok, run} -> {:noreply, push_navigate(socket, to: "/runs/#{run.id}")}
         {:error, error} -> {:noreply, assign(socket, error: error)}
       end
@@ -43,7 +48,7 @@ if Code.ensure_loaded?(PhoenixPlayground) do
               <a class="btn btn-ghost btn-sm" href={"/studies/#{@study.id}/settings"}>Edit setup</a>
             </div>
             <dl class="grid gap-4 sm:grid-cols-3">
-              <div class="min-w-0">
+              <div :if={@preflight.model} class="min-w-0">
                 <dt class="text-sm">Target model</dt>
                 <dd class="break-all font-medium">{@preflight.model}</dd>
               </div>
@@ -54,9 +59,9 @@ if Code.ensure_loaded?(PhoenixPlayground) do
                   <span :if={!@preflight.evaluation_role}>No rows</span>
                 </dd>
               </div>
-              <div>
+              <div :if={@preflight.model || @preflight.model_calls}>
                 <dt class="text-sm">Model-call limit</dt>
-                <dd class="font-medium">{@preflight.model_calls}</dd>
+                <dd class="font-medium">{@preflight.model_calls || "not set"}</dd>
               </div>
             </dl>
             <p :if={@preflight.adapter} class="text-sm">Adapter: {@preflight.adapter}</p>
@@ -72,18 +77,19 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         <section :if={!@preflight.replay?} class="card border border-base-300 bg-base-100">
           <div class="card-body gap-3">
             <h2 class="card-title">Tune</h2>
+            <.setup_details setup={@preflight.tune} counts={@preflight.counts} />
             <p :if={@preflight.strategy} class="text-sm">Search strategy: {@preflight.strategy}</p>
             <p :if={@preflight.tune_issue} class="text-sm">
               {@preflight.tune_issue}
               <a class="link" href={"/studies/#{@study.id}/data"}>Add rows</a>
             </p>
             <div class="card-actions">
-              <button class="btn btn-outline" disabled={!@preflight.tune_ready?} phx-click="start" phx-value-mode="tune">Start tuning</button>
+              <button class="btn btn-outline" disabled={!@preflight.tune_ready? || @preflight.tune.error != nil} phx-click="start" phx-value-mode="tune">Start tuning</button>
             </div>
           </div>
         </section>
-        <div :if={@preflight.compare_ready?} class="mt-4">
-          <.compare_form splits={@preflight.splits} />
+        <div :if={@preflight.comparison} class="mt-4">
+          <.compare_form comparison={@preflight.comparison} />
         </div>
       </.shell>
       """
@@ -116,14 +122,15 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         model: study.config["model"],
         adapter: study.config["adapter"],
         strategy: strategy,
-        model_calls: Tune.Case.field(study.config["limits"] || %{}, :model_calls, "not set"),
+        model_calls: Tune.Case.field(study.config["limits"] || %{}, :model_calls, nil),
         evaluation_role: role,
         evaluation_rows: if(role, do: counts[role], else: 0),
         evaluate_ready?: not is_nil(role),
         tune_ready?: not replay? and is_nil(tune_issue),
-        splits: splits,
+        counts: counts,
+        tune: if(!replay?, do: run_setup(study, :tune)),
         replay?: replay?,
-        compare_ready?: not is_nil(Tune.UI.Runner.latest_search(study.id)),
+        comparison: comparison_setup(Tune.UI.Runner.latest_search(study.id), study),
         tune_issue: tune_issue
       }
     end

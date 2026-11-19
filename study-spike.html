@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Study templates · Tune</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f6f5f1;
+    --panel: #fffefa;
+    --ink: #1f2330;
+    --muted: #56596a;
+    --line: #dedde4;
+    --accent: #5136a2;
+    --accent-hover: #412982;
+    --soft: #eee8fc;
+    --up: #176449;
+    --down: #a63b31;
+    --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font: 15px/1.5 system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--ink); background: var(--bg); }
+  button, input, select { font: inherit; }
+  button { cursor: pointer; }
+  button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 3px;
+  }
+  [hidden] { display: none !important; }
+  .top { background: var(--panel); border-bottom: 1px solid var(--line); }
+  .top > div, main { width: min(100% - 48px, 1200px); margin: auto; }
+  .top > div { display: flex; align-items: center; gap: 13px; min-height: 59px; }
+  .brand { font-size: 18px; font-weight: 740; letter-spacing: -.045em; }
+  .mark { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 7px; background: var(--accent); color: white; font: 700 15px var(--mono); }
+  .crumb { color: var(--muted); border-left: 1px solid var(--line); padding-left: 13px; font-size: .88rem; }
+  .runtime { margin-left: auto; font: 12px var(--mono); color: var(--muted); }
+  main { padding: 41px 0 48px; }
+  .intro { margin-bottom: 24px; }
+  h1, h2, p { margin: 0; }
+  h1 { font-size: clamp(2.3rem, 6vw, 3.25rem); line-height: 1.08; letter-spacing: -.055em; }
+  .intro p { margin-top: 9px; color: var(--muted); }
+  .templates { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 26px; }
+  .templates button[aria-pressed="true"] { background: var(--soft); color: var(--accent); border-color: #bfaee8; }
+  .workspace { display: grid; grid-template-columns: minmax(0, 1.32fr) minmax(0, 1fr); align-items: start; gap: 18px; }
+  .column { display: grid; gap: 16px; min-width: 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; min-width: 0; overflow: hidden; box-shadow: 0 2px 4px #1f233005; }
+  .head, .foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 15px 17px; flex-wrap: wrap; }
+  .head { border-bottom: 1px solid var(--line); }
+  .edit-state, .meta { color: var(--muted); font-size: .85rem; }
+  .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 19px 17px; }
+  .field { display: grid; gap: 5px; align-content: start; min-width: 0; }
+  .field label { font-weight: 650; }
+  .field :is(input, select) { min-width: 0; width: 100%; min-height: 43px; padding: 6px 10px; color: var(--ink); background: var(--panel); border: 1px solid #afadb9; border-radius: 8px; }
+  .field input { font-family: var(--mono); }
+  .field input[aria-invalid="true"] { border-color: var(--down); }
+  .full { grid-column: 1 / -1; }
+  .prompt-text { margin-top: 4px; padding: 9px 11px; background: #f6f4fb; border-radius: 7px; font-size: .89rem; }
+  .source summary { cursor: pointer; padding: 13px 17px; font-weight: 650; }
+  .source summary:focus-visible { outline-offset: -3px; }
+  .source pre { margin: 0; padding: 12px 17px; max-height: 25rem; overflow: auto; border-top: 1px solid var(--line); background: #faf9fc; font: 12px/1.65 var(--mono); }
+  .prompt-table :is(th, td) { text-align: left; }
+  .prompt-table .case-values { margin-top: 2px; white-space: normal; overflow-wrap: anywhere; }
+  .foot { border-top: 1px solid var(--line); }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 37px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font-size: .88rem; font-weight: 635; }
+  .btn:hover { background: #f1eff6; }
+  .btn:disabled { cursor: default; color: #656173; background: #f6f5f8; }
+  .primary { border-color: var(--accent); background: var(--accent); color: white; }
+  .primary:hover { background: var(--accent-hover); }
+  .error { padding: 11px 17px; background: #fbece9; color: var(--down); font-size: .9rem; }
+  h2 { font-size: 1rem; font-weight: 700; letter-spacing: -.015em; }
+  .metric { background: var(--soft); color: #503494; border-radius: 5px; padding: 3px 7px; font: 12px var(--mono); }
+  .results { padding: 17px; }
+  .scores { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin: 0; }
+  .scores > div { background: #f6f4fb; border-radius: 8px; min-width: 0; padding: 9px; }
+  .scores dt { color: var(--muted); font-size: .78rem; }
+  .scores dd { margin: 1px 0 0; font: 650 clamp(1rem, 2.35vw, 1.54rem)/1.4 var(--mono); letter-spacing: -.065em; }
+  .changed { font: 12px/1.5 var(--mono); margin-top: 13px; overflow-wrap: anywhere; }
+  .run-context { margin-top: 4px; }
+  .good { color: var(--up); }
+  .bad { color: var(--down); }
+  table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+  th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; padding-left: 17px; }
+  th:last-child, td:last-child { padding-right: 17px; }
+  th { font-size: .76rem; color: var(--muted); font-weight: 650; }
+  td:not(:first-child) { font-family: var(--mono); }
+  tr:last-child td { border-bottom: 0; }
+  .case-label { display: block; }
+  .case-values { display: block; font: 11px var(--mono); color: var(--muted); }
+  .history { list-style: none; padding: 0; margin: 0; }
+  .history li + li { border-top: 1px solid var(--line); }
+  .history button { width: 100%; display: flex; align-items: center; gap: 10px; text-align: left; border: 0; background: transparent; color: var(--ink); padding: 10px 17px; }
+  .history button:hover { background: #f6f4fb; }
+  .history button:focus-visible { outline-offset: -3px; }
+  .history button[aria-pressed="true"] { background: var(--soft); }
+  .history .meta { margin-left: auto; font-family: var(--mono); }
+  @media (max-width: 860px) { .workspace { grid-template-columns: 1fr; } }
+  @media (max-width: 500px) {
+    .top > div, main { width: calc(100% - 24px); }
+    main { padding-top: 27px; }
+    .head, .foot, .results, .fields { padding-left: 12px; padding-right: 12px; }
+    th, td { padding-right: 5px; padding-left: 5px; }
+    th:first-child, td:first-child { padding-left: 12px; }
+    th:last-child, td:last-child { padding-right: 12px; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div><span class="mark" aria-hidden="true">T</span><span class="brand">Tune</span><span class="crumb">Study</span><span class="runtime">Browser demo</span></div>
+</header>
+<main>
+  <nav class="templates" aria-label="Study template">
+    <button class="btn" type="button" data-template="prompt" aria-controls="prompt-study" aria-pressed="true">Prompt comparison</button>
+    <button class="btn" type="button" data-template="batch" aria-controls="batch-study" aria-pressed="false">Batch sizing</button>
+  </nav>
+  <section id="prompt-study" aria-labelledby="prompt-title">
+    <header class="intro">
+      <h1 id="prompt-title">Prompt comparison</h1>
+      <p>Give two models the same prompt and score their answers on the same cases.</p>
+    </header>
+    <div class="workspace">
+      <div class="column">
+        <section class="card" aria-labelledby="prompt-setup">
+          <header class="head"><h2 id="prompt-setup">Study setup</h2><span class="meta">Mock outputs · zero model calls</span></header>
+          <form id="prompt-form">
+            <div class="fields">
+              <div class="field full">
+                <label for="prompt">Prompt</label>
+                <select id="prompt" aria-describedby="prompt-text">
+                  <option value="short">Classify ticket</option>
+                  <option value="guided">Classify with category rules</option>
+                </select>
+                <p class="prompt-text" id="prompt-text"></p>
+              </div>
+              <div class="field">
+                <label for="model-a">Model A</label>
+                <select id="model-a"></select>
+              </div>
+              <div class="field">
+                <label for="model-b">Model B</label>
+                <select id="model-b"></select>
+              </div>
+            </div>
+            <p class="error" id="prompt-error" role="alert" hidden>Choose two different models.</p>
+            <div class="foot">
+              <span class="meta" id="prompt-status" role="status">4 test cases</span>
+              <button class="btn primary" type="submit">Compare sample outputs</button>
+            </div>
+          </form>
+        </section>
+        <details class="card source">
+          <summary>View Elixir source</summary>
+          <pre><code id="prompt-source"></code></pre>
+        </details>
+        <section class="card" aria-labelledby="prompt-history-title">
+          <header class="head"><h2 id="prompt-history-title">Run history</h2><span class="meta" id="prompt-run-count"></span></header>
+          <ul class="history" id="prompt-history"></ul>
+        </section>
+      </div>
+      <div class="column">
+        <section class="card" aria-labelledby="prompt-result-title">
+          <header class="head"><h2 id="prompt-result-title">Comparison</h2><span class="metric">exact match</span></header>
+          <div class="results" aria-live="polite">
+            <dl class="scores">
+              <div><dt id="name-a"></dt><dd id="score-a"></dd></div>
+              <div><dt id="name-b"></dt><dd id="score-b"></dd></div>
+              <div><dt>Different answers</dt><dd id="different-answers"></dd></div>
+            </dl>
+            <p class="meta run-context" id="prompt-run-context"></p>
+          </div>
+        </section>
+        <section class="card" aria-labelledby="prompt-cases-title">
+          <header class="head"><h2 id="prompt-cases-title">Test cases and answers</h2></header>
+          <table class="prompt-table" aria-labelledby="prompt-cases-title">
+            <thead><tr><th scope="col">Ticket / expected</th><th scope="col" id="column-a"></th><th scope="col" id="column-b"></th></tr></thead>
+            <tbody id="prompt-rows"></tbody>
+          </table>
+        </section>
+      </div>
+    </div>
+  </section>
+  <section id="batch-study" aria-labelledby="batch-title" hidden>
+    <header class="intro">
+      <h1 id="batch-title">Batch sizing</h1>
+      <p>Compare batch and worker settings on the same test cases.</p>
+    </header>
+    <div class="workspace">
+    <div class="column">
+      <section class="card" aria-labelledby="candidate-title">
+        <header class="head">
+          <h2 id="candidate-title">Candidate</h2>
+          <span class="edit-state" id="edit-state" role="status"></span>
+        </header>
+        <form id="candidate" novalidate>
+          <div class="fields">
+            <div class="field">
+              <label for="batch-size">Batch size</label>
+              <input id="batch-size" type="number" min="1" max="64" step="1" required aria-describedby="batch-range">
+              <span class="meta" id="batch-range">1–64 items per batch</span>
+            </div>
+            <div class="field">
+              <label for="workers">Workers</label>
+              <input id="workers" type="number" min="1" max="16" step="1" required aria-describedby="worker-range">
+              <span class="meta" id="worker-range">1–16 parallel workers</span>
+            </div>
+          </div>
+          <p class="error" id="error" role="alert" hidden></p>
+          <div class="foot">
+            <span class="meta" id="baseline-label"></span>
+            <div class="controls">
+              <button class="btn" id="pin" type="button">Set as baseline</button>
+              <button class="btn primary" type="submit">Run comparison</button>
+            </div>
+          </div>
+        </form>
+      </section>
+      <details class="card source">
+        <summary>View Elixir source</summary>
+        <pre><code id="batch-source"></code></pre>
+      </details>
+      <section class="card" aria-labelledby="history-title">
+        <header class="head"><h2 id="history-title">Run history</h2><span class="meta" id="run-count"></span></header>
+        <ul class="history" id="history"></ul>
+      </section>
+    </div>
+    <div class="column">
+      <section class="card" aria-labelledby="result-title">
+        <header class="head"><h2 id="result-title">Comparison</h2><span class="metric">throughput</span></header>
+        <div class="results" aria-live="polite">
+          <dl class="scores">
+            <div><dt>Baseline</dt><dd id="baseline-score"></dd></div>
+            <div><dt>Candidate</dt><dd id="candidate-score"></dd></div>
+            <div><dt>Change</dt><dd id="delta"></dd></div>
+          </dl>
+          <p class="changed" id="changed"></p>
+          <p class="meta run-context" id="run-context"></p>
+        </div>
+      </section>
+      <section class="card" aria-labelledby="cases-title">
+        <header class="head"><h2 id="cases-title">Test cases</h2><span class="meta" id="case-count"></span></header>
+        <table aria-labelledby="cases-title">
+          <thead><tr><th scope="col">Case</th><th scope="col">Baseline</th><th scope="col">Candidate</th><th scope="col">Change</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </section>
+    </div>
+    </div>
+  </section>
+</main>
+<script>
+  const byId = (id) => document.getElementById(id);
+  const form = byId("candidate");
+  const batchSize = byId("batch-size");
+  const workers = byId("workers");
+  const cases = [
+    { name: "Small batch", size: 2, workers: 1 },
+    { name: "Incoming queue", size: 4, workers: 2 },
+    { name: "Steady load", size: 6, workers: 2 },
+    { name: "Burst load", size: 8, workers: 3 },
+    { name: "Backfill", size: 10, workers: 3 },
+    { name: "Large import", size: 12, workers: 3 }
+  ];
+
+  let baseline = { batch: 4, workers: 1 };
+  let runNumber = 0;
+  let selected;
+  const runs = [];
+
+  function compare(candidate) {
+    const original = { ...baseline };
+    const score = (config, item) =>
+      100 - Math.abs(config.batch - item.size) - 3 * Math.abs(config.workers - item.workers);
+    const rows = cases.map((item) => ({
+      ...item, baseline: score(original, item), candidate: score(candidate, item)
+    }));
+    const average = (key) => rows.reduce((sum, row) => sum + row[key], 0) / rows.length;
+    return {
+      number: ++runNumber, baseline: original, candidate, rows,
+      baselineScore: average("baseline"), candidateScore: average("candidate")
+    };
+  }
+
+  function currentConfig() {
+    return { batch: batchSize.valueAsNumber, workers: workers.valueAsNumber };
+  }
+
+  function sameConfig(a, b) {
+    return a.batch === b.batch && a.workers === b.workers;
+  }
+
+  function renderCandidate() {
+    const current = currentConfig();
+    const changed = !sameConfig(current, selected.candidate);
+    byId("edit-state").textContent = changed ? "Edited" : `From run ${selected.number}`;
+    byId("pin").disabled = sameConfig(current, baseline);
+    byId("baseline-label").textContent = `Baseline · batch ${baseline.batch} / workers ${baseline.workers}`;
+    const batch = batchSize.validity.valid ? current.batch : "nil";
+    const workerCount = workers.validity.valid ? current.workers : "nil";
+    const rows = cases.map((item) => `{${item.size}, ${item.workers}}`).join(", ");
+    byId("batch-source").textContent = `config = %{batch_size: ${batch}, workers: ${workerCount}}
+
+throughput = fn config, {size, workers} ->
+  100 - abs(config.batch_size - size) -
+    3 * abs(config.workers - workers)
+end
+
+config
+|> Tune.new(run: throughput)
+|> Tune.data(test: [${rows}])
+|> Tune.score(:throughput, & &1)
+|> Tune.evaluate(:test)`;
+  }
+
+  function signed(value, decimals) {
+    return `${value > 0 ? "+" : ""}${value.toFixed(decimals)}`;
+  }
+
+  function color(value) {
+    return value > 0 ? "good" : value < 0 ? "bad" : "";
+  }
+
+  function renderResult() {
+    const delta = selected.candidateScore - selected.baselineScore;
+    byId("baseline-score").textContent = selected.baselineScore.toFixed(1);
+    byId("candidate-score").textContent = selected.candidateScore.toFixed(1);
+    byId("delta").textContent = signed(delta, 1);
+    byId("delta").className = color(delta);
+    const up = selected.rows.filter((row) => row.candidate > row.baseline).length;
+    const down = selected.rows.filter((row) => row.candidate < row.baseline).length;
+    byId("changed").textContent = `${up} improved · ${down} regressed · ${selected.rows.length - up - down} unchanged`;
+    byId("run-context").textContent = `Run ${selected.number} baseline: batch ${selected.baseline.batch} / workers ${selected.baseline.workers}`;
+    byId("case-count").textContent = `${selected.rows.length} paired cases`;
+    byId("rows").replaceChildren(...selected.rows.map((row) => {
+      const tr = document.createElement("tr");
+      const cell = tr.insertCell();
+      const label = document.createElement("span");
+      label.className = "case-label";
+      label.textContent = row.name;
+      const values = document.createElement("span");
+      values.className = "case-values";
+      values.textContent = `batch ${row.size} / workers ${row.workers}`;
+      cell.append(label, values);
+      tr.insertCell().textContent = row.baseline;
+      tr.insertCell().textContent = row.candidate;
+      const difference = row.candidate - row.baseline;
+      const change = tr.insertCell();
+      change.className = color(difference);
+      change.textContent = signed(difference, 0);
+      return tr;
+    }));
+
+    renderHistory("history", "run-count", runs, selected,
+      (run) => `batch ${run.candidate.batch} / workers ${run.candidate.workers}`);
+  }
+
+  function renderHistory(listId, countId, entries, active, description) {
+    byId(countId).textContent = `${entries.length} ${entries.length === 1 ? "run" : "runs"}`;
+    byId(listId).replaceChildren(...entries.map((run) => {
+      const li = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.run = run.number;
+      button.setAttribute("aria-pressed", String(run === active));
+      const title = document.createElement("span");
+      title.textContent = `Run ${run.number}`;
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = description(run);
+      button.append(title, meta);
+      li.append(button);
+      return li;
+    }));
+  }
+
+  function selectRun(run) {
+    selected = run;
+    batchSize.value = run.candidate.batch;
+    workers.value = run.candidate.workers;
+    clearError();
+    renderCandidate();
+    renderResult();
+  }
+
+  function clearError() {
+    byId("error").hidden = true;
+    batchSize.removeAttribute("aria-invalid");
+    workers.removeAttribute("aria-invalid");
+  }
+
+  function attempt(action) {
+    clearError();
+    const invalid = form.querySelector("input:invalid");
+    if (invalid) {
+      const error = byId("error");
+      error.textContent = invalid === batchSize
+        ? "Enter a whole batch size from 1 to 64."
+        : "Enter a whole worker count from 1 to 16.";
+      invalid.setAttribute("aria-invalid", "true");
+      error.hidden = false;
+      invalid.focus();
+      return;
+    }
+    action(currentConfig());
+  }
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    attempt((config) => {
+      const run = compare(config);
+      runs.unshift(run);
+      selectRun(run);
+    });
+  });
+  byId("pin").addEventListener("click", () => attempt((config) => {
+    baseline = config;
+    renderCandidate();
+    form.querySelector('button[type="submit"]').focus();
+  }));
+  byId("history").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-run]");
+    if (!button) return;
+    const run = runs.find((item) => item.number === Number(button.dataset.run));
+    if (!sameConfig(currentConfig(), selected.candidate) &&
+        !window.confirm("Discard your edits and open this run?")) return;
+    selectRun(run);
+    byId("history").querySelector(`[data-run="${run.number}"]`).focus();
+  });
+  form.addEventListener("input", () => {
+    clearError();
+    renderCandidate();
+  });
+
+  runs.unshift(compare({ batch: 7, workers: 2 }));
+  selectRun(runs[0]);
+
+  const models = {
+    lfm: { name: "LFM3 1.7B", id: "lmstudio:lfm3-1.7b" },
+    qwen: { name: "Qwen 27B", id: "lmstudio:qwen/qwen3.8-27b" }
+  };
+  const prompts = {
+    short: {
+      label: "Classify ticket",
+      text: "Classify this support ticket as billing, bug, or account.",
+      answers: {
+        lfm: ["billing", "bug", "bug", "account"],
+        qwen: ["billing", "bug", "account", "account"]
+      }
+    },
+    guided: {
+      label: "Classify with category rules",
+      text: "Use billing for payments, bug for broken features, and account for sign-in or profile changes.",
+      answers: {
+        lfm: ["billing", "bug", "account", "account"],
+        qwen: ["billing", "bug", "account", "billing"]
+      }
+    }
+  };
+  const tickets = [
+    { text: "I was charged twice for my subscription.", expected: "billing" },
+    { text: "The app crashes when I upload a file.", expected: "bug" },
+    { text: "I used the wrong email to sign up.", expected: "account" },
+    { text: "I need a copy of last month's invoice.", expected: "billing" }
+  ];
+  const promptForm = byId("prompt-form");
+  const promptSelect = byId("prompt");
+  const modelA = byId("model-a");
+  const modelB = byId("model-b");
+  const promptRuns = [];
+  let promptRun;
+
+  for (const [key, model] of Object.entries(models)) {
+    modelA.add(new Option(model.name, key));
+    modelB.add(new Option(model.name, key));
+  }
+  modelB.value = "qwen";
+
+  function refreshPrompt() {
+    const preset = prompts[promptSelect.value];
+    byId("prompt-text").textContent = preset.text;
+    byId("prompt-error").hidden = true;
+    modelB.removeAttribute("aria-invalid");
+    const changed = promptRun && (promptRun.preset !== promptSelect.value ||
+      promptRun.a !== modelA.value || promptRun.b !== modelB.value);
+    byId("prompt-status").textContent = changed ? "Ready to compare new settings" : `${tickets.length} test cases`;
+
+    const rows = tickets.map(({ text, expected }) =>
+      `  %{input: %{ticket: ${JSON.stringify(text)}}, expected: %{"label" => "${expected}"}}`).join(",\n");
+    byId("prompt-source").textContent = `# Example for a connected Tune host
+{:ok, predictor} =
+  Tune.Predictor.new(
+    signature: [
+      instructions: ${JSON.stringify(preset.text)},
+      inputs: [ticket: Zoi.string()],
+      outputs: [label: Zoi.enum(["billing", "bug", "account"])]
+    ]
+  )
+
+test = [
+${rows}
+]
+
+models = [
+  "${models[modelA.value].id}",
+  "${models[modelB.value].id}"
+]
+
+for model <- models do
+  predictor
+  |> Tune.new(model: [model: model, adapter: Tune.Adapter.Chat])
+  |> Tune.data(test: test)
+  |> Tune.score(:exact_match, fn row, output ->
+    if output["label"] == row.expected["label"], do: 1, else: 0
+  end)
+  |> Tune.evaluate(:test)
+end`;
+  }
+
+  function renderPromptRun(run) {
+    promptRun = run;
+    promptSelect.value = run.preset;
+    modelA.value = run.a;
+    modelB.value = run.b;
+    refreshPrompt();
+
+    const preset = prompts[run.preset];
+    const a = preset.answers[run.a];
+    const b = preset.answers[run.b];
+    const correct = (answers) => tickets.filter((ticket, index) => ticket.expected === answers[index]).length;
+    byId("name-a").textContent = models[run.a].name;
+    byId("name-b").textContent = models[run.b].name;
+    byId("column-a").textContent = models[run.a].name;
+    byId("column-b").textContent = models[run.b].name;
+    byId("score-a").textContent = `${correct(a)}/${tickets.length}`;
+    byId("score-b").textContent = `${correct(b)}/${tickets.length}`;
+    byId("different-answers").textContent = a.filter((answer, index) => answer !== b[index]).length;
+    byId("prompt-run-context").textContent = `Run ${run.number} · ${preset.label} · sample outputs`;
+
+    byId("prompt-rows").replaceChildren(...tickets.map((ticket, index) => {
+      const row = document.createElement("tr");
+      const input = row.insertCell();
+      const expected = document.createElement("span");
+      expected.className = "case-values";
+      expected.textContent = `Expected: ${ticket.expected}`;
+      input.append(ticket.text, expected);
+
+      for (const answer of [a[index], b[index]]) {
+        const cell = row.insertCell();
+        const matched = answer === ticket.expected;
+        cell.textContent = answer;
+        const status = document.createElement("span");
+        status.className = `case-values ${matched ? "good" : "bad"}`;
+        status.textContent = matched ? "Match" : "Miss";
+        cell.append(status);
+      }
+      return row;
+    }));
+
+    renderHistory("prompt-history", "prompt-run-count", promptRuns, run,
+      (entry) => `${models[entry.a].name} / ${models[entry.b].name} · ${prompts[entry.preset].label}`);
+  }
+
+  function runPrompt() {
+    if (modelA.value === modelB.value) {
+      byId("prompt-error").hidden = false;
+      modelB.setAttribute("aria-invalid", "true");
+      modelB.focus();
+      return;
+    }
+    const run = {
+      number: promptRuns.length + 1, preset: promptSelect.value, a: modelA.value, b: modelB.value
+    };
+    promptRuns.unshift(run);
+    renderPromptRun(run);
+  }
+
+  promptForm.addEventListener("change", refreshPrompt);
+  promptForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runPrompt();
+  });
+  byId("prompt-history").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-run]");
+    if (!button) return;
+    renderPromptRun(promptRuns.find((run) => run.number === Number(button.dataset.run)));
+    byId("prompt-history").querySelector(`[data-run="${button.dataset.run}"]`).focus();
+  });
+
+  const templates = document.querySelectorAll("[data-template]");
+  for (const button of templates) {
+    button.addEventListener("click", () => {
+      for (const option of templates) {
+        const active = option === button;
+        option.setAttribute("aria-pressed", String(active));
+        byId(option.getAttribute("aria-controls")).hidden = !active;
+      }
+    });
+  }
+
+  runPrompt();
+</script>
+</body>
+</html>

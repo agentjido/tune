@@ -1,5 +1,11 @@
 # Programs and evaluation
 
+Use a typed predictor when your application expects named inputs and outputs
+from a model. Start with the runnable
+[support ticket example](getting_started.md#preview-a-prompt-and-score-a-saved-answer)
+to check your prompt and metric with saved answers before you evaluate a live
+model.
+
 ## Typed predictors
 
 A `Tune.Predictor` has one typed signature. The signature declares ordered
@@ -85,7 +91,8 @@ end
 
 The application declares its predictors and learned values through the other
 `Tune.Program` callbacks. Tune can then update those values without changing
-the program code.
+the program code. Make managed calls from the process running the program.
+Use evaluation concurrency for parallel calls across cases.
 
 ## Data and scores
 
@@ -93,7 +100,8 @@ the program code.
 an Enumerable or a zero-arity function that returns an Enumerable. Tune reads
 each search split once per run. Each candidate uses the same validation cases.
 Set `cases` for an infinite source. An evaluation count limits candidate work
-and does not limit data ingestion.
+and does not limit data ingestion. With `cases: 0`, Tune leaves the source
+unopened.
 
 ```elixir
 pipeline =
@@ -197,16 +205,21 @@ version. Check each metric's `paired_count` against `length(report.case_ids)`.
 The underlying evaluations keep all observed scores, errors, model calls,
 and token use. Use `Tune.evaluate/1` to score saved responses.
 
-The two evaluations share one model-call budget and deadline. The baseline
-runs first. If a limit stops either pass, the report keeps the available
-evidence and sets `complete?` to false. A case limit defines the size of
-the shared snapshot.
+Tune checks both typed targets before running either one. They must have
+matching input and output fields. The deadline covers reading the shared
+dataset and evaluating both versions.
+The baseline runs first. Both passes share one model-call budget. If a limit
+stops the comparison, the report keeps the available evidence and sets
+`complete?` to false. A case limit defines the size of the shared snapshot.
 
-Concurrent workers reserve calls before they start. After a worker returns,
-its unused reservation can fund another row. When cancellation or the
-deadline stops an active row, its observation has status `:interrupted`
-and records the stop reason. A row that reached its own timeout is a row
-error.
+With a total `model_calls` limit, Tune runs rows one at a time unless you set
+`row_calls`. Set `row_calls` to the maximum calls per row to run concurrent
+rows under that budget. Concurrent workers reserve the full amount per row.
+If the remaining budget is smaller, Tune runs one row with the remaining
+calls. When a row reaches its own cap and the shared budget still has calls,
+Tune records a row error and continues. When cancellation or the deadline
+stops an active row, its observation has status `:interrupted` and records
+the stop reason. A row that reached its own timeout is a row error.
 
 A complete comparison can contain failed or unpaired metrics. Require a
 valid pair on each critical case before making a release decision.
@@ -215,8 +228,13 @@ valid pair on each critical case before making a release decision.
 
 `Tune.evaluate/2` uses test data by default. Pass `:train`, `:validation`, or
 `:test` to select another role.
-If reading a dataset raises an exception, Tune returns a
-`Tune.Error.Invalid.Dataset` with the split and the original exception.
+If a data factory or stream raises an exception, evaluation, comparison, and
+search return a `Tune.Error.Invalid.Dataset` with the split and original
+exception. If a deadline or cancellation stops a streaming evaluation,
+the evaluation keeps the rows it already scored.
+
+Tune reads datasets in a worker. A factory should open any process-owned
+resources inside the factory so the same worker can read from them.
 Invalid saved rows that Tune can read still appear as individual row errors.
 
 It returns `%Tune.Evaluation{}` with:

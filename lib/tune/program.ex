@@ -66,25 +66,30 @@ defmodule Tune.Program do
   @doc false
   @spec invoke(t(), map(), Execution.t()) ::
           {:ok, map(), Execution.t()} | {:error, term(), Execution.t()}
-  def invoke(%Predictor{}, inputs, execution), do: Execution.predict(execution, @root, inputs)
+  def invoke(program, inputs, %Execution{journal: journal} = execution) do
+    case call(program, inputs, execution) do
+      {:ok, output, %Execution{journal: ^journal} = updated} when is_map(output) ->
+        {:ok, output, updated}
 
-  def invoke(%module{} = program, inputs, execution) do
-    case module.call(program, inputs, execution) do
-      {:ok, output, %Execution{} = execution} when is_map(output) ->
-        {:ok, output, execution}
-
-      {:error, error, %Execution{} = execution} ->
-        {:error, error, execution}
+      {:error, error, %Execution{journal: ^journal} = updated} ->
+        {:error, error, updated}
 
       other ->
         {:error,
          Error.Execution.Callback.exception(
            message:
-             "#{inspect(module)}.call/3 must return {:ok, map, execution} or {:error, error, execution}",
+             "#{inspect(program.__struct__)} must return {:ok, map, execution} or {:error, error, execution} with the same run state",
            value: other
          ), execution}
     end
+  rescue
+    error -> {:error, error, execution}
+  catch
+    kind, reason -> {:error, {kind, reason}, execution}
   end
+
+  defp call(%Predictor{}, inputs, execution), do: Execution.predict(execution, @root, inputs)
+  defp call(%module{} = program, inputs, execution), do: module.call(program, inputs, execution)
 
   @doc "Returns true when two signatures have the same field names and schemas."
   @spec same_fields?(Signature.t(), Signature.t()) :: boolean()

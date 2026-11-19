@@ -54,7 +54,7 @@ defmodule Tune.UI.Evidence do
     "#{inspect(module)}.#{name}/#{arity}"
   end
 
-  defp model_configs(pipeline) do
+  def model_configs(pipeline) do
     targets =
       for {role, value} <- pipeline.models, {:ok, config} <- [ModelConfig.new(value)] do
         role = if role == :model, do: :target, else: role

@@ -47,21 +47,23 @@ if Code.ensure_loaded?(PhoenixPlayground) do
           <a class="btn btn-outline btn-sm" href={"/studies/#{@run.study_id}/run"}>Run setup</a>
         </div>
         <div class="stats stats-vertical mb-6 w-full border border-base-300 bg-base-100 shadow-sm md:stats-horizontal">
-          <div class="stat"><div class="stat-title">Status</div><div class="stat-value text-2xl">{@run.status}</div></div>
+          <div class="stat"><div class="stat-title">Status</div><div class="stat-value text-2xl" role="status">{@run.status}</div></div>
           <div class="stat"><div class="stat-title">Mode</div><div class="stat-value text-2xl">{@run.mode}</div></div>
           <div :if={@view && @view.score} class="stat"><div class="stat-title">Selected score</div><div class="stat-value text-2xl text-success">{@view.score}</div></div>
           <div :if={@duration} class="stat"><div class="stat-title">Duration</div><div class="stat-value text-2xl">{@duration}s</div></div>
         </div>
         <div class="mb-4 flex flex-wrap items-center gap-3">
+          <div role="status" class="flex flex-wrap gap-3">
           <span>Rows: {@run.progress.rows}</span>
           <span :if={@run.mode == :tune}>Candidates: {@run.progress.candidates}</span>
           <span :if={@run.mode == :tune}>Generations: {@run.progress.generations}</span>
+          </div>
           <button :if={@run.status in [:queued, :running]} class="btn btn-sm btn-outline"
-            disabled={@run.cancel_requested?} phx-click="cancel">Cancel</button>
+            disabled={@run.cancel_requested?} phx-click="cancel" phx-disable-with="Cancelling…">{if @run.cancel_requested?, do: "Cancelling…", else: "Cancel"}</button>
         </div>
         <div :if={@run.error} class="alert alert-error mb-6">{error_message(@run.error)}</div>
         <div :if={@comparison_error} class="alert alert-error mb-6">{error_message(@comparison_error)}</div>
-        <.compare_form :if={@compare_splits} splits={@compare_splits} />
+        <.compare_form :if={@comparison} comparison={@comparison} />
         <.comparison_report :if={@run.mode == :compare && @run.result} report={@run.result} />
         <section :if={@view} class="card mb-6 border border-base-300 bg-base-100 shadow-sm">
           <div class="card-body gap-6">
@@ -87,14 +89,30 @@ if Code.ensure_loaded?(PhoenixPlayground) do
             <div :if={@view.rows != []} class="overflow-x-auto">
               <h3 class="mb-2 font-semibold">Row results</h3>
               <table class="table table-sm">
-                <thead><tr><th>Row</th><th>Status</th><th>Score</th><th>Expected</th><th>Output</th></tr></thead>
+                <thead><tr><th>Row</th><th>Execution</th><th>Exact match</th><th>Score</th><th>Expected</th><th>Output</th><th>Details</th></tr></thead>
                 <tbody>
                   <tr :for={row <- @view.rows}>
                     <td>{row.id}</td>
-                    <td><span class={["badge", row_badge_class(row.status)]}>{row.status}</span></td>
+                    <td><span class={["badge", row_badge_class(row.status)]}>{execution_label(row.status)}</span></td>
+                    <td>{row.match}</td>
                     <td>{format_number(row.score)}</td>
                     <td><code class="text-xs">{inspect(row.expected, limit: 8)}</code></td>
                     <td><code class="text-xs">{inspect(row.output, limit: 8)}</code></td>
+                    <td>
+                      <details>
+                        <summary class="link">Row {row.id} details</summary>
+                        <dl class="space-y-2 min-w-44">
+                          <dt class="font-semibold">Input</dt>
+                          <dd><pre class="whitespace-pre-wrap break-all">{inspect_full(row.input)}</pre></dd>
+                          <dt class="font-semibold">Full output</dt>
+                          <dd><pre class="whitespace-pre-wrap break-all">{inspect_full(row.output)}</pre></dd>
+                          <dt :if={row.responses != []} class="font-semibold">Model responses</dt>
+                          <dd :for={response <- row.responses}><pre class="whitespace-pre-wrap break-all">{response}</pre></dd>
+                          <dt :if={row.errors != []} class="font-semibold">Errors</dt>
+                          <dd :for={error <- row.errors} class="whitespace-pre-wrap break-all">{error}</dd>
+                        </dl>
+                      </details>
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -104,22 +122,16 @@ if Code.ensure_loaded?(PhoenixPlayground) do
                 <h3 class="font-semibold">Score</h3>
                 <.chart
                   id={"#{@run.id}-score-chart"}
-                  type="bar"
                   labels={@view.score_labels}
-                  series={[%{name: "Score", data: @view.score_values}]}
-                  height={240}
-                  class="min-h-60 w-full"
+                  values={@view.score_values}
                 />
               </div>
               <div class="rounded-box border border-base-300 p-4">
                 <h3 class="font-semibold">Rows</h3>
                 <.chart
                   id={"#{@run.id}-rows-chart"}
-                  type="donut"
                   labels={@view.status_labels}
-                  series={@view.status_values}
-                  height={240}
-                  class="min-h-60 w-full"
+                  values={@view.status_values}
                 />
               </div>
             </div>
@@ -286,16 +298,16 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         run: run,
         view: result_view(run.result),
         duration: duration(run),
-        compare_splits: compare_splits(run),
+        comparison: report_comparison(run),
         comparison_error: nil
       )
     end
 
-    defp compare_splits(%{mode: :tune, status: :completed, result: %Tune.Result{}} = run) do
-      Tune.UI.Runner.available_splits(Tune.UI.Store.get_study(run.study_id))
+    defp report_comparison(%{mode: :tune, status: :completed, result: %Tune.Result{}} = run) do
+      comparison_setup(run, Tune.UI.Store.get_study(run.study_id))
     end
 
-    defp compare_splits(_run), do: nil
+    defp report_comparison(_run), do: nil
 
     defp result_view(nil), do: nil
 
@@ -344,7 +356,7 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         score_labels: labels,
         score_values: values,
         improvement: improvement,
-        status_labels: Enum.map(status_labels, &to_string/1),
+        status_labels: Enum.map(status_labels, &execution_label/1),
         status_values: status_values,
         calls: call_count(Keyword.get(overrides, :calls, evaluation.calls)),
         tokens: Keyword.get(overrides, :usage, evaluation.usage)[:total] || 0,
@@ -360,9 +372,39 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         id: observation.id,
         status: observation.status,
         score: observation.metadata[:selected_score] || first_score(observation.scores),
+        match: exact_match(observation),
+        input: tune_case && tune_case.input,
+        responses: response_texts(observation.prediction),
+        errors:
+          Enum.map(
+            Enum.reject([observation.error | Map.values(observation.score_errors)], &is_nil/1),
+            &error_message/1
+          ),
         expected: tune_case && tune_case.expected,
         output: observation.output
       }
+    end
+
+    defp execution_label(:ok), do: "Completed"
+    defp execution_label(status), do: status |> to_string() |> String.capitalize()
+
+    defp exact_match(%{status: :ok, scores: %{exact_match: score}}) when score == 1, do: "Match"
+
+    defp exact_match(%{status: :ok, scores: %{exact_match: score}}) when score == 0,
+      do: "Mismatch"
+
+    defp exact_match(_observation), do: "—"
+
+    defp inspect_full(value),
+      do: inspect(value, pretty: true, limit: :infinity, printable_limit: :infinity)
+
+    defp response_texts(nil), do: []
+
+    defp response_texts(prediction) do
+      for %{response: %ReqLLM.Response{} = response} <- prediction.steps,
+          text = ReqLLM.Response.text(response),
+          text not in [nil, ""],
+          do: text
     end
 
     defp first_score(scores) when map_size(scores) == 0, do: nil

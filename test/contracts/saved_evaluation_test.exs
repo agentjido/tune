@@ -189,7 +189,7 @@ defmodule Tune.Contracts.SavedEvaluationTest do
     sources = [fn -> raise "saved file is unavailable" end, fn -> :unavailable end]
 
     for source <- sources do
-      assert {:error, %Tune.Error.Invalid.Option{option: :test}} =
+      assert {:error, %Tune.Error.Invalid.Dataset{split: :test}} =
                source
                |> Tune.replay()
                |> Tune.score(:value, fn _row, _output -> flunk("scored invalid data") end)

@@ -1,18 +1,24 @@
 defmodule Tune.MixProject do
   use Mix.Project
 
+  @version "0.5.0"
+  @source_url "https://github.com/mikehostetler/tune"
+  @description "Evaluation and search pipelines for Elixir"
+
   def project do
     [
       app: :tune,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.18",
-      description: "Typed and optimizable language-model programs built on ReqLLM",
+      description: @description,
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       aliases: aliases(),
-      dialyzer: [plt_add_apps: [:mix, :llm_db], exclude_paths: ["test/support"]],
+      dialyzer: [plt_add_apps: [:mix], exclude_paths: ["test/support"]],
       name: "Tune",
+      source_url: @source_url,
+      package: package(),
       docs: docs()
     ]
   end
@@ -20,15 +26,35 @@ defmodule Tune.MixProject do
   defp docs do
     [
       main: "readme",
+      source_ref: "v#{@version}",
       extras: [
         "README.md",
+        "guides/getting_started.md",
         "guides/programs.md",
         "guides/optimizers.md",
         "guides/compatibility.md",
         "guides/artifacts.md",
         "guides/host_integration.md",
-        "guides/ui.md"
+        "guides/ui.md",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md"
       ]
+    ]
+  end
+
+  defp package do
+    [
+      licenses: ["Apache-2.0"],
+      maintainers: ["Mike Hostetler"],
+      links: %{
+        "GitHub" => @source_url,
+        "Documentation" => "https://hexdocs.pm/tune",
+        "Changelog" => "https://hexdocs.pm/tune/changelog.html",
+        "Issues" => "#{@source_url}/issues"
+      },
+      files:
+        ~w(lib mix.exs .formatter.exs README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md guides)
     ]
   end
 
@@ -46,11 +72,12 @@ defmodule Tune.MixProject do
   defp deps do
     [
       {:req_llm, "~> 1.30"},
+      {:llm_db, "~> 2026.11.0"},
       {:zoi, "~> 0.19"},
       {:splode, "~> 0.3"},
       {:req, "~> 0.7"},
       {:phoenix_playground, "~> 0.1.9", optional: true},
-      {:plug, "~> 1.18", optional: true},
+      {:plug, "~> 1.20 and >= 1.20.4", optional: true},
       {:nx, "~> 1.0", only: :test},
       {:axon, "~> 0.9", only: :test},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},

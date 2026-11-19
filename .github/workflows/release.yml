@@ -1,0 +1,170 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to Hex and create a GitHub release
+        type: boolean
+        default: false
+
+concurrency:
+  group: tune-hex-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  HEX_VERSION: "2.7.0"
+
+jobs:
+  verify:
+    name: Verify release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check version and exact commit
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != tag || ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Dispatch this workflow from a vMAJOR.MINOR.PATCH tag." >&2
+            exit 1
+          fi
+
+          version="${GITHUB_REF_NAME#v}"
+          commit="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$commit" origin/main
+          grep -Fxq "  @version \"$version\"" mix.exs
+          grep -Fxq "## $version" CHANGELOG.md
+
+          if ! conclusion="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main \
+            --commit "$commit" --event push --limit 1 --json conclusion --jq '.[0].conclusion // ""')"; then
+            echo "Could not verify CI for the tagged commit." >&2
+            exit 1
+          fi
+          if [[ "$conclusion" != success ]]; then
+            echo "The latest CI run from a push to main for the tagged commit must pass." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20.4"
+          install-hex: false
+      - run: mix local.hex "$HEX_VERSION" --force
+      - run: mix deps.get
+      - run: mix hex.audit
+      - run: bash .github/scripts/check-package.sh "$RUNNER_TEMP/tune-hex"
+      - run: mix hex.publish --dry-run --yes
+        env:
+          HEX_API_KEY: dry-run
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tune-hex
+          path: ${{ runner.temp }}/tune-hex
+
+  publish:
+    name: Publish to Hex
+    if: ${{ inputs.publish }}
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: hex-publish
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20.4"
+          install-hex: false
+      - run: mix local.hex "$HEX_VERSION" --force
+      - run: mix deps.get
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tune-hex
+          path: ${{ runner.temp }}/tune-hex
+      - name: Confirm package files match the verified build
+        run: |
+          check_dir="$(mktemp -d)"
+          trap 'rm -rf "$check_dir"' EXIT
+          mix hex.build --output "$check_dir/tune.tar"
+          tar -xf "$check_dir/tune.tar" -C "$check_dir"
+          LC_ALL=C tar -tzf "$check_dir/contents.tar.gz" | LC_ALL=C sort > "$check_dir/manifest.txt"
+          cmp "$RUNNER_TEMP/tune-hex/manifest.txt" "$check_dir/manifest.txt"
+          tar -xOf "$RUNNER_TEMP/tune-hex/tune.tar" contents.tar.gz > "$check_dir/verified.tar.gz"
+          mkdir "$check_dir/verified" "$check_dir/current"
+          tar -xzf "$check_dir/verified.tar.gz" -C "$check_dir/verified"
+          tar -xzf "$check_dir/contents.tar.gz" -C "$check_dir/current"
+          diff -qr "$check_dir/verified" "$check_dir/current"
+          tar -xOf "$RUNNER_TEMP/tune-hex/tune.tar" metadata.config > "$check_dir/verified.config"
+          cmp "$check_dir/verified.config" "$check_dir/metadata.config"
+      - name: Publish package and docs
+        run: |
+          if [[ -z "$HEX_API_KEY" ]]; then
+            echo "Configure the Hex publish key in the hex-publish environment." >&2
+            exit 1
+          fi
+          mix hex.publish --yes
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+
+  release:
+    name: Verify Hex and create GitHub release
+    needs: [verify, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20.4"
+      - name: Verify published metadata and docs
+        run: |
+          curl -fsS --retry 5 --retry-all-errors "https://hex.pm/api/packages/tune/releases/$VERSION" \
+            | jq -er '.checksum' > "$RUNNER_TEMP/tune-hex-checksum"
+          curl -fsS --retry 5 --retry-all-errors -o /dev/null "https://hexdocs.pm/tune/$VERSION/"
+      - run: bash .github/scripts/smoke-consumer.sh "$VERSION" core
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            exit 0
+          fi
+          notes="$RUNNER_TEMP/tune-release-notes"
+          awk -v heading="## $VERSION" '
+            $0 == heading { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > "$notes"
+          {
+            printf '\n[Hex](https://hex.pm/packages/tune/%s) · [HexDocs](https://hexdocs.pm/tune/%s/)\n' "$VERSION" "$VERSION"
+            printf '\nHex checksum: `%s`\n' "$(cat "$RUNNER_TEMP/tune-hex-checksum")"
+          } >> "$notes"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Release $GITHUB_REF_NAME" --notes-file "$notes"

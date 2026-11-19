@@ -51,24 +51,23 @@ defmodule Tune.Search.Genetic do
           metadata: %{strategy: :genetic}
         )
 
-      with {:ok, cases} <- Generic.snapshot(data_factory, study, :genetic) do
-        state = %{
-          study: study,
-          config: config,
-          target: target,
-          runner: runner,
-          cases: cases,
-          spaces: spaces,
-          scores: scores,
-          selector: selector,
-          baseline: nil,
-          last_improvement: 0,
-          generation: 0
-        }
+      {cases, study} = Generic.snapshot(data_factory, study)
 
-        state = search(state)
-        result(state)
-      end
+      state = %{
+        study: study,
+        config: config,
+        target: target,
+        runner: runner,
+        cases: cases,
+        spaces: spaces,
+        scores: scores,
+        selector: selector,
+        baseline: nil,
+        last_improvement: 0,
+        generation: 0
+      }
+
+      state |> search() |> result()
     end
   end
 

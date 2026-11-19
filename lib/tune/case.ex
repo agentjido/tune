@@ -64,11 +64,20 @@ defmodule Tune.Case do
   def input_key(%__MODULE__{input: input}), do: Tune.CanonicalJSON.encode!(input)
 
   @doc false
-  def normalize(%__MODULE__{} = row, _index), do: row
-
   def normalize(row, index) do
     tune_case = generic_case(row, index)
-    %{tune_case | id: to_string(tune_case.id)}
+
+    case normalize_id(tune_case.id) do
+      {:ok, id} -> %{tune_case | id: id}
+      :error -> raise Error.Invalid.Definition, message: "row #{index}: invalid case ID"
+    end
+  end
+
+  @doc false
+  def normalize_id(value) do
+    {:ok, to_string(value)}
+  rescue
+    _error in [Protocol.UndefinedError, ArgumentError, UnicodeConversionError] -> :error
   end
 
   defp generic_case(%__MODULE__{} = row, _index), do: row

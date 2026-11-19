@@ -61,10 +61,10 @@ defmodule Tune.Replay do
   end
 
   def normalize_id(value, _opts) do
-    {:ok, to_string(value)}
-  rescue
-    Protocol.UndefinedError -> {:error, "must be convertible to a string"}
-    ArgumentError -> {:error, "must be convertible to a string"}
+    case Case.normalize_id(value) do
+      {:ok, id} -> {:ok, id}
+      :error -> {:error, "must be convertible to a string"}
+    end
   end
 
   defp saved_case(row, index) do

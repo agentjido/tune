@@ -1,18 +1,8 @@
 # Local workbench
 
-Tune includes an optional multi-route web workbench. It uses Phoenix
-Playground. The workbench keeps all studies, runs, and artifacts in memory.
-It binds to `127.0.0.1` and does not store credentials.
-
-The workbench uses the default DaisyUI components and Tailwind browser build
-from jsDelivr. The UI needs network access to load its styles. Tune and the
-workbench routes still run without those assets. The workbench follows the
-operating system light or dark preference and updates when that preference
-changes. It does not include a separate theme switcher.
-
-The workbench uses one small ApexCharts hook for score, score comparison, and row
-status charts. The dashboard lists scores for individual
-runs. Compare only runs that use the same metric and data.
+Use the experimental workbench to preview a prompt, evaluate a study, or
+compare a tuned program with its baseline. The workbench binds to
+`127.0.0.1` and keeps studies, runs, and artifacts in memory.
 
 ## Install
 
@@ -21,7 +11,7 @@ Add Phoenix Playground to the host application with Tune:
 ```elixir
 def deps do
   [
-    {:tune, "~> 0.1"},
+    {:tune, "~> 0.5.0"},
     {:phoenix_playground, "~> 0.1.9"}
   ]
 end
@@ -30,9 +20,10 @@ end
 Tune declares Phoenix Playground as an optional dependency. A host that does
 not use the workbench does not need Phoenix.
 
-Start the workbench:
+Fetch the dependencies and start the workbench.
 
 ```sh
+mix deps.get
 mix tune.ui
 ```
 
@@ -41,6 +32,41 @@ Use another port, and do not open a browser:
 ```sh
 mix tune.ui --port 4100 --no-open
 ```
+
+## Preview a study without a model call
+
+1. Select **Load example** on the dashboard. Tune creates a question-answering
+   study with two training rows, one validation row, and one test row.
+2. Read **Rendered messages** to check the instructions and the selected
+   input. Open **Data** to inspect the expected answers.
+3. Open the study's **Settings** to inspect the target model and call limit.
+   The example uses `openai:gpt-4o-mini`. You can change it to a model that
+   your application has configured.
+
+## Evaluate, tune, and compare
+
+This procedure sends requests through your application's ReqLLM configuration.
+
+1. Open the example study's **Run** page. Check the data, target model, and
+   call limit. For a baseline-only run, select **Start evaluation**.
+2. On **Run**, select **Start tuning**. The example adds the two
+   labeled training answers as demonstrations and evaluates them on
+   validation data.
+3. On the completed search, open **Compare with baseline**. Choose `test`
+   under **Dataset split** and submit the comparison. This scores both prompts
+   on the same held-out row. Inspect the output and score for that row.
+4. Select **Download JSON** on the search run before you stop the workbench
+   if you want to keep the selected prompt.
+
+## Find a model
+
+Open **Settings** in the main navigation. Search by model or provider name,
+then expand the provider. Open **Model capabilities** to narrow the catalog
+results. Select **Use in study** to start a new study with that model.
+
+The scan reads local ReqLLM configuration, catalog data, and completed
+workbench runs. It makes no model calls and shows no credential values.
+A response from a completed run is evidence for that run.
 
 ## Routes
 
@@ -59,9 +85,7 @@ mix tune.ui --port 4100 --no-open
 | `/settings` | Scan ReqLLM configuration and catalog inference availability. |
 | `/runs/:id/artifact` | Download one versioned artifact as JSON. |
 
-The dashboard can load a grounded QA example. It creates a structured prompt
-study with training, validation, and test rows, then opens prompt preview. It
-does not make a model call.
+## Data and run evidence
 
 The structured prompt recipe accepts rows with `inputs` and `labels` maps.
 The saved responses recipe uses the Test rows editor. Paste rows with
@@ -83,11 +107,6 @@ the effective training cases have duplicates removed. For streamed evaluation,
 the counts cover the rows read through the stop point. The report also shows
 the models that returned responses. Edits to the study do not change this
 evidence.
-
-The Settings scan uses `ReqLLM.available_models/0`, `ReqLLM.Doctor.run/0`, and
-completed workbench runs. It is read-only. It does not call a model and it
-does not show credential values. A successful response records the model that responded at that time. It does not prove that the provider is reachable now.
-Known models appear as suggestions in study model fields.
 
 The data page shows row counts beside each JSON editor and a preview of saved
 rows. The Test rows editor opens by default. The run page shows its model, data,
@@ -112,5 +131,6 @@ runtime configuration.
 - State is lost when the VM stops.
 - The UI has no user accounts or remote access.
 - Data input is JSON and is limited to 1,000 rows per data role.
+- Browser styles use CDN assets.
 - Model calls use the application's ReqLLM configuration.
 - Automated Tune tests do not call a live model provider.

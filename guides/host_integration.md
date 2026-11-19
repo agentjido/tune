@@ -31,6 +31,8 @@ prediction.output
 ~~~
 
 A host can keep its own inference path for a structured Tune predictor.
+Pass a `Tune.ModelConfig` struct as `model` and use the host's normal
+authorization and inference functions.
 
 ```elixir
 {:ok, prepared} = Tune.Predictor.prepare(predictor, inputs, model)
@@ -41,9 +43,11 @@ with :ok <- MyHost.authorize(prepared),
 end
 ```
 
-`prepare/3` is pure. It renders a ReqLLM context and an output descriptor. It
-holds no credentials. `finish/2` parses and validates one supplied response. It
-makes no model request.
+`prepare/3` renders a ReqLLM context and an output descriptor. Keep
+credentials in the host's inference configuration. Treat the prepared
+inputs, messages, and adapter options as application data. `finish/2`
+parses and validates the supplied response. Both functions run without a model
+request.
 
 The host must keep the same output contract as direct Tune execution. It must
 disable JSON repair and use strict output validation for structured output.

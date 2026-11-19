@@ -10,7 +10,7 @@ defmodule Tune.Contracts.FailurePathsTest do
 
   defmodule ProgramContract do
     @behaviour Tune.Program
-    defstruct [:signature, :parameters, write: :apply]
+    defstruct [:signature, :parameters, :invoke, write: :apply]
 
     def signature(program), do: program.signature
     def parameters(program), do: program.parameters
@@ -18,7 +18,8 @@ defmodule Tune.Contracts.FailurePathsTest do
     def put_parameters(%{write: :wrong_type}, _values), do: :invalid
     def put_parameters(%{write: :corrupt} = program, _values), do: %{program | parameters: []}
     def put_parameters(program, values), do: %{program | parameters: values}
-    def call(_program, _inputs, execution), do: {:ok, %{}, execution}
+    def call(%{invoke: nil}, _inputs, execution), do: {:ok, %{}, execution}
+    def call(%{invoke: invoke}, inputs, execution), do: invoke.(inputs, execution)
   end
 
   defmodule MatchScore do
@@ -44,22 +45,11 @@ defmodule Tune.Contracts.FailurePathsTest do
     winner = %Result{value: :winner}
 
     assert {:error,
-            %Error.Invalid.Option{option: :test, message: "data must implement Enumerable"}} =
+            %Error.Invalid.Dataset{
+              split: :test,
+              cause: %ArgumentError{message: "data must implement Enumerable"}
+            }} =
              study |> Tune.data(test: fn -> :invalid end) |> Tune.compare(winner, split: :test)
-
-    assert {:error, %Error.Invalid.Option{option: :test, message: message}} =
-             study
-             |> Tune.data(test: fn -> raise "factory failed" end)
-             |> Tune.compare(winner, split: :test)
-
-    assert message =~ "factory failed"
-
-    assert {:error, %Error.Invalid.Option{option: :data, message: message}} =
-             study
-             |> Tune.data(test: Stream.map([1], fn _ -> raise "row unavailable" end))
-             |> Tune.compare(winner, split: :test)
-
-    assert message =~ "row unavailable"
 
     assert {:error, %Error.Invalid.Option{option: :data, message: "comparison data is empty"}} =
              study |> Tune.data(test: []) |> Tune.compare(winner, split: :test)
@@ -69,6 +59,246 @@ defmodule Tune.Contracts.FailurePathsTest do
              |> Tune.data(test: [1])
              |> Tune.limit(cases: 0)
              |> Tune.compare(winner, split: :test)
+  end
+
+  test "a program failure after dispatch preserves the shared call budget", %{
+    predictor: predictor
+  } do
+    rows = for question <- ["first", "second"], do: %{input: %{question: question}}
+
+    for fail <- [fn -> raise "callback failed" end, fn -> :invalid_reply end] do
+      stub = Transport.script([Transport.chat(answer: "ok")])
+
+      target = %ProgramContract{
+        signature: predictor.signature,
+        parameters: %{"root" => predictor},
+        invoke: fn input, execution ->
+          {:ok, _answer, _updated} = Tune.Execution.predict(execution, "root", input)
+          fail.()
+        end
+      }
+
+      study =
+        target
+        |> Tune.new(model: model_options(stub))
+        |> Tune.data(test: rows)
+        |> Tune.score(:score, fn _ -> flunk("invalid output was scored") end)
+        |> Tune.limit(model_calls: 1)
+
+      assert {:ok, report} = Tune.compare(study, %Result{value: target}, split: :test)
+      refute report.complete?
+      assert report.baseline.calls == %{target: 1}
+      assert report.challenger.calls == %{}
+      assert report.challenger.stop_reason == :model_call_limit
+
+      assert [%{error: %Error.Execution.Failed{} = error}, %{status: :skipped}] =
+               report.baseline.observations
+
+      assert error.result.calls == %{target: 1}
+      assert [%Tune.Step{name: "root"}] = error.result.steps
+      assert report.baseline.usage.total == 15
+
+      assert report.baseline.metadata.successful_models == [
+               %{role: :target, model: "openai:gpt-4-turbo"}
+             ]
+
+      assert length(Transport.requests(stub)) == 1
+    end
+  end
+
+  test "an execution cannot dispatch from background work after comparison", %{
+    predictor: predictor
+  } do
+    owner = self()
+    stub = Transport.respond_with(fn _ -> Transport.chat(answer: "late") end)
+
+    target = %ProgramContract{
+      signature: predictor.signature,
+      parameters: %{"root" => predictor},
+      invoke: fn input, execution ->
+        {:ok, worker} =
+          Task.start(fn ->
+            receive do
+              :proceed ->
+                result = Tune.Execution.predict(execution, "root", input)
+                send(owner, {:late_result, self(), result})
+            after
+              2_000 -> :ok
+            end
+          end)
+
+        send(owner, {:late_worker, worker})
+        {:ok, %{"answer" => "queued"}, execution}
+      end
+    }
+
+    study =
+      target
+      |> Tune.new(model: model_options(stub))
+      |> Tune.data(test: [%{input: %{question: "question"}}])
+      |> Tune.score(:score, fn _ -> 1 end)
+      |> Tune.limit(model_calls: 1)
+
+    assert {:ok, %{complete?: true} = report} =
+             Tune.compare(study, %Result{value: target}, split: :test)
+
+    assert report.baseline.calls == %{}
+    assert report.challenger.calls == %{}
+
+    for _ <- 1..2 do
+      assert_received {:late_worker, worker}
+      send(worker, :proceed)
+      assert_receive {:late_result, ^worker, {:error, %Error.Execution.Callback{}, _}}, 1_000
+    end
+
+    assert Transport.requests(stub) == []
+  end
+
+  test "a row call cap leaves room for the next row and the challenger", %{predictor: predictor} do
+    stub = Transport.respond_with(fn _ -> Transport.chat(answer: "ok") end)
+    target = counted_program(predictor)
+
+    study =
+      target
+      |> Tune.new(model: model_options(stub))
+      |> Tune.data(test: call_rows([2, 1]))
+      |> Tune.score(:score, fn _ -> 1 end)
+      |> Tune.limit(model_calls: 10, row_calls: 1, concurrency: 2)
+
+    assert {:ok, report} = Tune.compare(study, %Result{value: target}, split: :test)
+    assert report.complete?
+
+    for pass <- [report.baseline, report.challenger] do
+      assert pass.stop_reason == :completed
+      assert pass.calls == %{target: 2}
+      assert [%{id: "2", status: :error}, %{id: "1", status: :ok}] = pass.observations
+    end
+
+    assert report.metrics.score.counts == %{error: 1, tied: 1}
+    assert length(Transport.requests(stub)) == 4
+  end
+
+  test "comparison validates an invalid challenger before any calls", %{predictor: predictor} do
+    stub = Transport.script([Transport.chat(answer: "ok")])
+
+    study =
+      predictor
+      |> Tune.new(model: model_options(stub))
+      |> Tune.data(test: [%{input: %{question: "question"}}])
+      |> Tune.score(:score, fn _ -> 1 end)
+
+    assert {:error, %Error.Execution.Callback{}} =
+             Tune.compare(study, %Result{value: :not_a_program}, split: :test)
+
+    assert {:ok, incompatible} =
+             Predictor.new(
+               signature: [inputs: [other: Zoi.string()], outputs: [answer: Zoi.string()]]
+             )
+
+    assert {:error, %Error.Invalid.Option{option: :compare}} =
+             Tune.compare(study, %Result{value: incompatible}, split: :test)
+
+    assert Transport.requests(stub) == []
+  end
+
+  test "zero cases skips opening the dataset" do
+    factory = fn -> flunk("opened a zero-case dataset") end
+
+    study =
+      Tune.new(1, run: fn _ -> flunk("ran a zero-case target") end)
+      |> Tune.data(test: factory)
+      |> Tune.score(:score, & &1)
+      |> Tune.limit(cases: 0)
+
+    assert {:ok, %{case_ids: [], complete?: true}} =
+             Tune.compare(study, %Result{value: 2}, split: :test)
+
+    assert {:ok, %{observations: [], stop_reason: :case_limit, complete?: true}} =
+             Tune.evaluate(study)
+  end
+
+  test "synchronous comparison preserves case order and stays within every budget", %{
+    predictor: predictor
+  } do
+    target = counted_program(predictor)
+    rows = call_rows([1, 2, 3])
+
+    for budget <- 0..12, cap <- [nil, 1, 2, 3], concurrency <- [1, 2, 4] do
+      stub = Transport.respond_with(fn _ -> Transport.chat(answer: "ok") end)
+      limits = [model_calls: budget, concurrency: concurrency]
+      limits = if cap, do: Keyword.put(limits, :row_calls, cap), else: limits
+
+      study =
+        target
+        |> Tune.new(model: model_options(stub))
+        |> Tune.data(test: rows)
+        |> Tune.score(:score, fn _ -> 1 end)
+        |> Tune.limit(limits)
+
+      assert {:ok, report} = Tune.compare(study, %Result{value: target}, split: :test)
+      requests = length(Transport.requests(stub))
+      trial = inspect(limits)
+
+      assert requests <= budget, trial
+
+      assert Map.get(report.baseline.calls, :target, 0) +
+               Map.get(report.challenger.calls, :target, 0) == requests,
+             trial
+
+      assert report.baseline.usage.total + report.challenger.usage.total == 15 * requests, trial
+      assert report.case_ids == if(budget == 0, do: [], else: ["1", "2", "3"]), trial
+
+      for pass <- [report.baseline, report.challenger] do
+        ids = Enum.map(pass.observations, & &1.id)
+        assert ids == Enum.take(report.case_ids, length(ids)), trial
+      end
+    end
+  end
+
+  defp call_rows(counts) do
+    for count <- counts, id = Integer.to_string(count), do: %{id: id, input: %{question: id}}
+  end
+
+  defp counted_program(predictor) do
+    %ProgramContract{
+      signature: predictor.signature,
+      parameters: %{"root" => predictor},
+      invoke: fn input, execution ->
+        count = String.to_integer(input["question"])
+
+        Enum.reduce_while(1..count, {:ok, %{}, execution}, fn _, {:ok, _, execution} ->
+          case Tune.Execution.predict(execution, "root", input) do
+            {:ok, _, _} = result -> {:cont, result}
+            error -> {:halt, error}
+          end
+        end)
+      end
+    }
+  end
+
+  test "reusing earlier execution state does not reset the allowance", %{predictor: predictor} do
+    stub = Transport.script([Transport.chat(answer: "ok")])
+
+    target = %ProgramContract{
+      signature: predictor.signature,
+      parameters: %{"root" => predictor},
+      invoke: fn input, execution ->
+        {:ok, _answer, _updated} = Tune.Execution.predict(execution, "root", input)
+        Tune.Execution.predict(execution, "root", input)
+      end
+    }
+
+    assert {:error,
+            %Error.Execution.Failed{
+              cause: %Error.Execution.LimitReached{limit: :model_calls},
+              result: %{calls: %{target: 1}}
+            }} =
+             Tune.Runtime.run(target, %{question: "A?"},
+               model: model_options(stub),
+               max_model_calls: 1
+             )
+
+    assert length(Transport.requests(stub)) == 1
   end
 
   test "cancels evaluation before opening a factory and honors zero cases on a typed study", %{
@@ -143,14 +373,117 @@ defmodule Tune.Contracts.FailurePathsTest do
     assert Transport.requests(stub) == []
   end
 
-  test "a progress callback exception is not attributed to dataset reading" do
-    study =
-      Tune.replay([%{input: 1, output: 1}],
-        on_progress: fn _ -> raise "progress callback failed" end
+  test "a progress exception closes the paused stream and preserves the original error" do
+    owner = self()
+
+    rows =
+      Stream.resource(
+        fn -> 0 end,
+        fn n -> {[%{input: n, output: n}], n + 1} end,
+        fn _ -> send(owner, :stream_closed) end
       )
+
+    study =
+      Tune.replay(rows, on_progress: fn _ -> raise "progress callback failed" end)
       |> Tune.score(:value, & &1)
 
     assert_raise RuntimeError, "progress callback failed", fn -> Tune.evaluate(study) end
+    assert_received :stream_closed
+  end
+
+  test "factory and stream errors have the same contract for evaluation, comparison, and search" do
+    fail = fn -> raise "dataset failed" end
+
+    for source <- [fail, Stream.map([1], fn _ -> fail.() end)] do
+      study =
+        Tune.new(%{value: 1}, run: fn _ -> flunk("runner started") end)
+        |> Tune.data(test: source, validation: source)
+        |> Tune.score(:score, & &1)
+        |> Tune.vary(value: 1..2)
+
+      for {split, result} <- [
+            test: Tune.evaluate(study),
+            test: Tune.compare(study, %Result{value: %{value: 2}}, split: :test),
+            validation: study |> Tune.search(:grid) |> Tune.tune(),
+            validation:
+              study |> Tune.search(:genetic) |> Tune.limit(evaluations: 2) |> Tune.tune()
+          ] do
+        assert {:error,
+                %Error.Invalid.Dataset{
+                  split: ^split,
+                  cause: %RuntimeError{message: "dataset failed"}
+                }} = result
+      end
+    end
+  end
+
+  test "comparison and grid search stop blocked snapshot reads before target work" do
+    owner = self()
+
+    blocked = fn ->
+      send(owner, {:reader, self()})
+      Process.sleep(3_000)
+      [1]
+    end
+
+    study =
+      Tune.new(%{value: 1}, run: fn _ -> send(owner, :runner_started) end)
+      |> Tune.score(:score, & &1)
+      |> Tune.limit(deadline: 250)
+
+    assert {:ok,
+            %{
+              complete?: false,
+              baseline: %{stop_reason: :deadline},
+              challenger: %{stop_reason: :deadline}
+            }} =
+             study
+             |> Tune.data(test: blocked)
+             |> Tune.compare(%Result{value: %{value: 2}}, split: :test)
+
+    assert_received {:reader, reader}
+    refute Process.alive?(reader)
+
+    assert {:error, %Error.Optimization.Failed{report: %{stop_reason: :deadline, history: []}}} =
+             study
+             |> Tune.data(validation: Stream.flat_map([1], fn _ -> blocked.() end))
+             |> Tune.vary(value: 1..2)
+             |> Tune.search(:grid)
+             |> Tune.tune()
+
+    assert_received {:reader, reader}
+    refute Process.alive?(reader)
+    refute_received :runner_started
+  end
+
+  test "replay keeps finished rows when cancellation stops a blocked stream" do
+    owner = self()
+    cancel = :atomics.new(1, [])
+
+    rows =
+      Stream.map([1, 2], fn
+        1 ->
+          %{id: "first", input: 1, output: 2}
+
+        2 ->
+          send(owner, {:reader, self()})
+          :atomics.put(cancel, 1, 1)
+          Process.sleep(3_000)
+          %{id: "second", input: 2, output: 3}
+      end)
+
+    assert {:ok, report} =
+             rows
+             |> Tune.replay(cancel: fn -> :atomics.get(cancel, 1) == 1 end)
+             |> Tune.score(:value, & &1)
+             |> Tune.evaluate()
+
+    refute report.complete?
+    assert report.stop_reason == :cancelled
+    assert report.calls == %{}
+    assert [%{id: "first", scores: %{value: 2}}] = report.observations
+    assert_received {:reader, reader}
+    refute Process.alive?(reader)
   end
 
   test "rejects invalid search strategies and spaces before opening the dataset", %{
@@ -342,14 +675,17 @@ defmodule Tune.Contracts.FailurePathsTest do
              |> Tune.limit(deadline: 0)
              |> Tune.tune()
 
-    assert {:error, %Error.Invalid.Option{option: :data, message: message}} =
+    assert {:error,
+            %Error.Invalid.Dataset{
+              split: :train,
+              cause: %RuntimeError{message: "training rows unavailable"}
+            }} =
              study
              |> Tune.data(
                train: Stream.map([:unavailable], fn _ -> raise "training rows unavailable" end)
              )
              |> Tune.tune()
 
-    assert message =~ "training rows unavailable"
     assert Transport.requests(stub) == []
   end
 

@@ -13,6 +13,10 @@ File.write!("tune.json", json)
 {:ok, updated_program} = Tune.load(decoded, fresh_program)
 ```
 
+Here, `result` is a completed tuning result and `fresh_program` is the
+original program from your application. For a runnable example with a plain
+Elixir target, see [save and reload a setting](getting_started.md#save-and-reload-the-selected-setting).
+
 The application supplies fresh code and runtime model configuration. Loading
 an artifact validates the full contract before it changes the target. A failed
 load returns an error and does not partly update the target.

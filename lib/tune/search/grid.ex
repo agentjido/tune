@@ -9,9 +9,10 @@ defmodule Tune.Search.Grid do
 
   def run(target, runner, data_factory, variations, scores, selector, limits, opts) do
     with :ok <- options(opts),
-         {:ok, axes} <- axes(variations, target),
-         study = Study.new(limits: limits, metadata: %{strategy: :grid}),
-         {:ok, cases} <- Generic.snapshot(data_factory, study, :grid) do
+         {:ok, axes} <- axes(variations, target) do
+      study = Study.new(limits: limits, metadata: %{strategy: :grid})
+      {cases, study} = Generic.snapshot(data_factory, study)
+
       study =
         axes
         |> combinations()

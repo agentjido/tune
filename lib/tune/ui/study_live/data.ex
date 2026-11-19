@@ -19,18 +19,49 @@ if Code.ensure_loaded?(PhoenixPlayground) do
 
     @impl true
     def handle_event("save", %{"data" => params}, socket) do
-      with {:ok, train} <- JSON.decode(params["train"] || "[]"),
-           {:ok, validation} <- JSON.decode(params["validation"] || "[]"),
-           {:ok, test} <- JSON.decode(params["test"] || "[]"),
-           {:ok, study} <-
-             Tune.UI.Store.update_study(socket.assigns.study.id, %{
-               data: %{train: train, validation: validation, test: test}
-             }) do
+      with {:ok, data} <- decode_splits(params),
+           {:ok, study} <- Tune.UI.Store.update_study(socket.assigns.study.id, %{data: data}) do
         {:noreply, assign_data(socket, study, params, "Data saved.")}
       else
+        {:error, split, message} ->
+          {:noreply, save_error(socket, params, split, message)}
+
         {:error, error} ->
-          {:noreply, assign(socket, error: error, notice: nil, form: to_form(params, as: :data))}
+          message = error_message(error)
+
+          split =
+            Enum.find([:test, :train, :validation], &String.starts_with?(message, "#{&1} row "))
+
+          {:noreply, save_error(socket, params, split, message)}
       end
+    end
+
+    defp decode_splits(params) do
+      Enum.reduce_while([:test, :train, :validation], {:ok, %{}}, fn split, {:ok, data} ->
+        case JSON.decode(params[to_string(split)] || "[]") do
+          {:ok, rows} when is_list(rows) and length(rows) <= 1_000 ->
+            {:cont, {:ok, Map.put(data, split, rows)}}
+
+          {:ok, rows} when is_list(rows) ->
+            {:halt, {:error, split, "Use at most 1,000 rows."}}
+
+          {:ok, _value} ->
+            {:halt, {:error, split, "Use a JSON array of rows."}}
+
+          {:error, _error} ->
+            {:halt,
+             {:error, split, "This JSON is invalid. Check the brackets, quotes, and commas."}}
+        end
+      end)
+    end
+
+    defp save_error(socket, params, split, message) do
+      assign(socket,
+        error: message,
+        error_split: split,
+        notice: nil,
+        form: to_form(params, as: :data)
+      )
     end
 
     @impl true
@@ -38,7 +69,7 @@ if Code.ensure_loaded?(PhoenixPlayground) do
       ~H"""
       <.shell title={"#{@study.name}: data"} active="studies">
         <.study_steps study={@study} current={:data} />
-        <div :if={@error} class="alert alert-error mb-6">{error_message(@error)}</div>
+        <div :if={@error && !@error_split} class="alert alert-error mb-6" role="alert">{@error}</div>
         <form phx-submit="save" class="card border border-base-300 bg-base-100">
           <div class="card-body gap-5">
           <h2 class="card-title">Edit rows</h2>
@@ -53,17 +84,28 @@ if Code.ensure_loaded?(PhoenixPlayground) do
             </p>
             <p>Each split accepts up to 1,000 rows.</p>
           </div>
-          <details class="collapse collapse-arrow border border-base-300 bg-base-200" open>
-            <summary class="collapse-title font-medium">Test rows · {@counts.test}</summary>
-            <div class="collapse-content"><textarea aria-label="Test rows" class="textarea textarea-bordered min-h-40 w-full font-mono text-sm" name="data[test]">{@form[:test].value}</textarea></div>
+          <details :if={@example} class="collapse collapse-arrow border border-base-300">
+            <summary class="collapse-title font-medium">JSON example</summary>
+            <div class="collapse-content"><pre class="overflow-x-auto text-sm"><code>{@example}</code></pre></div>
           </details>
-          <details class="collapse collapse-arrow border border-base-300 bg-base-200">
-            <summary class="collapse-title font-medium">Training rows · {@counts.train}</summary>
-            <div class="collapse-content"><textarea aria-label="Training rows" class="textarea textarea-bordered min-h-40 w-full font-mono text-sm" name="data[train]">{@form[:train].value}</textarea></div>
-          </details>
-          <details class="collapse collapse-arrow border border-base-300 bg-base-200">
-            <summary class="collapse-title font-medium">Validation rows · {@counts.validation}</summary>
-            <div class="collapse-content"><textarea aria-label="Validation rows" class="textarea textarea-bordered min-h-40 w-full font-mono text-sm" name="data[validation]">{@form[:validation].value}</textarea></div>
+          <details
+            :for={{split, label} <- [test: "Test rows", train: "Training rows", validation: "Validation rows"]}
+            class="collapse collapse-arrow border border-base-300 bg-base-200"
+            open={split == :test || @error_split == split}
+          >
+            <summary class="collapse-title font-medium">{label} · {@counts[split]}</summary>
+            <div class="collapse-content">
+              <p :if={@error_split == split} id={"data-#{split}-error"} role="alert" class="mb-2 font-medium">
+                {@error}
+              </p>
+              <textarea
+                aria-label={label}
+                aria-invalid={if(@error_split == split, do: "true")}
+                aria-describedby={if(@error_split == split, do: "data-#{split}-error")}
+                class="textarea textarea-bordered min-h-40 w-full font-mono text-sm"
+                name={@form[split].name}
+              >{@form[split].value}</textarea>
+            </div>
           </details>
           <div class="card-actions items-center">
             <button class="btn btn-primary" type="submit" phx-disable-with="Saving…">Save data</button>
@@ -114,6 +156,37 @@ if Code.ensure_loaded?(PhoenixPlayground) do
 
     defp preview_row(row, role), do: %{role: role, inputs: row, labels: nil}
 
+    defp example(%{recipe: "structured_prompt", config: config}) do
+      output =
+        case config["output_type"] do
+          "integer" -> 1
+          "float" -> 1.0
+          "boolean" -> true
+          _ -> "Example answer"
+        end
+
+      Tune.JSON.pretty_encode!([
+        %{
+          inputs: %{config["input_name"] => "Example input"},
+          labels: %{config["output_name"] => output}
+        }
+      ])
+    end
+
+    defp example(%{recipe: "saved_responses"}) do
+      Tune.JSON.pretty_encode!([
+        %{
+          input: %{
+            user_input: "What is the return window?",
+            retrieved_contexts: ["Returns are accepted within 30 days."]
+          },
+          output: "You can return the item within 30 days."
+        }
+      ])
+    end
+
+    defp example(_study), do: nil
+
     defp assign_data(socket, study, params, notice) do
       counts = Map.new([:train, :validation, :test], &{&1, length(study.data[&1] || [])})
 
@@ -132,6 +205,8 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         counts: counts,
         preview: preview,
         error: nil,
+        error_split: nil,
+        example: example(study),
         notice: notice
       )
     end

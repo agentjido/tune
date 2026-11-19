@@ -1,105 +1,46 @@
 # Tune
 
-Tune is a lazy evaluation and search pipeline for Elixir.
+Tune is an Elixir library for evaluating programs and searching for better
+configurations. Use it to measure a baseline, tune a configuration or prompt,
+and compare the result on the same held-out cases.
 
-Tune can evaluate and tune structured LLM programs on ReqLLM. It can also
-search plain Elixir values with no LLM. A pipeline is immutable. Builder
-functions add declarations. Call `Tune.evaluate/2`, `Tune.tune/1`, or
-`Tune.compare/3` to run the pipeline.
+Tune 0.5.0 is the first beta. The core runs in an Elixir application. The
+optional local workbench is experimental.
 
-Run the offline search and compare the winner on a separate test split:
+## Install
 
-```sh
-mix deps.get
-MIX_ENV=test mix run examples/01_dspy/01_03_bootstrap_qa/compare_demo.exs
-```
-
-The example uses scripted ReqLLM replies and needs no provider credentials.
-It prints the paired results and the optimized prompt. The first lines are:
-
-```text
-Test answer accuracy: 0.3333333333333333 -> 0.6666666666666666
-Answer rows: 2 improved, 1 regressed
-Model calls: 6 -> 6
-```
+Add Tune to the dependencies in your Mix project and run `mix deps.get`.
 
 ```elixir
-study =
-  Tune.new(program, model: target, teacher: teacher)
-  |> Tune.data(train: train, validation: validation, test: test)
-  |> Tune.score(:answer, &answer_score/2, range: {0.0, 1.0})
-  |> Tune.score(:citations, &citation_score/2, range: {0.0, 1.0})
-  |> Tune.select(weighted: [answer: 0.8, citations: 0.2])
-  |> Tune.search(:bootstrap_few_shot, max_bootstrapped_demos: 4)
-  |> Tune.limit(model_calls: 200)
-
-{:ok, winner} = Tune.tune(study)
-{:ok, comparison} = Tune.compare(study, winner, split: :test)
+{:tune, "~> 0.5.0"}
 ```
 
-The public workflow uses these functions:
-
-- `new`
-- `data`
-- `replay`
-- `vary`
-- `score`
-- `select`
-- `search`
-- `limit`
-- `preview`
-- `evaluate`
-- `tune`
-- `compare`
-- `dump`
-- `load`
+The [getting started guide](guides/getting_started.md) walks through a ticket
+routing example, from selecting a threshold to saving it for the host app.
+It also shows how to preview a prompt and score saved model answers.
+Both examples run without provider credentials.
 
 ## Main capabilities
 
-- Typed structured prompts with Zoi.
-- Chat, JSON, and XML prompt adapters.
-- Exact prompt inspection before a model call.
-- Named scores, text feedback, failure scores, and retained row errors.
-- Faithfulness and context-precision judge scores through ReqLLM.
-- Fifteen prompt and example search targets.
-- Grid and genetic search for maps and structs.
-- Enumerable and stream data sources.
-- Opaque Nx and Axon values in application runners.
-- Versioned JSON artifacts for learned, JSON-compatible values.
+- Run Elixir functions or typed LLM programs against labeled cases.
+- Score saved outputs without rerunning the program that produced them.
+- Compare a search winner with its baseline on a held-out split.
+- Search Elixir values with grid or genetic search. For structured prompts,
+  search instructions and demonstrations with separate model-call limits.
+- Preview Chat, JSON, and XML prompts. Export learned values as JSON artifacts.
 
 ## Architecture
 
-- Runtime owns typed programs, model roles, execution, and predictions.
-- Evaluation owns cases, scores, selection, observations, and summaries.
-- Search owns shared limits, candidate history, and selection.
-- Artifact owns the only persisted format and applies all learned values atomically.
+Tune prepares prompts, runs cases, scores outputs, and selects candidates.
+ReqLLM handles model requests and transport retries. The host application
+controls credentials, tools, side effects, and deployment.
 
-Dependencies point in that order. Runtime does not depend on Evaluation or Search.
-Evaluation accepts an opaque runner and does not know a search algorithm.
-
-Tune uses no Python runtime. It has no runtime dependency on Jido, Nx, Axon,
-`jido_eval`, or `jido_evolve`.
-
-Tune does not own model transport, provider retries, tools, agent loops,
-storage, model training, or deployment. ReqLLM owns model transport and
-transport retries. The application owns runtime code, credentials, tools, and
-side effects.
+Tune uses Elixir throughout. An application can pass Nx or Axon values
+through a runner. Exported learned values must be JSON-compatible.
 
 ## Start here
 
-The [numbered offline examples](examples/README.md) form a learning path and
-an integration suite. Start with [typed prompt inspection](examples/01_dspy/01_01_extract_ticket/README.md)
-or [grid search and paired comparison](examples/03_evolution/03_01_batch_grid/README.md).
-Each lesson gives the commands to run its demo and tests.
-
-Print the full Chat, JSON, and XML prompts with zero model calls.
-
-```sh
-MIX_ENV=test mix run examples/01_dspy/01_01_extract_ticket/demo.exs --preview-only
-```
-
-Read these guides for more detail:
-
+- [Getting started](guides/getting_started.md)
 - [Programs and evaluation](guides/programs.md)
 - [Search strategies](guides/optimizers.md)
 - [Compatibility and boundaries](guides/compatibility.md)
@@ -107,21 +48,31 @@ Read these guides for more detail:
 - [Host integration](guides/host_integration.md)
 - [Optional local workbench](guides/ui.md)
 
-## Optional local workbench
-
-Tune can run a local multi-route workbench with Phoenix Playground. Add
-`phoenix_playground` to the host dependencies, then start it:
+For a longer offline demo, run this command from a Tune source checkout
+after `mix deps.get`.
 
 ```sh
-mix tune.ui
+MIX_ENV=test mix run examples/01_dspy/01_03_bootstrap_qa/compare_demo.exs
 ```
 
-The workbench builds studies, accepts JSON data, previews exact prompts, runs
-evaluation or search, and downloads Tune artifacts. It binds only to the local
-computer and keeps state in memory. See the [workbench guide](guides/ui.md) for
-the route list and extension boundary.
+This demo tunes a question-answering program using scripted ReqLLM replies.
+It reports held-out accuracy, improved and regressed rows, and model calls.
+
+See the [numbered offline examples](https://github.com/mikehostetler/tune/tree/v0.5.0/examples),
+[typed prompt inspection](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/01_dspy/01_01_extract_ticket),
+and [grid search with paired comparison](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/03_evolution/03_01_batch_grid).
+
+## Experimental local workbench
+
+Add Phoenix Playground to your Mix project and run `mix tune.ui`.
+The workbench opens on the local machine. It keeps studies, runs, and
+artifacts in memory and can preview a prompt with zero model calls.
+Follow the [workbench guide](guides/ui.md) to try a study.
 
 ## Local checks
+
+Run these commands from a Tune source checkout. The tests use scripted
+responses.
 
 ```sh
 mix deps.get
@@ -130,8 +81,10 @@ mix quality
 mix docs
 ```
 
-All default tests are offline. They use scripted replies through ReqLLM.
+See [Contributing](CONTRIBUTING.md) and the [security policy](SECURITY.md)
+for changes and reports.
 
-## Status
+## License
 
-Tune is local and unpublished. No license has been selected.
+Tune uses [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
+See the [changelog](CHANGELOG.md) for release changes.

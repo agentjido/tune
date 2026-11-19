@@ -115,11 +115,11 @@ defmodule Tune.UI.Runner do
     kind, reason -> finish(run_id, {:error, {kind, reason}})
   end
 
-  defp run_splits(%{runner: nil, data: data}, :tune, _split),
+  def run_splits(%{runner: nil, data: data}, :tune, _split),
     do: Enum.filter([:train, :validation], &Map.has_key?(data, &1))
 
-  defp run_splits(_pipeline, :tune, _split), do: [:validation]
-  defp run_splits(_pipeline, _mode, split), do: [split]
+  def run_splits(_pipeline, :tune, _split), do: [:validation]
+  def run_splits(_pipeline, _mode, split), do: [split]
 
   defp terminal(pipeline, :tune, _winner, _split) do
     with {:ok, result} <- Tune.tune(pipeline) do

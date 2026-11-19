@@ -26,7 +26,6 @@ if Code.ensure_loaded?(PhoenixPlayground) do
       ~H"""
       <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
       <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-      <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
       <style>
         :root {
           scrollbar-color: color-mix(in oklab, var(--color-base-content) 25%, transparent) transparent;
@@ -34,6 +33,10 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         #tune-drawer:focus-visible + .drawer-content label[for="tune-drawer"] {
           outline: 2px solid var(--color-primary);
           outline-offset: 3px;
+        }
+        .btn-primary {
+          --btn-color: color-mix(in srgb, var(--color-primary) 72%, black);
+          --btn-fg: white;
         }
         ::selection {
           background: color-mix(in oklab, var(--color-primary) 32%, transparent);
@@ -48,84 +51,9 @@ if Code.ensure_loaded?(PhoenixPlayground) do
         var tuneColorScheme = window.matchMedia("(prefers-color-scheme: dark)")
         var applyTuneColorScheme = function (event) {
           document.documentElement.dataset.theme = event.matches ? "dark" : "light"
-          window.dispatchEvent(new CustomEvent("tune:theme", { detail: { theme: document.documentElement.dataset.theme } }))
         }
         applyTuneColorScheme(tuneColorScheme)
         tuneColorScheme.addEventListener("change", applyTuneColorScheme)
-
-        window.hooks.TuneChart = {
-          mounted: function () {
-            if (!window.ApexCharts) {
-              this.el.innerHTML = '<div class="alert alert-warning">Chart assets are unavailable.</div>'
-              return
-            }
-
-            var type = this.el.dataset.type || "line"
-            var labels = JSON.parse(this.el.dataset.labels)
-            var series = JSON.parse(this.el.dataset.series)
-            var theme = document.documentElement.dataset.theme
-            var styles = getComputedStyle(document.documentElement)
-            var primary = styles.getPropertyValue("--color-primary").trim()
-            var secondary = styles.getPropertyValue("--color-secondary").trim()
-            var success = styles.getPropertyValue("--color-success").trim()
-            var error = styles.getPropertyValue("--color-error").trim()
-            var warning = styles.getPropertyValue("--color-warning").trim()
-            var foreground = styles.getPropertyValue("--color-base-content").trim()
-            var values = type === "donut" ? series : series.flatMap(function (item) { return item.data })
-            var yaxis
-
-            if (type !== "donut" && values.length > 0) {
-              var minimum = Math.min.apply(null, values)
-              var maximum = Math.max.apply(null, values)
-              var padding = minimum === maximum ? Math.max(Math.abs(minimum) * 0.1, 0.1) : (maximum - minimum) * 0.1
-
-              yaxis = {
-                min: type === "bar" && minimum >= 0 ? 0 : minimum - padding,
-                max: maximum + padding,
-                decimalsInFloat: 2
-              }
-            }
-
-            this.chart = new ApexCharts(this.el, {
-              chart: {
-                type: type === "line" ? "area" : type,
-                height: Number(this.el.dataset.height || 280),
-                toolbar: { show: false },
-                background: "transparent",
-                foreColor: foreground
-              },
-              series: series,
-              labels: type === "donut" ? labels : undefined,
-              xaxis: type === "donut" ? undefined : { categories: labels },
-              yaxis: yaxis,
-              colors: [primary, secondary, success, error, warning],
-              dataLabels: { enabled: false },
-              stroke: type === "line" ? { curve: "smooth", width: 3 } : { width: 0 },
-              markers: { size: 4 },
-              fill: type === "line"
-                ? { type: "gradient", gradient: { opacityFrom: 0.35, opacityTo: 0.05 } }
-                : { opacity: 1 },
-              plotOptions: { bar: { borderRadius: 6, columnWidth: "55%" } },
-              grid: { borderColor: "color-mix(in oklab, " + foreground + " 15%, transparent)" },
-              theme: { mode: theme },
-              legend: { position: "bottom" },
-              tooltip: { theme: theme }
-            })
-
-            this.chart.render()
-            this.themeHandler = function (event) {
-              this.chart.updateOptions({
-                theme: { mode: event.detail.theme },
-                tooltip: { theme: event.detail.theme }
-              })
-            }.bind(this)
-            window.addEventListener("tune:theme", this.themeHandler)
-          },
-          destroyed: function () {
-            if (this.themeHandler) window.removeEventListener("tune:theme", this.themeHandler)
-            if (this.chart) this.chart.destroy()
-          }
-        }
       </script>
       <div class="drawer min-h-screen bg-base-200 lg:drawer-open">
         <input id="tune-drawer" type="checkbox" class="drawer-toggle lg:hidden" aria-label="Toggle main navigation" aria-controls="tune-main-nav" />
@@ -190,23 +118,79 @@ if Code.ensure_loaded?(PhoenixPlayground) do
       """
     end
 
-    attr(:splits, :list, required: true)
+    def run_setup(study, mode) do
+      with {:ok, recipe} <- Tune.UI.Registry.fetch(study.recipe),
+           {:ok, pipeline} <- recipe.build(study) do
+        %{
+          models: Tune.UI.Evidence.model_configs(pipeline),
+          scores: Enum.map(pipeline.scores, & &1.name),
+          limit: Map.get(pipeline.limits, :model_calls),
+          splits:
+            if(mode == :tune, do: Tune.UI.Runner.run_splits(pipeline, :tune, nil), else: []),
+          error: nil
+        }
+      else
+        {:error, error} -> %{error: error}
+      end
+    end
+
+    attr(:setup, :map, required: true)
+    attr(:counts, :map, default: %{})
+
+    def setup_details(assigns) do
+      ~H"""
+      <p :if={@setup.error} class="text-sm" role="alert">{error_message(@setup.error)}</p>
+      <dl :if={!@setup.error} class="grid gap-3 text-sm sm:grid-cols-3">
+        <div :if={map_size(@setup.models) > 0} class="min-w-0">
+          <dt class="font-semibold">Models</dt>
+          <dd :for={{role, model} <- Enum.sort(@setup.models)} class="break-all">{role} · {model["model"]}</dd>
+        </div>
+        <div>
+          <dt class="font-semibold">Metrics</dt>
+          <dd>{Enum.join(@setup.scores, ", ")}</dd>
+        </div>
+        <div :if={@setup.limit || map_size(@setup.models) > 0}>
+          <dt class="font-semibold">Model-call limit</dt>
+          <dd>{@setup.limit || "Not set"}</dd>
+        </div>
+        <div :if={@setup.splits != []} class="sm:col-span-3">
+          <dt class="font-semibold">Search data</dt>
+          <dd :for={split <- @setup.splits}>{split} · {Map.get(@counts, split, 0)} rows</dd>
+        </div>
+      </dl>
+      """
+    end
+
+    def comparison_setup(nil, _study), do: nil
+
+    def comparison_setup(source, study) do
+      %{
+        source_id: source.id,
+        setup: run_setup(%{source.study_snapshot | data: study.data}, :compare),
+        splits: Tune.UI.Runner.available_splits(study),
+        counts: Map.new(study.data, fn {split, rows} -> {split, length(rows)} end)
+      }
+    end
+
+    attr(:comparison, :map, required: true)
 
     def compare_form(assigns) do
       ~H"""
       <section class="card mb-6 border border-base-300 bg-base-100 shadow-sm">
         <div class="card-body">
           <h2 class="card-title">Compare with baseline</h2>
-          <p :if={:test not in @splits}>No test rows. Add test data or choose another available split.</p>
+          <p class="text-sm">Search run <a class="link" href={"/runs/#{@comparison.source_id}"}>{@comparison.source_id}</a></p>
+          <.setup_details setup={@comparison.setup} />
+          <p :if={:test not in @comparison.splits}>No test rows. Add test data or choose another available split.</p>
           <form phx-submit="compare" class="flex flex-wrap items-end gap-3">
             <label for="comparison-split" class="form-control">
               <span class="label-text mb-1">Dataset split</span>
-              <select id="comparison-split" name="split" class="select select-bordered" required disabled={@splits == []}>
+              <select id="comparison-split" name="split" class="select select-bordered" required disabled={@comparison.splits == [] || @comparison.setup.error != nil}>
                 <option value="" selected>Choose a split</option>
-                <option :for={split <- @splits} value={split}>{split}</option>
+                <option :for={split <- @comparison.splits} value={split}>{split} · {@comparison.counts[split]} rows</option>
               </select>
             </label>
-            <button class="btn btn-outline" type="submit" disabled={@splits == []}>Compare with baseline</button>
+            <button class="btn btn-outline" type="submit" disabled={@comparison.splits == [] || @comparison.setup.error != nil}>Compare with baseline</button>
           </form>
         </div>
       </section>
@@ -214,25 +198,29 @@ if Code.ensure_loaded?(PhoenixPlayground) do
     end
 
     attr(:id, :string, required: true)
-    attr(:type, :string, default: "line")
     attr(:labels, :list, required: true)
-    attr(:series, :any, required: true)
-    attr(:height, :integer, default: 280)
-    attr(:class, :string, default: "min-h-72 w-full")
+    attr(:values, :list, required: true)
 
     def chart(assigns) do
+      {min, max} = Enum.min_max([0 | assigns.values])
+
+      assigns =
+        assign(assigns,
+          entries: Enum.zip(assigns.labels, assigns.values),
+          min: min,
+          max: if(min == max, do: 1, else: max)
+        )
+
       ~H"""
-      <div
-        id={@id}
-        phx-hook="TuneChart"
-        phx-update="ignore"
-        data-type={@type}
-        data-labels={JSON.encode!(@labels)}
-        data-series={JSON.encode!(@series)}
-        data-height={@height}
-        class={@class}
-      >
-      </div>
+      <dl id={@id} class="mt-3 space-y-3">
+        <div :for={{label, value} <- @entries}>
+          <dt class="text-sm">{label}</dt>
+          <dd class="flex items-center gap-3">
+            <meter aria-hidden="true" min={@min} max={@max} value={value} class="w-full"></meter>
+            <span class="text-sm tabular-nums">{value}</span>
+          </dd>
+        </div>
+      </dl>
       """
     end
 

@@ -1,6 +1,8 @@
 defmodule Tune.Contracts.ComparisonTest do
   use ExUnit.Case, async: true
 
+  alias Tune.Examples.Support.GroundedQA
+  alias Tune.Examples.Support.QAWorld
   alias Tune.Examples.Support.Transport
   alias Tune.Result
 
@@ -139,6 +141,36 @@ defmodule Tune.Contracts.ComparisonTest do
     assert report.challenger.calls == %{target: 3}
     assert report.metrics.answer.counts == %{tied: 3}
     assert length(Transport.requests(stub)) == 6
+  end
+
+  test "concurrency does not turn unspent reservations into row call limits" do
+    target = GroundedQA.new()
+
+    rows =
+      QAWorld.rows([{"What is Alpha?", "alpha", "first"}, {"What is Beta?", "beta", "second"}])
+
+    for row_limits <- [[], [row_calls: 3]] do
+      stub = QAWorld.stub()
+
+      study =
+        Tune.new(target,
+          model: [
+            model: Transport.model(),
+            adapter: Tune.Adapter.Chat,
+            request_options: Transport.request_options(stub)
+          ]
+        )
+        |> Tune.data(test: rows)
+        |> Tune.score(:answer, &QAWorld.metric/2)
+        |> Tune.limit([concurrency: 2, model_calls: 8] ++ row_limits)
+
+      assert {:ok, report} = Tune.compare(study, %Result{value: target}, split: :test)
+      assert report.complete?, "comparison did not complete with #{inspect(row_limits)}"
+      assert report.baseline.calls == %{target: 4}
+      assert report.challenger.calls == %{target: 4}
+      assert report.metrics.answer.counts == %{tied: 2}
+      assert length(Transport.requests(stub)) == 8
+    end
   end
 
   test "does not start the winner after the baseline loses call accounting" do

@@ -103,7 +103,8 @@ defmodule Tune.Error do
     A program run failed after it started.
 
     `cause` is the original error, unchanged, including ReqLLM provider errors.
-    `result` is the partial `Tune.Prediction` with every completed step.
+    `result` is the partial `Tune.Prediction` with managed call counts,
+    observed responses, and completed steps.
     """
     use Splode.Error, fields: [:cause, :result, :step], class: :execution
 
@@ -129,7 +130,7 @@ defmodule Tune.Error do
   end
 
   defmodule Execution.Callback do
-    @moduledoc "Application program code returned a value outside the Program contract."
+    @moduledoc "Application code did not follow a Tune callback contract."
     use Splode.Error, fields: [:message, :value], class: :execution
 
     @spec message(map()) :: String.t()

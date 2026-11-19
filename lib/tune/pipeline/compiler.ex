@@ -9,6 +9,7 @@ defmodule Tune.Pipeline.Compiler do
   alias Tune.ModelConfig
   alias Tune.Predictor
   alias Tune.Program
+  alias Tune.RunLimits
   alias Tune.Runtime.Target
   alias Tune.Score
   alias Tune.Score.Selector
@@ -28,12 +29,9 @@ defmodule Tune.Pipeline.Compiler do
     study = Study.new(limits: Map.delete(run_limits(tune), :evaluations))
 
     with {:ok, selector} <- evaluation_selector(tune),
-         {:ok, source, runner, extra_limits} <- evaluation_source(tune, role, study) do
-      limits = Map.merge(Study.evaluation_limits(study), extra_limits)
-      {:ok, Evaluator.evaluate(source, runner, tune.scores, selector, limits)}
-    end
+         do: evaluate_split(tune, role, selector, study)
   rescue
-    error in Error.Invalid.Dataset -> {:error, error}
+    error in [Error.Invalid.Dataset, Error.Invalid.Definition] -> {:error, error}
   end
 
   @spec compare(Tune.t(), Tune.Result.t() | Tune.Artifact.t(), atom()) ::
@@ -45,47 +43,71 @@ defmodule Tune.Pipeline.Compiler do
     study = Study.new(limits: Map.drop(run_limits(tune), [:cases, :evaluations]))
 
     with {:ok, selector} <- evaluation_selector(tune),
-         {:ok, factory} <- data_factory(tune, split) do
-      case comparison_stop(study) do
-        nil ->
-          with {:ok, winner} <- comparison_target(candidate, tune.target) do
-            compare_split(tune, winner, split, factory, selector, study)
-          end
-
-        reason ->
-          stopped =
-            Evaluator.stopped([], tune.scores, selector, Study.evaluation_limits(study), reason)
-
-          {:ok, Comparison.build(split, [], tune.scores, stopped, stopped)}
-      end
+         {:ok, factory} <- Dataset.factory(tune.data, split) do
+      compare_split(tune, candidate, split, factory, selector, study)
     end
+  rescue
+    error in Error.Invalid.Dataset -> {:error, error}
   end
 
   defp comparison_target(%Tune.Result{value: value}, _target), do: {:ok, value}
   defp comparison_target(%Tune.Artifact{} = artifact, target), do: Tune.load(artifact, target)
 
-  defp compare_split(tune, winner, split, factory, selector, study) do
-    with {:ok, source} <- read_dataset(factory, split),
-         {:ok, rows, truncated?} <- comparison_cases(tune, split, source),
-         {:ok, baseline} <- compare_target(tune, rows, selector, study, truncated?),
-         study = Study.account_score(study, baseline),
-         {:ok, challenger} <-
-           compare_target(%{tune | target: winner}, rows, selector, study, truncated?) do
+  defp compare_split(tune, candidate, split, factory, selector, study) do
+    limits = Map.put(Study.evaluation_limits(study), :cases, tune.limits[:cases])
+
+    with :ok <- check_comparison(study),
+         {:ok, winner} <- comparison_target(candidate, tune.target),
+         {:ok, original_runner, signature} <- runner(tune),
+         {:ok, winner_runner, winner_signature} <- runner(%{tune | target: winner}),
+         :ok <- compatible_signatures(signature, winner_signature),
+         {:ok, rows, truncated?} <- Dataset.snapshot(factory, split, limits),
+         :ok <- require_comparison_cases(rows, limits[:cases]),
+         {:ok, rows} <- normalize_comparison_cases(signature, rows) do
+      Dataset.report(limits, split, :effective, rows)
+      baseline = compare_target(tune, original_runner, rows, selector, study, truncated?)
+      study = Study.account_score(study, baseline)
+      challenger = compare_target(tune, winner_runner, rows, selector, study, truncated?)
       {:ok, Comparison.build(split, rows, tune.scores, baseline, challenger)}
+    else
+      {:stopped, reason} -> stopped_comparison(tune, split, selector, study, reason)
+      {:error, _error} = error -> error
     end
   end
 
-  defp compare_target(tune, rows, selector, study, truncated?) do
+  defp compatible_signatures(nil, nil), do: :ok
+
+  defp compatible_signatures(original, winner) do
+    if Program.same_fields?(original, winner),
+      do: :ok,
+      else:
+        invalid(
+          :compare,
+          "the challenger must have the same input and output fields as the original"
+        )
+  end
+
+  defp check_comparison(study) do
+    case comparison_stop(study) do
+      nil -> :ok
+      reason -> {:stopped, reason}
+    end
+  end
+
+  defp stopped_comparison(tune, split, selector, study, reason) do
+    stopped = Evaluator.stopped([], tune.scores, selector, Study.evaluation_limits(study), reason)
+    {:ok, Comparison.build(split, [], tune.scores, stopped, stopped)}
+  end
+
+  defp compare_target(tune, runner, rows, selector, study, truncated?) do
+    limits = Map.put(Study.evaluation_limits(study), :source_truncated?, truncated?)
+
     case comparison_stop(study) do
       nil ->
-        with {:ok, runner} <- runner(tune) do
-          limits = Map.put(Study.evaluation_limits(study), :source_truncated?, truncated?)
-          {:ok, Evaluator.evaluate(rows, runner, tune.scores, selector, limits)}
-        end
+        Evaluator.evaluate(rows, runner, tune.scores, selector, limits)
 
       reason ->
-        {:ok,
-         Evaluator.stopped(rows, tune.scores, selector, Study.evaluation_limits(study), reason)}
+        Evaluator.stopped(rows, tune.scores, selector, limits, reason)
     end
   end
 
@@ -96,39 +118,25 @@ defmodule Tune.Pipeline.Compiler do
     end
   end
 
-  defp comparison_cases(tune, split, source) do
-    {rows, truncated?} = Dataset.select(source, tune.limits[:cases])
-    Dataset.report(tune.limits, split, :source, rows)
-
-    with :ok <- require_comparison_cases(rows, tune.limits[:cases]),
-         {:ok, cases} <- normalize_comparison_cases(tune, rows) do
-      Dataset.report(tune.limits, split, :effective, cases)
-      {:ok, cases, truncated?}
-    end
-  rescue
-    error -> invalid(:data, "could not read comparison data: #{Exception.message(error)}")
-  end
-
   defp require_comparison_cases([], limit) when limit != 0,
     do: invalid(:data, "comparison data is empty")
 
   defp require_comparison_cases(_rows, _limit), do: :ok
 
-  defp normalize_comparison_cases(_tune, []), do: {:ok, []}
+  defp normalize_comparison_cases(_signature, []), do: {:ok, []}
+  defp normalize_comparison_cases(signature, rows), do: Case.compare_rows(signature, rows)
 
-  defp normalize_comparison_cases(%{runner: nil, target: target}, rows) do
-    with {:ok, signature} <- Program.signature(target), do: Case.compare_rows(signature, rows)
-  end
+  defp evaluate_split(tune, split, selector, study) do
+    limits = Study.evaluation_limits(study)
 
-  defp normalize_comparison_cases(_tune, rows), do: Case.compare_rows(nil, rows)
-
-  defp evaluation_source(tune, role, study) do
-    case Study.limit_reason(study) do
-      reason when reason in [:cancelled, :deadline] ->
-        {:ok, [], fn _ -> nil end, %{}}
-
-      _ ->
-        with {:ok, rows} <- dataset(tune, role), do: evaluation_runner(tune, role, rows)
+    with :ok <- RunLimits.check(limits),
+         {:ok, factory} <- Dataset.factory(tune.data, split),
+         {:ok, runner, signature} <- runner(tune),
+         {:ok, source, limits} <- evaluation_data(signature, split, factory, limits) do
+      {:ok, Evaluator.evaluate(source, runner, tune.scores, selector, limits)}
+    else
+      {:error, _error} = error -> error
+      {:stopped, reason} -> {:ok, Evaluator.stopped([], tune.scores, selector, limits, reason)}
     end
   end
 
@@ -146,7 +154,7 @@ defmodule Tune.Pipeline.Compiler do
     with {:ok, strategy, opts} <- generic_strategy(tune.strategy),
          :ok <- require_score_call_limit(tune),
          {:ok, spaces} <- compile_spaces(strategy, tune.variations, opts),
-         {:ok, data_factory} <- data_factory(tune, :validation),
+         {:ok, data_factory} <- Dataset.factory(tune.data, :validation),
          {:ok, selector} <- compiled_selector(tune) do
       strategy.run(
         tune.target,
@@ -159,6 +167,8 @@ defmodule Tune.Pipeline.Compiler do
         opts
       )
     end
+  rescue
+    error in [Error.Invalid.Dataset, Error.Invalid.Definition] -> {:error, error}
   end
 
   defp evaluation_selector(%{scores: [_, _ | _], selector: nil}), do: {:ok, nil}
@@ -181,22 +191,6 @@ defmodule Tune.Pipeline.Compiler do
 
   defp callback_limits(tune) do
     Map.merge(tune.limits, %{on_progress: tune.on_progress, cancel: tune.cancel})
-  end
-
-  defp dataset(tune, role) do
-    with {:ok, factory} <- data_factory(tune, role), do: read_dataset(factory, role)
-  end
-
-  defp read_dataset(factory, role) do
-    factory.() |> enumerable(role)
-  rescue
-    error -> invalid(role, "data factory failed: #{Exception.message(error)}")
-  end
-
-  defp enumerable(source, role) do
-    if Enumerable.impl_for(source),
-      do: {:ok, source},
-      else: invalid(role, "data must implement Enumerable")
   end
 
   defp runtime_options(tune) do
@@ -242,8 +236,6 @@ defmodule Tune.Pipeline.Compiler do
     end)
   end
 
-  defp data_factory(tune, role), do: Dataset.factory(tune.data, role)
-
   defp target_model(tune) do
     case Map.fetch(tune.models, :model) do
       {:ok, config} -> ModelConfig.new(config)
@@ -272,17 +264,19 @@ defmodule Tune.Pipeline.Compiler do
     with {:ok, _parameters} <- Program.parameters(target), do: :ok
   end
 
-  defp evaluation_runner(%{runner: nil} = tune, role, rows) do
-    with {:ok, signature} <- Program.signature(tune.target),
-         {:ok, runner} <- runner(tune),
-         {:ok, cases, truncated?} <- typed_cases(signature, rows, tune.limits, role) do
-      {:ok, cases, runner, %{source_truncated?: truncated?}}
+  defp evaluation_data(%Tune.Signature{}, _split, _factory, %{cases: 0} = limits),
+    do: {:ok, [], Map.put(limits, :source_truncated?, true)}
+
+  defp evaluation_data(%Tune.Signature{} = signature, split, factory, limits) do
+    with {:ok, rows, truncated?} <- Dataset.snapshot(factory, split, limits),
+         {:ok, cases} <- Case.normalize_all(signature, rows) do
+      Dataset.report(limits, split, :effective, cases)
+      {:ok, cases, Map.put(limits, :source_truncated?, truncated?)}
     end
   end
 
-  defp evaluation_runner(tune, role, rows) do
-    with {:ok, runner} <- runner(tune), do: {:ok, rows, runner, %{dataset_split: role}}
-  end
+  defp evaluation_data(nil, split, factory, limits),
+    do: {:ok, {:dataset, factory, split}, Map.put(limits, :dataset_split, split)}
 
   defp runner(%{runner: nil} = tune) do
     with {:ok, run_options} <- runtime_options(tune),
@@ -293,26 +287,14 @@ defmodule Tune.Pipeline.Compiler do
            role: :target,
            max_model_calls: Map.get(tune_case.metadata, :model_call_allowance)
          )
-       end}
+       end, target.signature}
     end
   end
 
-  defp runner(%{runner: :replay}), do: {:ok, &Tune.Replay.output/1}
+  defp runner(%{runner: :replay}), do: {:ok, &Tune.Replay.output/1, nil}
 
   defp runner(%{runner: runner, target: target}) do
-    {:ok, fn tune_case -> Tune.Search.Generic.invoke(runner, target, tune_case) end}
-  end
-
-  defp typed_cases(_signature, _rows, %{cases: 0}, _role), do: {:ok, [], true}
-
-  defp typed_cases(signature, rows, limits, role) do
-    {selected, truncated?} = Dataset.read(role, fn -> Dataset.select(rows, limits[:cases]) end)
-    Dataset.report(limits, role, :source, selected)
-
-    with {:ok, cases} <- Case.normalize_all(signature, selected) do
-      Dataset.report(limits, role, :effective, cases)
-      {:ok, cases, truncated?}
-    end
+    {:ok, fn tune_case -> Tune.Search.Generic.invoke(runner, target, tune_case) end, nil}
   end
 
   defp put_model_options(opts, models) do

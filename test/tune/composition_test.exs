@@ -288,17 +288,13 @@ defmodule Tune.CompositionTest do
       assert Transport.requests(stub) == []
     end
 
-    test "remaining time decreases and is passed as the request deadline" do
-      {:ok, execution} =
-        Tune.Runtime.new_execution(
-          Branching.new(),
-          elem(Tune.Runtime.normalize_options(model: model(:unused), timeout: 10_000), 1)
-        )
-
-      first = Execution.remaining_ms(execution)
-      Process.sleep(5)
-      assert Execution.remaining_ms(execution) < first
-      assert first <= 10_000
+    test "remaining time decreases during the execution" do
+      Execution.with_run(%{}, [models: %{}, timeout: 10_000], fn execution ->
+        first = Execution.remaining_ms(execution)
+        Process.sleep(5)
+        assert Execution.remaining_ms(execution) < first
+        assert first <= 10_000
+      end)
     end
 
     test "a missing role configuration is an error, not a silent fallback" do

@@ -80,4 +80,45 @@ defmodule Tune.GridSearchTest do
 
     assert {:error, %Tune.Error.Invalid.Option{option: :grid}} = Tune.tune(study)
   end
+
+  test "returns a case ID error before evaluating a grid with a malformed row" do
+    study =
+      Tune.new(%{x: 0}, run: fn _ -> flunk("target started") end)
+      |> Tune.data(validation: [%{id: %{}, input: :row}])
+      |> Tune.vary(x: 0..1)
+      |> Tune.score(:quality, & &1)
+      |> Tune.search(:grid)
+
+    assert {:error, %Tune.Error.Invalid.Definition{message: "row 0: invalid case ID"}} =
+             Tune.tune(study)
+  end
+
+  test "grid enumeration matches the reference order and exact evaluation limit" do
+    for size <- [2, 4, 6], step <- [1, 2], limit <- 0..15 do
+      values = size..1//-step
+
+      expected =
+        for mode <- [:fast, :slow], value <- values, do: %{mode: mode, value: value}
+
+      study =
+        Tune.new(%{mode: :fast, value: 1}, run: & &1.value)
+        |> Tune.data(validation: [nil])
+        |> Tune.score(:value, & &1)
+        |> Tune.vary(mode: [:fast, :slow, :fast], value: values)
+        |> Tune.search(:grid)
+        |> Tune.limit(evaluations: limit)
+
+      if limit == 0 do
+        assert {:error,
+                %Tune.Error.Optimization.Failed{
+                  report: %{history: [], stop_reason: :evaluation_limit}
+                }} = Tune.tune(study)
+      else
+        assert {:ok, result} = Tune.tune(study)
+        assert Enum.map(result.history, & &1.parameters) == Enum.take(expected, limit)
+        assert result.value == hd(expected)
+        assert result.complete? == limit >= length(expected)
+      end
+    end
+  end
 end

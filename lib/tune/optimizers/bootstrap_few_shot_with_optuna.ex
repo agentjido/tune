@@ -73,8 +73,7 @@ defmodule Tune.Optimizers.BootstrapFewShotWithOptuna do
     end
   end
 
-  @doc false
-  def apply_choice(program, demo_sets, choice) do
+  defp apply_choice(program, demo_sets, choice) do
     demos =
       Map.new(choice, fn {name, index} -> {name, Map.fetch!(Enum.at(demo_sets, index), name)} end)
 

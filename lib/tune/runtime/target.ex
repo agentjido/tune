@@ -4,17 +4,28 @@ defmodule Tune.Runtime.Target do
   alias Tune.Error
   alias Tune.Runtime
 
-  @enforce_keys [:program, :options]
-  defstruct [:program, :options]
+  @enforce_keys [:program, :signature, :parameters, :options]
+  defstruct @enforce_keys
 
-  @type t :: %__MODULE__{program: Tune.Program.t(), options: keyword()}
+  @type t :: %__MODULE__{
+          program: Tune.Program.t(),
+          signature: Tune.Signature.t(),
+          parameters: Tune.Program.parameters(),
+          options: keyword()
+        }
 
   @spec new(Tune.Program.t(), keyword()) :: {:ok, t()} | {:error, Exception.t()}
   def new(program, options) do
     with {:ok, options} <- normalize_options(options),
-         {:ok, _parameters} <- Tune.Program.parameters(program),
-         {:ok, _signature} <- Tune.Program.signature(program) do
-      {:ok, %__MODULE__{program: program, options: options}}
+         {:ok, parameters} <- Tune.Program.parameters(program),
+         {:ok, signature} <- Tune.Program.signature(program) do
+      {:ok,
+       %__MODULE__{
+         program: program,
+         signature: signature,
+         parameters: parameters,
+         options: options
+       }}
     end
   end
 
@@ -25,17 +36,15 @@ defmodule Tune.Runtime.Target do
       |> Keyword.put(:role, Keyword.get(opts, :role, Keyword.get(target.options, :role, :target)))
       |> put_allowance(Keyword.get(opts, :max_model_calls))
 
-    with {:ok, execution} <- Runtime.new_execution(target.program, options) do
-      case Runtime.run_with(target.program, input, execution) do
-        {:ok, prediction} ->
-          {:ok, prediction.output, prediction}
+    case Runtime.execute(target.program, target.signature, target.parameters, input, options) do
+      {:ok, prediction} ->
+        {:ok, prediction.output, prediction}
 
-        {:error, %Error.Execution.Failed{result: prediction} = error} ->
-          {:error, error, prediction}
+      {:error, %Error.Execution.Failed{result: prediction} = error} ->
+        {:error, error, prediction}
 
-        {:error, error} ->
-          {:error, error}
-      end
+      {:error, error} ->
+        {:error, error}
     end
   end
 

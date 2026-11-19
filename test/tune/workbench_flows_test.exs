@@ -35,7 +35,9 @@ defmodule Tune.WorkbenchFlowsTest do
           ]
         )
         |> Tune.data(data)
-        |> Tune.score(:accuracy, fn row, output -> if row.expected == output, do: 1, else: 0 end,
+        |> Tune.score(
+          :exact_match,
+          fn row, output -> if row.expected == output, do: 1, else: 0 end,
           argument: :output
         )
 
@@ -148,6 +150,14 @@ defmodule Tune.WorkbenchFlowsTest do
              submit(StudyLive.Data, editor, "data", %{"train" => ~s([{"labels":{}}])})
 
     assert render(StudyLive.Data, rejected) =~ "train row 1"
+    assert render(StudyLive.Data, rejected) =~ ~s(aria-describedby="data-train-error")
+    assert render(StudyLive.Data, editor) =~ "JSON example"
+
+    assert {:noreply, invalid_json} =
+             submit(StudyLive.Data, editor, "data", %{"validation" => "["})
+
+    assert invalid_json.assigns.error_split == :validation
+    assert render(StudyLive.Data, invalid_json) =~ ~s(aria-describedby="data-validation-error")
     assert Store.get_study(id).data.train == []
 
     assert {:noreply, editor} =
@@ -202,11 +212,43 @@ defmodule Tune.WorkbenchFlowsTest do
     assert preview =~ "Rendered messages"
 
     study = offline_study(%{}, %{test: [2], validation: [2]})
+    overview = render(StudyLive.Show, mount(StudyLive.Show, study.id))
+    assert overview =~ "Offline evaluation"
+    assert overview =~ "Set up first run"
+    assert overview =~ "No runs yet"
+
     assert {:ok, evaluated} = Runner.start(study, :evaluate)
     assert finished(evaluated.id).result.selected_score == 2
 
     assert {:ok, tuned} = Runner.start(study, :tune)
     assert %Tune.Artifact{} = finished(tuned.id).artifact
+
+    report = render(RunReport, mount(RunReport, tuned.id))
+    assert report =~ ~s(id="#{tuned.id}-score-chart")
+    assert report =~ ~s(id="#{tuned.id}-rows-chart")
+    assert report =~ ~s(<meter aria-hidden="true")
+    assert report =~ ">Best</dt>"
+    assert report =~ "Download JSON"
+
+    preflight = render(StudyLive.Run, mount(StudyLive.Run, study.id))
+    assert preflight =~ "Compare with baseline"
+    assert preflight =~ "test · 1 rows"
+    assert preflight =~ "/runs/#{tuned.id}"
+    assert preflight =~ "Search data"
+    assert preflight =~ "validation · 1 rows"
+    refute preflight =~ "Target model"
+    refute preflight =~ "Model-call limit"
+
+    other_study = offline_study(%{}, %{test: [3]})
+    assert {:ok, other_run} = Runner.start(other_study, :evaluate)
+    assert finished(other_run.id).status == :completed
+
+    overview = render(StudyLive.Show, mount(StudyLive.Show, study.id))
+    assert overview =~ "Set up next run"
+    assert overview =~ "Earlier runs (1)"
+    assert overview =~ "/runs/#{tuned.id}"
+    assert overview =~ "/runs/#{evaluated.id}"
+    refute overview =~ ~s(href="/runs/#{other_run.id}")
 
     dashboard = mount(Dashboard)
     html = render(Dashboard, dashboard)
@@ -267,6 +309,7 @@ defmodule Tune.WorkbenchFlowsTest do
     assert render(RunReport, report) =~ ~s(phx-click="cancel")
     assert {:noreply, report} = RunReport.handle_event("cancel", %{}, report)
     assert report.assigns.run.cancel_requested?
+    assert render(RunReport, report) =~ "Cancelling…"
     assert %{status: :cancelled, result: %{stop_reason: :cancelled}} = finished(run_id)
     refute Process.alive?(worker)
 
@@ -314,7 +357,12 @@ defmodule Tune.WorkbenchFlowsTest do
     assert {:ok, run} = Runner.start(study, :evaluate)
     assert %{status: :completed, result: %{selected_score: 1.0}} = finished(run.id)
     assert [_] = Transport.requests(stub)
-    assert render(RunReport, mount(RunReport, run.id)) =~ "15 tokens"
+    report = render(RunReport, mount(RunReport, run.id))
+    assert report =~ "15 tokens"
+    assert report =~ "Row 0 details"
+    assert report =~ ">Match</td>"
+    assert report =~ "Model responses"
+    assert report =~ "Where is the Eiffel Tower?"
 
     diagnostics = mount(Diagnostics)
     html = render(Diagnostics, diagnostics)
@@ -323,10 +371,48 @@ defmodule Tune.WorkbenchFlowsTest do
     assert html =~ "openai:gpt-4-turbo"
     assert html =~ "ReqLLM diagnostics"
     refute html =~ "test-secret-key"
+    assert html =~ ~s(href="/runs/#{run.id}")
+
+    assert {:noreply, filtered} =
+             Diagnostics.handle_event("filter", %{"query" => " GPT-4-TURBO "}, diagnostics)
+
+    assert [%{models: models}] = filtered.assigns.filtered_providers
+    assert "openai:gpt-4-turbo" in models
+
+    assert {:noreply, scoped} =
+             Diagnostics.handle_event(
+               "filter",
+               %{"query" => "", "provider" => "openai"},
+               diagnostics
+             )
+
+    assert [%{name: "openai"}] = scoped.assigns.filtered_providers
+    assert render(Diagnostics, scoped) =~ "model=openai%3Agpt-4-turbo"
+
+    assert {:ok, new_study} =
+             StudyLive.New.mount(
+               %{"model" => "openai:gpt-4-turbo"},
+               %{},
+               %Phoenix.LiveView.Socket{}
+             )
+
+    assert new_study.assigns.form[:model].value == "openai:gpt-4-turbo"
+
+    assert {:noreply, empty} =
+             Diagnostics.handle_event("filter", %{"query" => "no-such-model-id"}, filtered)
+
+    assert render(Diagnostics, empty) =~ "No providers or models match this search."
+    assert {:noreply, cleared} = Diagnostics.handle_event("clear", %{}, empty)
+    assert cleared.assigns.filtered_providers == diagnostics.assigns.filtered_providers
 
     assert {:noreply, refreshed} = Diagnostics.handle_event("scan", %{}, diagnostics)
     assert refreshed.assigns.verified_count == 1
-    assert refreshed.assigns.scanned_at >= diagnostics.assigns.scanned_at
+
+    assert DateTime.compare(refreshed.assigns.scanned_at, diagnostics.assigns.scanned_at) in [
+             :gt,
+             :eq
+           ]
+
     assert Transport.requests(stub) == []
   end
 

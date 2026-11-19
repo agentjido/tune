@@ -3,6 +3,12 @@
 `Tune.search/3` selects a strategy. It does not start the search. `Tune.tune/1`
 validates and runs the full pipeline.
 
+Use `:grid` to test a short list of settings, such as the support ticket
+threshold in [Getting started](getting_started.md#search-plain-elixir-values).
+Use `:genetic` for a larger search space with a set evaluation limit. For a
+typed predictor with labeled training examples, start with
+`:labeled_few_shot` to test whether adding demonstrations helps.
+
 ```elixir
 {:ok, result} =
   Tune.new(program, model: target, teacher: teacher, proposal: proposal)
@@ -114,7 +120,7 @@ study =
 {:ok, comparison} = Tune.compare(study, winner, split: :test)
 ```
 
-Run the [grid search example](../examples/03_evolution/03_01_batch_grid/README.md)
+Run the [grid search example](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/03_evolution/03_01_batch_grid)
 from the Tune root.
 
 ```sh
@@ -164,8 +170,8 @@ transport retries within a call. An opaque runner owns external calls and
 detached resources. Keep data factories and variation callbacks bounded so the
 study can reach its worker deadline and cancellation checks.
 
-Run the [seeded word search](../examples/03_evolution/03_02_evolve_string/README.md)
-and [hyperparameter reload](../examples/03_evolution/03_05_axon_training/README.md)
+Run the [seeded word search](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/03_evolution/03_02_evolve_string)
+and [hyperparameter reload](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/03_evolution/03_05_axon_training)
 demos from the Tune root.
 
 ```sh

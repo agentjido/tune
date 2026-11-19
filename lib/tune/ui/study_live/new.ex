@@ -4,12 +4,13 @@ if Code.ensure_loaded?(PhoenixPlayground) do
     use Tune.UI.Web, :live_view
 
     @impl true
-    def mount(_params, _session, socket) do
+    def mount(query, _session, socket) do
       recipes = Tune.UI.Registry.all()
       recipe = hd(recipes)
 
       params =
         recipe.default_config()
+        |> prefill_model(query["model"])
         |> Map.merge(%{
           "name" => "New structured prompt",
           "recipe" => recipe.id(),
@@ -26,6 +27,12 @@ if Code.ensure_loaded?(PhoenixPlayground) do
          error: nil
        )}
     end
+
+    defp prefill_model(config, model) when is_binary(model) and byte_size(model) in 1..512 do
+      Map.put(config, "model", model)
+    end
+
+    defp prefill_model(config, _model), do: config
 
     @impl true
     def handle_event("save", %{"study" => params}, socket) do

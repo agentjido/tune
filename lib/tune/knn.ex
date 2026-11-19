@@ -157,7 +157,7 @@ defmodule Tune.KNN do
 
   defp bootstrap(program, neighbors, names, execution) do
     Enum.reduce(neighbors, {%{}, execution}, fn neighbor, {acc, execution} ->
-      before = length(execution.steps)
+      before = length(Execution.steps(execution))
       teacher = Shared.without_row_demos(program.inner, neighbor)
 
       case Execution.call_program(execution, teacher, neighbor.input,
@@ -165,11 +165,10 @@ defmodule Tune.KNN do
              scope: @scope
            ) do
         {:ok, _output, execution} ->
-          new_steps =
-            execution.steps |> Enum.take(length(execution.steps) - before) |> Enum.reverse()
-
           demos =
-            new_steps
+            execution
+            |> Execution.steps()
+            |> Enum.drop(before)
             |> Enum.map(&%{&1 | name: String.replace_prefix(&1.name, @scope <> ".", "")})
             |> then(&Shared.trajectory_demos(%Tune.Prediction{steps: &1}, names))
 

@@ -9,8 +9,8 @@ defmodule Tune.Search.Study do
 
   alias Tune.Candidate
   alias Tune.Evaluation
-  alias Tune.Prediction
   alias Tune.Result
+  alias Tune.RunLimits
 
   defstruct [
     :budget,
@@ -44,7 +44,7 @@ defmodule Tune.Search.Study do
     %__MODULE__{
       budget: max_model_calls,
       max_model_calls: max_model_calls,
-      expires_at: if(is_integer(deadline), do: now() + deadline),
+      expires_at: RunLimits.expiration(deadline),
       rand: :rand.seed_s(:exsss, seed),
       seed: seed,
       limits: limits,
@@ -59,11 +59,8 @@ defmodule Tune.Search.Study do
   @spec limit_reason(t()) :: atom() | nil
   def limit_reason(%__MODULE__{} = study) do
     cond do
-      study.limits[:cancel] && study.limits.cancel.() ->
-        :cancelled
-
-      remaining_deadline(study) == 0 ->
-        :deadline
+      reason = RunLimits.stop_reason(study.expires_at, study.limits[:cancel]) ->
+        reason
 
       study.budget == 0 ->
         :model_call_limit
@@ -100,21 +97,7 @@ defmodule Tune.Search.Study do
   @spec remaining_deadline(t()) :: non_neg_integer() | nil
   def remaining_deadline(%__MODULE__{expires_at: nil}), do: nil
 
-  def remaining_deadline(%__MODULE__{expires_at: expires_at}), do: max(expires_at - now(), 0)
-
-  @spec account(t(), Prediction.t()) :: t()
-  def account(%__MODULE__{} = study, %Prediction{} = prediction) do
-    used = Prediction.total_calls(prediction)
-    tokens = Prediction.token_totals(prediction)
-
-    %{
-      study
-      | calls: merge_counts(study.calls, prediction.calls),
-        budget: subtract(study.budget, used),
-        usage: add_usage(study.usage, tokens),
-        successful_models: merge_models(study, Prediction.successful_models(prediction))
-    }
-  end
+  def remaining_deadline(%__MODULE__{expires_at: expires_at}), do: RunLimits.remaining(expires_at)
 
   @spec evaluation_limits(t()) :: map()
   def evaluation_limits(%__MODULE__{} = study) do
@@ -179,8 +162,7 @@ defmodule Tune.Search.Study do
     {candidate, record_candidate(study, candidate)}
   end
 
-  @spec record_candidate(t(), Candidate.t()) :: t()
-  def record_candidate(%__MODULE__{} = study, %Candidate{} = candidate) do
+  defp record_candidate(study, candidate) do
     best =
       if eligible?(candidate) and better?(candidate, study.best),
         do: candidate,
@@ -191,10 +173,6 @@ defmodule Tune.Search.Study do
 
   @spec incumbent(t()) :: Candidate.t() | nil
   def incumbent(%__MODULE__{best: best}), do: best
-
-  @spec best_evaluation(t()) :: Evaluation.t() | nil
-  def best_evaluation(%__MODULE__{best: %Candidate{evaluation: evaluation}}), do: evaluation
-  def best_evaluation(%__MODULE__{}), do: nil
 
   @spec result(t(), term(), map(), keyword()) :: Result.t()
   def result(%__MODULE__{} = study, value, parameters, opts \\ []) do
@@ -281,8 +259,6 @@ defmodule Tune.Search.Study do
 
   defp better?(candidate, best),
     do: candidate.evaluation.selected_score > best.evaluation.selected_score
-
-  defp now, do: System.monotonic_time(:millisecond)
 
   defp evaluation_limit?(%__MODULE__{limits: limits, evaluations: evaluations}) do
     case Map.get(limits, :evaluations) do

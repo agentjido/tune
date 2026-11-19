@@ -164,9 +164,6 @@ defmodule Tune.Search.Program.Context do
     end
   end
 
-  @spec best_evaluation(t()) :: Evaluation.t() | nil
-  def best_evaluation(%__MODULE__{study: study}), do: Study.best_evaluation(study)
-
   @spec stop(t(), atom()) :: t()
   def stop(%__MODULE__{} = ctx, reason), do: %{ctx | study: Study.stop(ctx.study, reason)}
 
@@ -210,10 +207,6 @@ defmodule Tune.Search.Program.Context do
 
     Error.Execution.LimitReached.exception(limit: limit, message: message)
   end
-
-  @spec account_evaluation(t(), Evaluation.t()) :: t()
-  def account_evaluation(%__MODULE__{} = ctx, %Evaluation{} = evaluation),
-    do: %{ctx | study: Study.account_evaluation(ctx.study, evaluation)}
 
   @spec score(t(), Case.t(), Tune.Prediction.t()) ::
           {{:ok, %{score: number(), feedback: String.t() | nil}} | {:error, term()}, t()}

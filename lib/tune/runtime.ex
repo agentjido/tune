@@ -42,38 +42,31 @@ defmodule Tune.Runtime do
           {:ok, Prediction.t()} | {:error, Exception.t()}
   def run(program, inputs, opts) when is_list(opts) do
     with {:ok, run_opts} <- normalize_options(opts),
-         {:ok, execution} <- new_execution(program, run_opts) do
-      run_with(program, inputs, execution)
+         {:ok, parameters} <- Program.parameters(program),
+         {:ok, signature} <- Program.signature(program) do
+      execute(program, signature, parameters, inputs, run_opts)
     end
   end
 
   @doc false
-  @spec run_with(Program.t(), map(), Execution.t()) ::
+  @spec execute(Program.t(), Signature.t(), Program.parameters(), map(), keyword()) ::
           {:ok, Prediction.t()} | {:error, Exception.t()}
-  def run_with(program, inputs, %Execution{} = execution) do
-    with {:ok, signature} <- Program.signature(program),
-         {:ok, inputs} <- Signature.normalize_inputs(signature, inputs) do
-      case Program.invoke(program, inputs, execution) do
-        {:ok, output, execution} ->
-          validate_output(signature, output, execution)
+  def execute(program, signature, parameters, inputs, options) do
+    with {:ok, inputs} <- Signature.normalize_inputs(signature, inputs) do
+      Execution.with_run(parameters, options, fn execution ->
+        case Program.invoke(program, inputs, execution) do
+          {:ok, output, execution} ->
+            validate_output(signature, output, execution)
 
-        {:error, cause, execution} ->
-          {:error,
-           Error.Execution.Failed.exception(
-             cause: cause,
-             result: Execution.prediction(execution, nil),
-             step: Execution.last_failure(execution)
-           )}
-      end
-    end
-  end
-
-  @doc false
-  @spec new_execution(Program.t(), keyword()) ::
-          {:ok, Execution.t()} | {:error, Exception.t()}
-  def new_execution(program, run_opts) do
-    with {:ok, parameters} <- Program.parameters(program) do
-      {:ok, Execution.new(parameters, run_opts)}
+          {:error, cause, execution} ->
+            {:error,
+             Error.Execution.Failed.exception(
+               cause: cause,
+               result: Execution.prediction(execution, nil),
+               step: Execution.last_failure(execution)
+             )}
+        end
+      end)
     end
   end
 

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    uses: agentjido/github-actions/.github/workflows/jido-ci.yml@fa16d77ff51210b52c1c283e96875eb9d5ca668c # v5
+    with:
+      quality_otp_version: "29"
+      quality_elixir_version: "1.20.4"
+      test_matrix: '[{"otp":"27","elixir":"1.18.4"},{"otp":"29","elixir":"1.20.4"}]'
+      changelog_guard: false
+      docs_command: mix docs && bash .github/scripts/check-docs.sh
+
+  package:
+    name: Package install
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20.4"
+      - run: mix deps.get
+      - run: bash .github/scripts/check-package.sh "$RUNNER_TEMP/tune-hex"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tune-hex
+          path: ${{ runner.temp }}/tune-hex

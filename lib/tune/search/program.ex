@@ -13,6 +13,7 @@ defmodule Tune.Search.Program do
   @spec run(Tune.t(), {module(), keyword()}, map()) :: {:ok, Result.t()} | {:error, Exception.t()}
   def run(%Tune{target: program} = tune, {module, options}, limits) do
     study = Study.new(limits: limits, seed: Map.get(limits, :seed, 0))
+    dataset_limits = Study.evaluation_limits(study)
 
     with {:ok, config} <- optimizer_config(module, options),
          {:ok, requirements} <- requirements(module, config),
@@ -22,11 +23,12 @@ defmodule Tune.Search.Program do
          {:ok, signature} <- Tune.Program.signature(program),
          {:ok, _parameters} <- Tune.Program.parameters(program),
          :ok <- check_start(study),
-         {:ok, train} <- load_split(signature, tune.data, :train, requirements, limits),
+         {:ok, train} <- load_split(signature, tune.data, :train, requirements, dataset_limits),
          {train, duplicates} <- deduplicate_train(train),
          :ok <- report_split(tune.data, :train, train, limits),
          :ok <- check_start(study),
-         {:ok, validation} <- load_split(signature, tune.data, :validation, requirements, limits),
+         {:ok, validation} <-
+           load_split(signature, tune.data, :validation, requirements, dataset_limits),
          :ok <- report_split(tune.data, :validation, validation, limits),
          :ok <- check_start(study),
          :ok <- check_overlap(train, validation) do
@@ -71,6 +73,8 @@ defmodule Tune.Search.Program do
       {:error, _error} = error ->
         error
     end
+  rescue
+    error in Error.Invalid.Dataset -> {:error, error}
   end
 
   defp check_start(study) do
@@ -213,10 +217,9 @@ defmodule Tune.Search.Program do
   end
 
   defp snapshot(signature, factory, limits, role) do
-    rows = factory.() |> Dataset.prefix(limits[:cases]) |> Dataset.capture_source(limits, role)
-    Case.normalize_all(signature, rows)
-  rescue
-    error -> option_error(:data, "could not read data: #{Exception.message(error)}")
+    with {:ok, rows, _truncated?} <- Dataset.snapshot(factory, role, limits, :prefix) do
+      Case.normalize_all(signature, rows)
+    end
   end
 
   defp check_overlap(train, validation) do

@@ -1,14 +1,17 @@
 defmodule Tune.Execution do
   @moduledoc """
-  Immutable per-run state threaded through application program code.
+  Per-run state threaded through application program code.
 
   It holds the program's named parameters, the fixed model configuration for
   each role, the active role, the managed call allowance, the step limit, the
   deadline, and every completed step and failed call. Application code passes
   it through `predict/3` and `value/2` and returns the updated value.
 
-  Every managed model call is counted before dispatch, including calls that
-  fail. Work done by application code outside these functions is not managed.
+  All versions of the state share the run's call and response records.
+  Each call counts before dispatch, including calls that fail. Call
+  `predict/3` and `call_program/4` from the process running the program,
+  before its callback returns. Use evaluation concurrency to run independent
+  cases in parallel.
   """
 
   alias Tune.Error
@@ -16,22 +19,18 @@ defmodule Tune.Execution do
   alias Tune.Parameter
   alias Tune.Prediction
   alias Tune.Predictor
+  alias Tune.RunLimits
 
   @roles [:target, :teacher, :proposal]
-
-  @enforce_keys [:parameters, :models, :role]
+  @enforce_keys [:parameters, :models, :role, :journal]
   defstruct parameters: %{},
             models: %{},
             role: :target,
             max_model_calls: nil,
-            calls: %{},
+            journal: nil,
             max_steps: 32,
-            steps_taken: 0,
             deadline: nil,
-            scope: [],
-            steps: [],
-            responses: [],
-            failures: []
+            scope: []
 
   @type role :: :target | :teacher | :proposal
 
@@ -40,14 +39,10 @@ defmodule Tune.Execution do
           models: %{optional(role()) => ModelConfig.t()},
           role: role(),
           max_model_calls: non_neg_integer() | nil,
-          calls: %{optional(role()) => non_neg_integer()},
+          journal: :ets.tid(),
           max_steps: pos_integer(),
-          steps_taken: non_neg_integer(),
           deadline: integer() | nil,
-          scope: [String.t()],
-          steps: [Tune.Step.t()],
-          responses: [map()],
-          failures: [Prediction.failure()]
+          scope: [String.t()]
         }
 
   @doc "Returns the managed roles."
@@ -55,18 +50,26 @@ defmodule Tune.Execution do
   def roles, do: @roles
 
   @doc false
-  @spec new(map(), keyword()) :: t()
-  def new(parameters, opts) do
+  @spec with_run(map(), keyword(), (t() -> result)) :: result when result: var
+  def with_run(parameters, opts, operation) do
     timeout = Keyword.get(opts, :timeout, 60_000)
 
-    %__MODULE__{
+    execution = %__MODULE__{
       parameters: parameters,
       models: Keyword.fetch!(opts, :models),
       role: Keyword.get(opts, :role, :target),
+      journal: :ets.new(__MODULE__, [:private]),
       max_model_calls: Keyword.get(opts, :max_model_calls),
       max_steps: Keyword.get(opts, :max_steps, 32),
-      deadline: if(timeout == :infinity, do: nil, else: now() + timeout)
+      deadline: RunLimits.expiration(timeout)
     }
+
+    try do
+      :ets.insert(execution.journal, calls: %{}, steps: [], responses: [], failures: [])
+      operation.(execution)
+    after
+      :ets.delete(execution.journal)
+    end
   end
 
   @doc """
@@ -77,18 +80,26 @@ defmodule Tune.Execution do
   """
   @spec predict(t(), String.t(), map()) :: {:ok, map(), t()} | {:error, term(), t()}
   def predict(%__MODULE__{} = execution, name, inputs) when is_binary(name) do
+    case active(execution) do
+      :ok -> predict_in_run(execution, name, inputs)
+      {:error, error} -> {:error, error, execution}
+    end
+  end
+
+  defp predict_in_run(execution, name, inputs) do
     with {:ok, predictor} <- fetch(execution, name, Predictor),
          {:ok, config} <- model(execution),
          :ok <- check_limits(execution),
-         {:ok, prepared} <- Predictor.prepare(predictor, inputs, config) do
-      execution = count_call(execution)
+         {:ok, prepared} <- Predictor.prepare(predictor, inputs, config),
+         :ok <- check_limits(execution) do
+      count_call(execution)
 
       case Predictor.execute(prepared, config, remaining_ms(execution)) do
         {:ok, response} -> finish_step(execution, name, prepared, response, config.model_id)
-        {:error, error} -> {:error, error, record_failure(execution, name, error)}
+        {:error, error} -> failure(execution, name, error)
       end
     else
-      {:error, error} -> {:error, error, record_failure(execution, name, error)}
+      {:error, error} -> failure(execution, name, error)
     end
   end
 
@@ -99,15 +110,16 @@ defmodule Tune.Execution do
       usage: ReqLLM.Response.usage(response)
     }
 
-    execution = %{execution | responses: [evidence | execution.responses]}
+    record(execution, :responses, evidence)
 
     case Predictor.finish(prepared, response) do
       {:ok, step} ->
         step = %{step | name: qualified(execution, name), role: execution.role}
-        {:ok, step.outputs, %{execution | steps: [step | execution.steps]}}
+        record(execution, :steps, step)
+        {:ok, step.outputs, execution}
 
       {:error, error} ->
-        {:error, error, record_failure(execution, name, error)}
+        failure(execution, name, error)
     end
   end
 
@@ -131,7 +143,8 @@ defmodule Tune.Execution do
     role = Keyword.get(opts, :role, execution.role)
     scope = Keyword.get(opts, :scope)
 
-    with {:ok, parameters} <- Tune.Program.parameters(program),
+    with :ok <- active(execution),
+         {:ok, parameters} <- Tune.Program.parameters(program),
          {:ok, signature} <- Tune.Program.signature(program),
          {:ok, inputs} <- Tune.Signature.normalize_inputs(signature, inputs) do
       nested = %{
@@ -166,29 +179,49 @@ defmodule Tune.Execution do
 
   @doc "Returns attempted managed calls across roles."
   @spec total_calls(t()) :: non_neg_integer()
-  def total_calls(%__MODULE__{calls: calls}), do: calls |> Map.values() |> Enum.sum()
+  def total_calls(%__MODULE__{} = execution),
+    do: execution |> trace(:calls) |> Map.values() |> Enum.sum()
 
   @doc "Returns milliseconds until the deadline, or `nil` without one."
   @spec remaining_ms(t()) :: non_neg_integer() | nil
   def remaining_ms(%__MODULE__{deadline: nil}), do: nil
-  def remaining_ms(%__MODULE__{deadline: deadline}), do: max(deadline - now(), 0)
+  def remaining_ms(%__MODULE__{deadline: deadline}), do: RunLimits.remaining(deadline)
+
+  @doc "Returns the completed steps in call order during the active program."
+  @spec steps(t()) :: [Tune.Step.t()]
+  def steps(%__MODULE__{} = execution), do: execution |> trace(:steps) |> Enum.reverse()
 
   @doc false
   @spec prediction(t(), map() | nil) :: Prediction.t()
   def prediction(%__MODULE__{} = execution, output) do
     %Prediction{
       output: output,
-      steps: Enum.reverse(execution.steps),
-      failures: Enum.reverse(execution.failures),
-      calls: execution.calls,
-      metadata: %{responses: Enum.reverse(execution.responses)}
+      steps: steps(execution),
+      failures: execution |> trace(:failures) |> Enum.reverse(),
+      calls: trace(execution, :calls),
+      metadata: %{responses: execution |> trace(:responses) |> Enum.reverse()}
     }
   end
 
   @doc false
   @spec last_failure(t()) :: String.t() | nil
-  def last_failure(%__MODULE__{failures: [%{name: name} | _]}), do: name
-  def last_failure(%__MODULE__{}), do: nil
+  def last_failure(%__MODULE__{} = execution) do
+    case trace(execution, :failures) do
+      [%{name: name} | _] -> name
+      [] -> nil
+    end
+  end
+
+  defp active(execution) do
+    if :ets.info(execution.journal, :owner) == self() do
+      :ok
+    else
+      {:error,
+       Error.Execution.Callback.exception(
+         message: "managed calls require the active program process"
+       )}
+    end
+  end
 
   defp fetch(execution, name, kind) do
     case Map.fetch(execution.parameters, name) do
@@ -223,14 +256,16 @@ defmodule Tune.Execution do
   end
 
   defp check_limits(execution) do
+    used = total_calls(execution)
+
     cond do
-      execution.steps_taken >= execution.max_steps ->
+      used >= execution.max_steps ->
         limit(:steps, "step limit of #{execution.max_steps} reached")
 
-      execution.deadline != nil and remaining_ms(execution) <= 0 ->
+      remaining_ms(execution) == 0 ->
         limit(:deadline, "run deadline reached")
 
-      remaining_calls(execution) == 0 ->
+      is_integer(execution.max_model_calls) and used >= execution.max_model_calls ->
         limit(:model_calls, "model call limit of #{execution.max_model_calls} reached")
 
       true ->
@@ -242,20 +277,26 @@ defmodule Tune.Execution do
     do: {:error, Error.Execution.LimitReached.exception(limit: kind, message: message)}
 
   defp count_call(execution) do
-    %{
-      execution
-      | calls: Map.update(execution.calls, execution.role, 1, &(&1 + 1)),
-        steps_taken: execution.steps_taken + 1
-    }
+    calls = execution |> trace(:calls) |> Map.update(execution.role, 1, &(&1 + 1))
+    :ets.insert(execution.journal, {:calls, calls})
   end
 
-  defp record_failure(execution, name, error) do
-    failure = %{name: qualified(execution, name), role: execution.role, error: error}
-    %{execution | failures: [failure | execution.failures]}
+  defp trace(execution, name), do: :ets.lookup_element(execution.journal, name, 2)
+
+  defp record(execution, name, item) do
+    :ets.insert(execution.journal, {name, [item | trace(execution, name)]})
+  end
+
+  defp failure(execution, name, error) do
+    record(execution, :failures, %{
+      name: qualified(execution, name),
+      role: execution.role,
+      error: error
+    })
+
+    {:error, error, execution}
   end
 
   defp qualified(%__MODULE__{scope: []}, name), do: name
   defp qualified(%__MODULE__{scope: scope}, name), do: Enum.join(scope ++ [name], ".")
-
-  defp now, do: System.monotonic_time(:millisecond)
 end

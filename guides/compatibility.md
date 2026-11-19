@@ -98,7 +98,7 @@ reject tensors, Axon models, functions, processes, ports, and references.
 
 - **DSPy.** Tune uses Zoi-typed Elixir programs, explicit data splits, and
   separate target, teacher, and proposal roles. The
-  [DSPy workflow lessons](../examples/01_dspy/README.md) test the optimizer
+  [DSPy workflow lessons](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/01_dspy) test the optimizer
   contracts and candidate evidence with deterministic transport.
 - **Imp.** Imp exposes module macros, agent loops, and supervised agents.
   Tune uses ordinary Elixir functions for program composition and leaves
@@ -107,12 +107,12 @@ reject tensors, Axon models, functions, processes, ports, and references.
   permutation, and parameter genomes. Tune supports named variation spaces
   and application-owned genome callbacks. Its generation snapshots report
   complete and interrupted populations. See the
-  [evolution lessons](../examples/03_evolution/README.md).
+  [evolution lessons](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/03_evolution).
 - **Jido Eval.** Jido Eval exposes its own dataset types and metric harness.
   Tune replays saved `input` and `output` rows from an Elixir Enumerable. It
   reports independent metrics and judge calls. The host owns parsing,
   transcript rules, report delivery, and persistence. See the
-  [evaluation lessons](../examples/04_eval/README.md).
+  [evaluation lessons](https://github.com/mikehostetler/tune/tree/v0.5.0/examples/04_eval).
 
 ### Automatic feedback-driven mutation
 

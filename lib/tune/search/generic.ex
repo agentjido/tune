@@ -7,23 +7,22 @@ defmodule Tune.Search.Generic do
   alias Tune.Evaluator
   alias Tune.Search.Study
 
-  def snapshot(factory, study, strategy) do
+  def snapshot(factory, study) do
     if Study.exhausted?(study) do
-      {:ok, {[], false}}
+      {{[], false}, study}
     else
-      {rows, truncated?} = Dataset.select(factory.(), study.limits[:cases])
-      Dataset.report(study.limits, :validation, :source, rows)
-      cases = Enum.with_index(rows, &Case.normalize/2)
-      Dataset.report(study.limits, :validation, :effective, cases)
-      {:ok, {cases, truncated?}}
+      limits = Study.evaluation_limits(study)
+
+      case Dataset.snapshot(factory, :validation, limits) do
+        {:ok, rows, truncated?} ->
+          cases = Enum.with_index(rows, &Case.normalize/2)
+          Dataset.report(limits, :validation, :effective, cases)
+          {{cases, truncated?}, study}
+
+        {:stopped, reason} ->
+          {{[], false}, Study.stop(study, reason)}
+      end
     end
-  rescue
-    error ->
-      {:error,
-       Error.Invalid.Option.exception(
-         option: strategy,
-         message: "could not read validation data: #{Exception.message(error)}"
-       )}
   end
 
   def evaluate({cases, truncated?}, runner, target, scores, selector, limits) do
