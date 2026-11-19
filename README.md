@@ -160,9 +160,9 @@ search, prompt tuning, retrieval scoring, and agent evaluation suites.
 The source repository has numbered examples that run offline with local
 fixtures or scripted ReqLLM replies:
 
-- [All offline examples](https://github.com/agentjido/tune/tree/v0.5.0/examples)
-- [Typed prompt inspection](https://github.com/agentjido/tune/tree/v0.5.0/examples/01_dspy/01_01_extract_ticket)
-- [Grid search with paired comparison](https://github.com/agentjido/tune/tree/v0.5.0/examples/03_evolution/03_01_batch_grid)
+- [All offline examples](https://github.com/agentjido/tune/tree/v0.5.1/examples)
+- [Typed prompt inspection](https://github.com/agentjido/tune/tree/v0.5.1/examples/01_dspy/01_01_extract_ticket)
+- [Grid search with paired comparison](https://github.com/agentjido/tune/tree/v0.5.1/examples/03_evolution/03_01_batch_grid)
 
 From a source checkout, this demo tunes a question-answering prompt and
 reports held-out accuracy and model calls:
